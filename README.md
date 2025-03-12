@@ -371,7 +371,7 @@ Include supporting information such as code snippets, screenshots, or examples t
 4. **Suggested Resolution:**
 Provide recommendations or insights regarding potential fixes or mitigations, if available.
 5. **Secure Reporting:**
-Submit your security vulnerability reports securely via email to `[security@example.com]`. Please avoid submitting sensitive information through public channels or issue trackers.
+Submit your security vulnerability reports securely via email to `[help@openqrm-enterprise.com.au]`. Please avoid submitting sensitive information through public channels or issue trackers.
 
 Our security team analyzes reported vulnerabilities, confirms their validity, and promptly communicates findings with the reporter. We ensure confidentiality and proper handling of every submitted issue.
 Thank you for helping us keep our systems secure!
