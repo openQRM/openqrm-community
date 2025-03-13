@@ -1,0 +1,125 @@
+/* Edit */
+.htmlobject_table .htmlobject_td.state {
+	width: 60px;
+	vertical-align:top;
+}
+.htmlobject_table .htmlobject_td.data,
+.htmlobject_table .htmlobject_td.appliance {
+	width: 300px;
+	vertical-align:top;
+}
+.htmlobject_table .htmlobject_th.pv,
+.htmlobject_table .htmlobject_td.pv,
+.htmlobject_table .htmlobject_th.lv,
+.htmlobject_table .htmlobject_td.lv,
+.htmlobject_table .htmlobject_th.sn,
+.htmlobject_table .htmlobject_td.sn {
+	width: 30px;
+	vertical-align:top;
+	text-align: center;
+}
+.htmlobject_table .htmlobject_th.name,
+.htmlobject_table .htmlobject_td.name {
+	width: 120px;
+	vertical-align:top;
+	text-align: left;
+}
+.htmlobject_table .htmlobject_th.vsize,
+.htmlobject_table .htmlobject_td.vsize,
+.htmlobject_table .htmlobject_th.vfree,
+.htmlobject_table .htmlobject_td.vfree {
+	width: 110px;
+	vertical-align:top;
+	text-align: left;
+}
+.htmlobject_table .htmlobject_th.attr,
+.htmlobject_table .htmlobject_td.attr {
+	vertical-align:top;
+	text-align: center;
+}
+.htmlobject_table .htmlobject_td.progress {
+	vertical-align:top;
+}
+.htmlobject_table .htmlobject_td.action {
+	width: 110px;
+	vertical-align:top;
+}
+.htmlobject_table .htmlobject_td.action a{
+	display: block;
+	text-align: left;
+}
+#addbuttons {
+	float: right;
+	margin: 0 30px 0 0;
+}
+#kvm_edit .row {
+	margin: 0 0 20px 0;
+}
+
+/* Add / Update */
+#net0_box .left,
+#net1_box .left,
+#net2_box .left,
+#net3_box .left,
+#net4_box .left {
+	float: right;
+	width: auto;
+}
+#net0_box .right,
+#net1_box .right,
+#net2_box .right,
+#net3_box .right,
+#net4_box .right {
+	float: right;
+	padding: 3px 8px 0 0;
+}
+#boot_iso_box {
+	width: 250px;
+	float: left;
+}
+#cdrom_box,
+#iso_path_box{
+	float:left;
+}
+#iso_path_box.htmlobject_box .left{
+	width: 60px;
+}
+.browse-button {
+	margin: 3px 0 0 15px;
+}
+.netbox {
+	display: block;
+	clear: both;
+	padding: 5px 0 10px 24px;
+	/* border-top: 1px solid #ccc; */
+}
+/* Progressbar */
+.ui-progressbar { width:280px; margin: 25px 0 0 0; }
+.progress_watcher { width:280px; text-align: center; }
+
+/* Sysinfo */
+#kvm-sysinfo pre {
+	overflow:auto;
+	white-space: pre;
+	word-break: break-all;
+	word-wrap: break-word;
+	color: #000;
+}
+#kvm-sysinfo b {
+	padding: 0 0 15px 0;
+	display: block;
+}
+
+.vm_vncpasswd {
+	width: 60px;
+	height: 10px ! important;
+	margin: 0 ! important;
+}
+
+
+.vm_vnctoggle {
+	height: 17px ! important;
+	padding-bottom: 0 ! important;
+	padding-top: 0 ! important;
+
+}

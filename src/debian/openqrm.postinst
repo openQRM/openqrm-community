@@ -1,0 +1,254 @@
+#!/bin/bash
+# openQRM postinstall script - needs bash to source openqrm-functions
+#
+# This file is part of openQRM.
+#
+# openQRM is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2
+# as published by the Free Software Foundation.
+#
+# openQRM is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with openQRM.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Copyright 2011, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+
+NAME="openqrm"
+DESC="openQRM Cloud Computing Platform"
+LOGDIR=/var/log/$NAME
+LANG=C
+. /lib/lsb/init-functions
+
+if [ -f /etc/default/$NAME ] ; then
+    . /etc/default/$NAME
+else
+    OPENQRM_SERVER_BASE_DIR="/usr/share"
+fi
+export OPENQRM_SERVER_BASE_DIR
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+
+set -e
+
+
+# a function to validate an ip address
+openqrm_validate_ip() {
+	IP_A=$1
+	OLDIFS=$IFS
+	IFS=.
+	set -- $IP_A
+	if [ "$#" -ne "4" ]; then
+		return 1
+	fi
+
+	for oct in $1 $2 $3 $4; do
+		echo $oct | egrep "^[0-9]+$" >/dev/null 2>&1
+		if [ "$?" -ne "0" ]; then
+			return 1
+		else
+			if [ "$oct" -lt "0" -o "$oct" -gt "255" ]; then
+				return 1
+			fi
+		fi
+	done
+	echo "$IP_A" | grep "\.$" >/dev/null 2>&1
+	if [ "$?" -eq "0" ]; then
+		return 1
+	fi
+	IFS=$OLDIFS
+	return 0
+}
+
+
+case "$1" in
+    configure)
+
+		# is this an update ?
+		if [ -f "$OPENQRM_SERVER_BASE_DIR/openqrm_pre_update/etc/openqrm-server.conf" ]; then
+			if [ -x "$OPENQRM_SERVER_BASE_DIR/openqrm/bin/openqrm-update" ]; then
+				$OPENQRM_SERVER_BASE_DIR/openqrm/bin/openqrm-update base -f
+				$OPENQRM_SERVER_BASE_DIR/openqrm/bin/openqrm-update post -f
+				$OPENQRM_SERVER_BASE_DIR/openqrm/bin/openqrm-update initrds -f
+			fi
+		else
+			# it is a fresh install
+			# make sure apache is up + running
+			if ! ps ax | grep apache2 | grep -v grep 1>/dev/null; then
+				openqrm_webserver start
+			fi
+
+			# link the web application directory to the documentroot
+			ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/web/ $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm
+
+			# the default apache config normally does not allow to override the authconfig (needed for basic auth)
+			# so we allow it for the openqrm directory
+			APACHE_CUSTOM_CONFIG_DIR="/etc/apache2/conf.d"
+			# support for Ubuntu 14.04 - new apache enabled-conf dir
+			if [ -d /etc/apache2/conf-enabled ]; then
+				APACHE_CUSTOM_CONFIG_DIR="/etc/apache2/conf-enabled"
+				# preserve backwards compatibility for other projects e.g. linuxcoe
+				ln -sf /etc/apache2/conf-enabled /etc/apache2/conf.d
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/etc/httpd/openqrm-httpd-vhost.conf | \
+					sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | \
+					sed -e "s#@@OPENQRM_WEBSERVER_DOCUMENT_ROOT@@#$OPENQRM_WEBSERVER_DOCUMENT_ROOT#g" \
+					> $APACHE_CUSTOM_CONFIG_DIR/openqrm-httpd.conf
+			else
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/etc/httpd/openqrm-httpd.conf | sed -e "s#OPENQRM_WEBSERVER_DOCUMENT_ROOT#$OPENQRM_WEBSERVER_DOCUMENT_ROOT#g" >> $APACHE_CUSTOM_CONFIG_DIR/openqrm-httpd.conf
+			fi
+			echo ".$APACHE_CUSTOM_CONFIG_DIR/openqrm-httpd.conf"
+			# care about php disable_functions in php.ini
+			if [ -f /etc/php5/apache2/php.ini ]; then
+				sed -i -e "s/^disable_functions/;disable_functions/g" /etc/php5/apache2/php.ini
+			fi
+
+			# ssl ?
+			if [ "$OPENQRM_WEB_PROTOCOL" = "https" ]; then
+				echo "Setting up SSL secured openQRM Website"
+				# apache ssl setup
+				if ! a2enmod ssl; then
+					echo "ERROR: Could not enable SSL in the Apache webserver ! Exiting."
+					exit 1
+				fi
+				# check for hostname settings
+				ETCHOSTS=/etc/hosts
+				MYHOSTNAME=`hostname`
+				if grep $MYHOSTNAME $ETCHOSTS | grep 127.0. 1>/dev/null || ! grep $MYHOSTNAME $ETCHOSTS 1>/dev/null; then
+					echo "Found system hostname $MYHOSTNAME connected to loopback interface"
+					echo "! This causes troubles while enabling SSL for the apache webserver !"
+
+#					AVAIL_IPS=`ifconfig -a | grep -v inet6  | grep -B1 inet | grep -i -A1 link | grep -v lo | grep inet | grep -v 127.0.0.1 | cut -d':' -f2 | awk {' print $1 '}`
+					AVAIL_IPS=`ip -4 addr | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v 127.0.0.1`
+
+					while (true); do
+						echo "Please select one of the following ip-addresses"
+						echo "to be connected to the systems hostname $MYHOSTNAME :"
+						echo "$AVAIL_IPS"
+						echo -n " : "
+						read HOSTIP
+						if openqrm_validate_ip "$HOSTIP"; then
+							if echo $AVAIL_IPS | grep "$HOSTIP" 1>/dev/null; then
+								break;
+							else
+								echo "$HOSTIP is not available on this system!"
+							fi
+						else
+							echo "$HOSTIP is invalid!"
+						fi
+						done
+					echo "Connecting $HOSTIP to $MYHOSTNAME in $ETCHOSTS"
+					# remove first
+					sed -i -e "s/.*$MYHOSTNAME.*//g" $ETCHOSTS
+					sed -i -e "s/.*openQRM.*//g" $ETCHOSTS
+					# make sure we did not remove the loopback entry copmletely
+					if ! grep "127.0.*.localhost" $ETCHOSTS 1>/dev/null; then
+						echo "127.0.0.1	localhost" >> $ETCHOSTS.new
+						cat $ETCHOSTS >> $ETCHOSTS.new
+						mv -f $ETCHOSTS.new $ETCHOSTS
+					fi
+					echo "# added by openQRM" >> $ETCHOSTS
+					echo "$HOSTIP	$MYHOSTNAME" >> $ETCHOSTS
+
+				fi
+
+				# creating the cert + key
+				PRIVATE_KEY=$OPENQRM_SERVER_BASE_DIR/openqrm/etc/ssl/private/openqrm-private.key
+				CERTIFICATE_FILE=$OPENQRM_SERVER_BASE_DIR/openqrm/etc/ssl/cert/openqrm.crt
+				VALID_DAYS=3650
+				mkdir -p `dirname $PRIVATE_KEY`
+				mkdir -p `dirname $CERTIFICATE_FILE`
+				echo "-> Creating new private/public-keys without passphrase for server"
+				rm -f $PRIVATE_KEY
+				openssl genrsa -out $PRIVATE_KEY 1024
+				echo "-> Creating selfsigned certificate"
+				rm -f $CERTIFICATE_FILE
+				openssl req -new -days $VALID_DAYS -key $PRIVATE_KEY -x509 -out $CERTIFICATE_FILE
+				# openQRM apache ssl config
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/etc/httpd/openqrm-https.conf | \
+					sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | \
+					sed -e "s#@@OPENQRM_WEBSERVER_DOCUMENT_ROOT@@#$OPENQRM_WEBSERVER_DOCUMENT_ROOT#g" \
+					> /etc/apache2/conf.d/openqrm-https.conf
+			fi
+
+			openqrm_webserver reload
+
+			# create the .htaccess file
+			cat $OPENQRM_SERVER_BASE_DIR/openqrm/etc/httpd/openqrm-htaccess.conf | sed -e "s#OPENQRM_WEBSERVER_DOCUMENT_ROOT#$OPENQRM_WEBSERVER_DOCUMENT_ROOT#g" > $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/.htaccess
+
+			# create the default admin user
+			htpasswd -bc $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/.htpasswd openqrm openqrm
+			chmod 666 $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/.htpasswd
+
+			# create the image-auth dir
+			mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/web/action/image-auth
+			chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/web/action/image-auth
+			mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/tmp
+			chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/tmp
+
+			# link the tftpboot/boot dir to the boot-services
+			rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/boot
+			ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/ $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/boot
+
+			# init the remote execution layer
+			mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/var/spool/
+			chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/var/spool
+			rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear
+			mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/
+			dropbearkey -t rsa -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/dropbear_rsa_host_key
+
+			# allow the webserver user to read it
+			chmod 600 $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/dropbear_rsa_host_key
+
+			# create authorized_keys
+			PUBLIC_KEY=`dropbearkey -y -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/dropbear_rsa_host_key | grep ssh`
+			if [ ! -d /root/.ssh ]; then
+				mkdir -p /root/.ssh
+				chmod 700 /root/.ssh
+			fi
+			if [ ! -f /root/.ssh/authorized_keys ]; then
+				echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys
+				chmod 600 /root/.ssh/authorized_keys
+			else
+				OPENQRM_HOST=`echo $PUBLIC_KEY | awk {' print $3 '}`
+				if grep $OPENQRM_HOST /root/.ssh/authorized_keys 1>/dev/null; then
+					sed -i -e "s#.*$OPENQRM_HOST.*##g" /root/.ssh/authorized_keys
+				fi
+				echo "$PUBLIC_KEY" >> /root/.ssh/authorized_keys
+				chmod 600 /root/.ssh/authorized_keys
+			fi
+			# and put it in the boot-service dir for the resources to download
+			echo "$PUBLIC_KEY" > $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/openqrm-server-public-rsa-key
+			ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/openqrm-server-public-rsa-key $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/openqrm-server-public-rsa-key
+			# create the command-queue dir
+			mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/var/spool/ $OPENQRM_SERVER_BASE_DIR/openqrm/var/lock/
+			chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/var/spool $OPENQRM_SERVER_BASE_DIR/openqrm/var/lock/
+
+			# create unconfigured file containing a list of available network cards to setup openQRM on
+			ip a s | grep ^[0-9] | cut -d':' -f2 | awk '{ print $1 }' | grep -v lo > $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/unconfigured
+
+			# use the first nic to preconfigure the openqrm-server.conf
+			FIRST_NIC=`ip a s | grep ^[0-9] | cut -d':' -f2 | awk '{ print $1 }' | grep -v lo | head -n 1`
+			if [ "$FIRST_NIC" != "" ]; then
+				sed -i -e "s/OPENQRM_SERVER_INTERFACE=.*/OPENQRM_SERVER_INTERFACE=$FIRST_NIC/g" $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+			fi
+
+		fi
+
+    ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure|upgrade)
+    ;;
+
+    *)
+        echo "postinst called with argument \`$1'" >&2
+        exit 0
+    ;;
+esac
+
+
+#DEBHELPER#
+
+exit 0

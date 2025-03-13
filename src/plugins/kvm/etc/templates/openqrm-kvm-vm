@@ -1,0 +1,157 @@
+#!/bin/bash
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+KVM=`which kvm 2>/dev/null`
+if [ "$KVM" == "" ]; then
+	KVM=`which qemu-kvm  2>/dev/null`
+	if [ "$KVM" == "" ]; then
+		# maybe it is centos and not in the path
+		if [ -x /usr/libexec/qemu-kvm ]; then
+			KVM=/usr/libexec/qemu-kvm
+		else
+			echo "ERROR: kvm ist not installed on this system !" | logger
+			exit 1
+		fi
+	fi
+fi
+# which screen binary to use
+if [ -x /usr/bin/screen.real ]; then
+	RUNSCREEN="/usr/bin/screen.real"
+else
+	RUNSCREEN=`which screen`
+fi
+mkdir -p /var/run/openqrm/kvm
+
+MOUSE="--usbdevice tablet"
+
+# source the component config files
+VM_CONF_DIR=`dirname $0`
+VM_CONF_DIR=`cd $VM_CONF_DIR && pwd && cd - 1>/dev/null`
+VM_NAME=`basename $VM_CONF_DIR`
+. $VM_CONF_DIR/cpus
+. $VM_CONF_DIR/ram
+. $VM_CONF_DIR/disk1
+. $VM_CONF_DIR/disk2
+. $VM_CONF_DIR/disk3
+. $VM_CONF_DIR/disk4
+. $VM_CONF_DIR/cdrom
+. $VM_CONF_DIR/net1
+. $VM_CONF_DIR/net2
+. $VM_CONF_DIR/net3
+. $VM_CONF_DIR/net4
+. $VM_CONF_DIR/net5
+. $VM_CONF_DIR/vnc
+. $VM_CONF_DIR/boot
+if [ -f "$VM_CONF_DIR/vncpassword" ]; then
+	. $VM_CONF_DIR/vncpassword
+fi
+if [ -f "$VM_CONF_DIR/vnckeymap" ]; then
+	. $VM_CONF_DIR/vnckeymap
+	if [ "$KVM_VM_VNCKEYMAP" != "" ] && [ "$KVM_VM_VNCKEYMAP" != "none" ]; then
+		VNCKEYMAP_PARAMETER="-k $KVM_VM_VNCKEYMAP"
+	fi
+fi
+# CDROM
+if [ -f "$VM_CONF_DIR/cdrom2" ]; then
+	. $VM_CONF_DIR/cdrom2
+else
+	KVM_VM_CDROM2=""
+fi
+# disk interface
+if [ -f "$VM_CONF_DIR/disk-interface" ]; then
+	. $VM_CONF_DIR/disk-interface
+else
+	KVM_VM_DISK_INTERFACE="ide"
+fi
+case "$KVM_VM_DISK_INTERFACE" in
+	ide)
+		KVM_VM_DISK="$KVM_VM_DISK_1 $KVM_VM_DISK_2 $KVM_VM_DISK_3 $KVM_VM_DISK_4"
+		;;
+
+	virtio)
+		if [ "$KVM_VM_DISK_1" != "" ]; then
+			if echo $KVM_VM_DISK_1 | grep ^/dev/ 1>/dev/null; then
+				KVM_VM_DISK=" -drive file=$KVM_VM_DISK_1,index=0,if=virtio,format=raw,cache=writeback"
+			elif echo $KVM_VM_DISK_1 | grep ^rbd: 1>/dev/null; then
+				KVM_VM_DISK=" -drive file=$KVM_VM_DISK_1,index=0,if=virtio,format=raw,cache=writeback"
+			else
+				KVM_VM_DISK=" -drive file=$KVM_VM_DISK_1,index=0,if=virtio,cache=writeback"
+			fi
+		fi
+		if [ "$KVM_VM_DISK_2" != "" ]; then
+			if echo $KVM_VM_DISK_2 | grep ^/dev/ 1>/dev/null; then
+				KVM_VM_DISK="$KVM_VM_DISK -drive file=$KVM_VM_DISK_2,index=1,if=virtio,format=raw,cache=writeback"
+			elif echo $KVM_VM_DISK_2 | grep ^rbd: 1>/dev/null; then
+				KVM_VM_DISK="$KVM_VM_DISK -drive file=$KVM_VM_DISK_2,index=1,if=virtio,format=raw,cache=writeback"
+			else
+				KVM_VM_DISK="$KVM_VM_DISK -drive file=$KVM_VM_DISK_2,index=1,if=virtio,cache=writeback"
+			fi
+		fi
+		if [ "$KVM_VM_DISK_3" != "" ]; then
+			if echo $KVM_VM_DISK_3 | grep ^/dev/ 1>/dev/null; then
+				KVM_VM_DISK="$KVM_VM_DISK -drive file=$KVM_VM_DISK_3,index=2,if=virtio,format=raw,cache=writeback"
+			elif echo $KVM_VM_DISK_3 | grep ^rbd: 1>/dev/null; then
+				KVM_VM_DISK="$KVM_VM_DISK -drive file=$KVM_VM_DISK_3,index=2,if=virtio,format=raw,cache=writeback"
+			else
+				KVM_VM_DISK="$KVM_VM_DISK -drive file=$KVM_VM_DISK_3,index=2,if=virtio,cache=writeback"
+			fi
+		fi
+		if [ "$KVM_VM_DISK_4" != "" ]; then
+			if echo $KVM_VM_DISK_4 | grep ^/dev/ 1>/dev/null; then
+				KVM_VM_DISK="$KVM_VM_DISK -drive file=$KVM_VM_DISK_4,index=3,if=virtio,format=raw,cache=writeback"
+			elif echo $KVM_VM_DISK_4 | grep ^rbd 1>/dev/null; then
+				KVM_VM_DISK="$KVM_VM_DISK -drive file=$KVM_VM_DISK_4,index=3,if=virtio,format=raw,cache=writeback"
+			else
+				KVM_VM_DISK="$KVM_VM_DISK -drive file=$KVM_VM_DISK_4,index=3,if=virtio,cache=writeback"
+			fi
+		fi
+		;;
+esac
+KVM_VM_NET="$KVM_VM_NET_1 $KVM_VM_NET_2 $KVM_VM_NET_3 $KVM_VM_NET_4 $KVM_VM_NET_5"
+
+echo "KVM vm $VM_NAME starting up ..." | logger
+$RUNSCREEN -dmS $KVM_VM_MAC_1 bash -c "$KVM $KVM_VM_DISK $KVM_VM_CDROM -m $KVM_VM_RAM -smp $KVM_VM_CPUS $KVM_VM_BOOT $KVM_VM_NET -vnc $KVM_VM_VNC $VNCKEYMAP_PARAMETER -balloon virtio -monitor unix:/var/run/openqrm/kvm/kvm.$VM_NAME.mon,server,nowait -vga std $KVM_VM_CDROM2 $MOUSE > /var/run/openqrm/kvm/kvm.$VM_NAME.log 2>&1"
+# if there is an error starting the kvm VM the error message is now in the log file
+# we cat it here to provide the real error message for the ui event
+# we need to wait a bit for the kvm error message
+sleep 5
+CMD_ERR=`cat /var/run/openqrm/kvm/kvm.$VM_NAME.log`
+if [ "$CMD_ERR" != "" ]; then
+	cat /var/run/openqrm/kvm/kvm.$VM_NAME.log
+	exit 1
+fi
+rm -f /var/run/openqrm/kvm/kvm.$VM_NAME.log
+
+# set vnc password
+if [ "$KVM_VM_VNCPASSWORD" ]; then
+	while ! echo "change vnc password $KVM_VM_VNCPASSWORD" | socat stdio unix:/var/run/openqrm/kvm/kvm.$VM_NAME.mon; do
+		sleep 1
+		LOOP=$(( LOOP + 1 ))
+		if [ "$LOOP" == 10 ]; then
+			break
+		fi
+	done
+fi
+
+# detach-mgmt-nic if set in kvm plugin config
+if [ "$KVM_VM_DETACH_MANAGEMENT_NIC" != "" ]; then
+	echo "sleep $KVM_VM_DETACH_MANAGEMENT_NIC" > $VM_CONF_DIR/detach_mgmt_nic
+	echo "echo "host_net_remove 1 tap.0" | socat stdio unix:/var/run/openqrm/kvm/kvm.$VM_NAME.mon" >> $VM_CONF_DIR/detach_mgmt_nic
+	echo "rm -f $VM_CONF_DIR/detach_mgmt_nic" >> $VM_CONF_DIR/detach_mgmt_nic
+	chmod +x $VM_CONF_DIR/detach_mgmt_nic
+	$RUNSCREEN -dmS $KVM_VM_MAC_1.0 $VM_CONF_DIR/detach_mgmt_nic
+fi
+exit 0

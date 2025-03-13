@@ -1,0 +1,103 @@
+#collectd_statistics h3 {
+	margin-left: 15px;
+	margin-right: 15px;
+	margin-bottom: 20px;
+	padding: 0 0 10px 0;
+	border-bottom: 1px solid #ccc;
+}
+#collectd_statistics h3 a.toplink {
+	float: right;
+	padding:0 4px;
+	margin: 4px 15px 0 0;
+	line-height:16px;
+	font-size: 12px;
+	color: #ccc;
+	border: 1px solid #ccc;
+	text-decoration: none;
+}
+#collectd_statistics h4 {
+	text-align: left;
+	margin-left: 50px;
+	margin-top: 20px;
+}
+#collectd_statistics #downloadlink {
+	margin-left: 15px;
+	margin-top: 15px;
+	display: block;
+	width: 80px;
+	text-align: center;
+	float: left;
+}
+#collectd_statistics .image_box {
+	border: 0px none;
+	text-align: center;
+	margin-right: 15px;
+}
+#collectd_statistics .image_box img {
+	margin: 0 0 0 0;
+}
+#collectd_statistics #links{
+	float: right;
+	display: block;
+	width: 165px;
+	height: 59px;
+	overflow: auto;
+	margin-right: 28px;
+	border-left: 1px solid #ccc;
+	border-top: 1px solid #ccc;
+	border-bottom: 1px solid #ccc;
+}
+#collectd_statistics #links .linkswrapper{
+	height: 60px;
+}
+#collectd_statistics #links a {
+	padding: 0 0 0 3px;
+	display: block;
+	font-size: 13px;
+	line-height: 19px;
+	text-decoration: none;
+	border-bottom: 1px solid #ccc;
+	color: black;
+}
+#collectd_statistics #links a.last {
+	border-bottom: 0px none;
+}
+#collectd_statistics #form {
+	float:right;
+	margin: -55px 20px 0 0;
+}
+#collectd_statistics #intervalbox,
+#collectd_statistics #buttons {
+	float:left;
+}
+#collectd_statistics #interval_box .left {
+	width: auto;
+	padding: 2px 15px 0 0;
+}
+#collectd_statistics #interval_box .right select {
+	width: 80px;
+	margin: 3px 0 0 0;
+}
+#collectd_statistics .interval_submit {
+	vertical-align: middle;
+	margin: 0 0 0 8px;
+	width: 30px;
+	height: 30px;
+	text-indent: -1000px;
+	background-color: transparent;
+	background-image: url(../../../img/glyphicons/glyphicons.png);
+	background-position: -44px -382px;
+}
+
+.floatbreaker {
+	clear:both;
+	height:0px !important;
+	position:relative;
+	line-height:0px;
+	font-size:0px;
+	border:0px none;
+	margin:0;
+	padding:0;
+	overflow:hidden;
+	width:0px;
+}

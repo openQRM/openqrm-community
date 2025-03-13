@@ -1,0 +1,9 @@
+
+# Examples (for supported versions of Debian):
+# other sites listed at
+# http://www.debian.org/mirror/list
+# the path (last component) must be the prefix
+# (but not include) the "dists" directory
+
+OSVEND ftp.de.debian.org  Debian Wheezy x86_64 HTTP /debian/
+

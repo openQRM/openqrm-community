@@ -1,0 +1,16 @@
+/*-Icon classes ----- */
+a.graphs {
+	padding: 0;
+	border: 0px none;
+	width: 32px;
+	height: 32px;
+	display:block;
+	text-align: center;
+	text-decoration: none;
+	line-height: 0px;
+	overflow: hidden;
+	color: transparent;
+}
+a.graphs {
+	background: url('/openqrm/base/plugins/dhcpd/img/plugin.png') no-repeat center top;
+}

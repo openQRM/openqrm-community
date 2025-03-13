@@ -1,0 +1,84 @@
+#!/bin/bash
+# this script gets activated via cron to sequentially check 
+# if there are new config updates in the svn repo
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+SVN_COMMIT_MESSAGE="Automatically updated through openQRM puppet plugin"
+CUR=`pwd`
+export LANGUAGE=C
+export LANG=C
+export LC_ALL=C
+
+PATH=$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# here it commits any changes made through the web-interface
+cd $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/puppet/web/puppet/
+# remove deleted files
+for pfile in `find /etc/puppet/ | grep -v svn | grep -v autosign.conf | sed -e "s#/etc/puppet/##g"`; do 
+	if [ ! -f $pfile ] && [ ! -d $pfile ]; then
+		svn del $pfile | logger
+	fi
+
+done
+# add new files
+svn add `find | grep -v svn` | logger
+# commit
+svn commit -m "$SVN_COMMIT_MESSAGE" . | logger
+# update eventual changes from external
+svn update . | logger
+
+# here it updates the puppet configuration from the svn repo
+cd /etc/puppet
+CURRENT_REVISION=`svn up . | grep revision | awk {' print $3 '}`
+cd $CUR
+
+# check if we need to reload the puppetmaster
+if [ ! -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/puppet/etc/puppet-svn-version ]; then
+	LAST_REVISION=0
+else
+	LAST_REVISION=`cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/puppet/etc/puppet-svn-version`
+fi
+
+if [ "$CURRENT_REVISION" == "$LAST_REVISION" ]; then
+	echo "No changes in puppet-config repo" | logger
+else
+	# restart the puppetmasterd, we experienced that it is not robust refreshing its config
+	if [ -x "/etc/init.d/puppetmaster" ]; then
+		if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+			invoke-rc.d puppetmaster stop 1>/dev/null 2>&1
+		else
+			/etc/init.d/puppetmaster stop 1>/dev/null 2>&1
+		fi
+		sleep 2
+	fi
+	kill `ps ax | grep puppetmaster | grep -v grep | awk {' print $1 '}` 2>/dev/null
+	kill `ps ax | grep "puppet master" | grep -v grep | awk {' print $1 '}` 2>/dev/null
+	sleep 2
+	kill -9 `ps ax | grep puppetmaster | grep -v grep | awk {' print $1 '}` 2>/dev/null
+	kill -9 `ps ax | grep "puppet master" | grep -v grep | awk {' print $1 '}` 2>/dev/null
+	if which puppetmasterd 1>/dev/null 2>&1; then
+		rm -f /var/run/puppet/puppetmasterd.pid
+		screen -dmS puppetmasterd puppetmasterd -v -d -l syslog
+	elif puppet help | grep master 1>/dev/null 2>&1; then
+		puppet master
+	else
+		echo "ERROR: Could not start Puppet master" | logger
+	fi
+	# update the revision file
+	echo "$CURRENT_REVISION" > $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/puppet/etc/puppet-svn-version
+fi

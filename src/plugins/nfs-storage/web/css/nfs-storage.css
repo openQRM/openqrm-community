@@ -1,0 +1,4 @@
+/* Manual Config */
+#form.manualconfig .htmlobject_box .left {
+	display: none;
+}

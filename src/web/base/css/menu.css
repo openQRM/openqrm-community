@@ -1,0 +1,60 @@
+.menuSection {
+	margin-top: 30px;
+}
+.menuSection table {
+	width: 100%;
+	margin: 0;
+	border: 0;
+
+}
+.menuSection a, .menuSection span {
+	text-decoration: none;
+	color: #353535;
+	font-size: 90%;
+}
+.menuSection a.phplmselected {
+	font-weight: bold;
+}
+.treemenudiv {
+	display: block;
+	white-space: nowrap;
+	padding: 0 0 0 10px;
+}
+
+.phplmnormal {
+	padding: 0;
+}
+
+/* Setup headline (first config) */
+#setup_h1 {
+	text-align: center;
+	margin: 35px 0 0 0;
+}
+
+/* styling for 1st item in both menu objects */
+#menu1_1, #menu2_1, #menuSection_queue_1{
+	background: #ddd;
+	padding: 8px 20px 5px 13px;
+
+}
+#menu1_1 a, #menu2_1 a, #menuSection_queue_1 a {
+	color: #353535;
+	font-family: "Arial Narrow",arial, verdana;
+	font-weight: normal;
+	font-size: 17px;
+}
+#menu1_1 img, #menu2_1 img, #menuSection_queue_1 img {
+	visibility: hidden;
+	display: none;
+}
+
+#menu1_1 .glyphicons, #menu2_1 .glyphicons, #menuSection_queue_1 .glyphicons {
+	padding: 8px 0 5px 17px;
+}
+
+/* Event counter */
+#Event_messages, #Queue_messages {
+	float:right;
+	text-align:right;
+	margin: 0 25px 0 0;
+}

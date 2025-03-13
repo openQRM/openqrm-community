@@ -1,0 +1,98 @@
+#!/bin/bash
+#  openQRM-exec, an openQRM-util for remote exection of openQRM-commands
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+if [ "$OPENQRM_SERVER_BASE_DIR" == "" ]; then
+	OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../..
+	OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+fi
+export OPENQRM_SERVER_BASE_DIR
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+DB_IDLE=0
+DB_TIMEOUT=10
+OPENQRM_COMMAND_QUEUE="$OPENQRM_SERVER_BASE_DIR/openqrm/var/spool/openqrm-queue"
+WHOAMI=`whoami`
+OQLOCKFILE="$OPENQRM_SERVER_BASE_DIR/openqrm/var/lock/openqrm-queue"
+
+
+
+function lockit() {
+	LOCKLOOP=0
+	MAXLOCKLOOP=4
+	while (:); do
+		if ( set -o noclobber; echo "locked" > "$OQLOCKFILE") 2> /dev/null; then
+			trap 'rm -f "$OQLOCKFILE"; exit $?' INT TERM EXIT
+			break
+		else
+			LOCKLOOP=$(( LOCKLOOP + 1 ))
+			if (( $LOCKLOOP > $MAXLOCKLOOP )); then
+				unlockit
+			fi
+		fi
+		sleep 1
+	done
+}
+
+function unlockit() {
+	rm -f "$OQLOCKFILE"
+}
+
+
+
+# parse commandline args
+while [ $# -ne 0 ]; do
+	case "$1" in
+		-i)
+			RESOURCE_IP=$2
+			shift
+			;;
+		-t)
+			COMMAND_TOKEN=$2
+			shift
+			;;
+		-l)
+			COMMAND_LOCAL=$2
+			shift
+			;;
+		-c)
+			shift
+			OPENQRM_COMMAND=$@
+			shift
+			;;
+	esac
+	shift
+done
+# checks
+if [ "$RESOURCE_IP" == "0.0.0.0" ]; then
+	echo "openQRM-exec ERROR: Not running command on invalid ip address 0.0.0.0" | logger
+	exit 0
+fi
+if [ "$RESOURCE_IP" == "" ]; then
+	echo "openQRM-exec ERROR: Not running command on empty ip address" | logger
+	exit 0
+fi
+# run
+if [ "$COMMAND_LOCAL" == "true" ]; then
+	FULL_COMMAND="$OPENQRM_SERVER_BASE_DIR/openqrm/bin/openqrm-cmd $OPENQRM_COMMAND"
+else
+	FULL_COMMAND="dbclient -K $DB_TIMEOUT -y -i $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/dropbear_rsa_host_key -p $OPENQRM_EXEC_PORT root@$RESOURCE_IP \"$OPENQRM_SERVER_BASE_DIR/openqrm/bin/openqrm-cmd $OPENQRM_COMMAND\""
+fi
+# echo "openQRM engine (as $WHOAMI) queuing : $FULL_COMMAND" | logger
+lockit
+echo "$FULL_COMMAND" >> $OPENQRM_COMMAND_QUEUE.$COMMAND_TOKEN
+sleep 0.1
+unlockit
+

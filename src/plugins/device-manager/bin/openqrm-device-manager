@@ -1,0 +1,350 @@
+#!/bin/bash
+# this script automatically manages device-manager
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+export OPENQRM_SOURCE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/"
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/device-manager/include/openqrm-plugin-device-manager-functions
+OPENQRM_POSTENCODE="$OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-postencode"
+if [ -f $OPENQRM_RESOURCE_PARAMETER_FILE ]; then
+	. $OPENQRM_RESOURCE_PARAMETER_FILE
+	OPENQRM_SERVER_IP=$resource_openqrmserver
+	OPENQRM_EXEC_PORT=$resource_execdport
+elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+	openqrm_server_get_config
+	OPENQRM_SERVER_IP=$OPENQRM_SERVER_IP_ADDRESS
+	resource_id=0
+	resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+	openqrm_web_protocol=$OPENQRM_WEB_PROTOCOL
+fi
+export LANG=C
+# define wget to use with https
+if [ "$openqrm_web_protocol" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate"
+fi
+
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+# lvm installed ?
+if ! openqrm_full_fill_os_dependency lvm lvm2; then
+	if [ "$NON_BLOCKING" != "true" ]; then
+		openqrm_unblock_starting_queue $@
+	fi
+	exit 1
+fi
+# procmail for lockfile
+if ! openqrm_full_fill_os_dependency lockfile procmail; then
+	if [ "$NON_BLOCKING" != "true" ]; then
+		openqrm_unblock_starting_queue $@
+	fi
+	exit 1
+fi
+# blkid
+if ! openqrm_full_fill_os_dependency blkid util-linux; then
+	if [ "$NON_BLOCKING" != "true" ]; then
+		openqrm_unblock_starting_queue $@
+	fi
+	exit 1
+fi
+
+## for development !!!! ##################################
+# avoiding using a real partition or disk for now ########
+#DD_FILE="/tmp/device-manager.lvm.img"
+#if [ ! -f $DD_FILE ]; then
+#	dd if=/dev/zero of=$DD_FILE bs=1M seek=5000 count=0
+#fi
+#if ! losetup -a | grep $DD_FILE 1>/dev/null; then
+#	losetup -d /dev/loop0 2>/dev/null
+#	losetup -f -v $DD_FILE
+#fi
+#
+#DD_FILE1="/tmp/device-manager1.lvm.img"
+#if [ ! -f $DD_FILE1 ]; then
+#	dd if=/dev/zero of=$DD_FILE1 bs=1M seek=5000 count=0
+#fi
+#if ! losetup -a | grep $DD_FILE1 1>/dev/null; then
+#	losetup -d /dev/loop1 2>/dev/null
+#	losetup -f -v $DD_FILE1
+#fi
+#
+
+####################################################################
+
+
+
+function device_manager_usage() {
+	echo "Usage : $0 list <-u username> <-p password>"
+	echo "        $0 add_vg <-d device-name> <-v volume-group-name> <-u username> <-p password>"
+	echo "        $0 remove_vg <-v volume-group-name> <-u username> <-p password>"
+	echo ""
+	echo "Optional parameters:"
+	echo "             [--openqrm-ui-user <username>]"
+	echo "             [--openqrm-internal-cmd <true/false>]"
+	echo "             [--openqrm-cmd-mode <regular/background/fork>]"
+	exit 1
+}
+
+FULL_COMMANDLINE="$0 $@"
+DEVICE_MANAGER_MANAGER_COMMAND=$1
+shift
+
+while [ $# -ne 0 ]; do
+	case "$1" in
+		-d)
+			DEVICE_MANAGER_DEVICE_NAME=$2
+			shift
+			;;
+		-v)
+			DEVICE_MANAGER_VG_NAME=$2
+			shift
+			;;
+		-a)
+			DEVICE_MANAGER_ADD_DEV_TO_VG=$2
+			shift
+			;;
+		-u)
+			DEVICE_MANAGER_OPENQRM_USERNAME=$2
+			shift
+			;;
+		-p)
+			DEVICE_MANAGER_OPENQRM_PASSWORD=$2
+			shift
+			;;
+		--openqrm-ui-user)
+			OPENQRM_UI_USER=$2
+			shift
+			;;
+		--openqrm-internal-cmd)
+			OPENQRM_INTERNAL_CMD=$2
+			shift
+			;;
+		--openqrm-cmd-mode)
+			OPENQRM_CMD_MODE=$2
+			shift
+			;;
+		*)
+			if [ "$NON_BLOCKING" != "true" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			fi
+			echo "ERROR: Free commandline arguments are not allowed"
+			device_manager_manager_usage
+			exit 6
+			;;
+	esac
+	shift
+done
+
+if [ "$OPENQRM_UI_USER" != "" ]; then
+	OPENQRM_UI_USER_PARAMETER=" --openqrm-ui-user $OPENQRM_UI_USER"
+fi
+
+# main
+case "$DEVICE_MANAGER_MANAGER_COMMAND" in 
+
+	list)
+		TMP_CONFIG_MOUNTED_BASE_DEV=`mktemp /tmp/device-manager-mounted.XXXXXX`
+		TMP_CONFIG_PVS_BASE_DEV=`mktemp /tmp/device-manager-pvs.XXXXXX`
+		TMP_CONFIG_MOUNTED_FULL_DEV=`mktemp /tmp/device-manager-mounted.XXXXXX`
+		TMP_CONFIG_PVS_FULL_DEV=`mktemp /tmp/device-manager-pvs.XXXXXX`
+		STORAGE_STATUS_TMP=$resource_id.device.stat
+
+		LOCK_TIME=`openqrm_lock_queue aquire device-manager`
+		trap "openqrm_lock_queue release device-manager $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		> $STORAGE_STATUS_TMP
+		df | awk {' print $1  '} | grep ^/dev | grep -v "/dev/mapper/" | sed -e "s#[0-9].*##g" > $TMP_CONFIG_MOUNTED_BASE_DEV
+		pvs | awk {' print $1  '} | tail -n+2 | grep ^/dev | sed -e "s#[0-9].*##g" > $TMP_CONFIG_PVS_BASE_DEV
+		df | awk {' print $1  '} | grep ^/dev | grep -v "/dev/mapper/" > $TMP_CONFIG_MOUNTED_FULL_DEV
+		pvs | awk {' print $1  '} | tail -n+2 | grep ^/dev > $TMP_CONFIG_PVS_FULL_DEV
+		for PDEV in `cat /proc/partitions | grep -v ^major | awk {' print "/dev/"$4  '} | grep -v -w /dev/ | grep -v "dm-[0-9]" | grep -v "sr[0-9]"`; do
+			PDEV_MAIN_DISK=`echo $PDEV | sed -e "s#[0-9].*##g"`
+			if [ "$PDEV" == "$PDEV_MAIN_DISK" ]; then
+				continue
+			fi
+			echo "$PDEV" >> $STORAGE_STATUS_TMP
+
+			#unset UUID
+			#eval `blkid $PDEV | awk '{ print $2 }'`
+			#if [ "$UUID" == "" ]; then
+			#	if echo $PDEV | grep "/dev/loop" 1>/dev/null; then
+			#		if ! grep -w $PDEV $TMP_CONFIG_MOUNTED_FULL_DEV 1>/dev/null; then
+			#			if ! grep -w $PDEV $TMP_CONFIG_PVS_FULL_DEV 1>/dev/null; then
+			#				echo "$PDEV" >> $STORAGE_STATUS_TMP
+			#			fi
+			#		fi
+			#	else
+			#		if ! grep -w $PDEV $TMP_CONFIG_MOUNTED_BASE_DEV 1>/dev/null; then
+			#			if ! grep -w $PDEV $TMP_CONFIG_PVS_BASE_DEV 1>/dev/null; then
+			#				echo "$PDEV" >> $STORAGE_STATUS_TMP
+			#			fi
+			#		fi
+			#	fi
+			#fi
+
+		done
+		rm -f $TMP_CONFIG_MOUNTED_BASE_DEV $TMP_CONFIG_PVS_BASE_DEV $TMP_CONFIG_MOUNTED_FULL_DEV $TMP_CONFIG_PVS_FULL_DEV
+		sed -i -e "s/ \{1,\}/@/g" $STORAGE_STATUS_TMP
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$DEVICE_MANAGER_OPENQRM_USERNAME --http-password=$DEVICE_MANAGER_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/device-manager/device-manager-action.php?device_manager_command=get_device_list; then
+			openqrm_post_event 0 "post_vg" 2 "openqrm-device-manager" "Could not post the device list to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $STORAGE_STATUS_TMP $STORAGE_STATUS_TMP.post
+
+		openqrm_lock_queue release device-manager $LOCK_TIME
+		trap '' EXIT
+		;;
+
+	add_vg)
+		RETURN_CODE=0
+		RETURN_MSG=""
+		openqrm_post_event 0 "start" 5 "openqrm-device-manager" "Starting lvm on resource $resource_id."
+		if [ "$DEVICE_MANAGER_VG_NAME" == "" ] || [ "$DEVICE_MANAGER_DEVICE_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			device_manager_usage
+		fi
+		if [ ! -e "$DEVICE_MANAGER_DEVICE_NAME" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			RETURN_CODE=1
+			RETURN_MSG="Device $DEVICE_MANAGER_DEVICE_NAME is not existing on resource resource $resource_id."
+			openqrm_post_event 0 "add_vg" 3 "openqrm-device-manager" "$RETURN_MSG"
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire device-manager`
+		trap "openqrm_lock_queue release device-manager $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		if [ "$RETURN_CODE" == 0 ]; then
+			openqrm_post_event 0 "start" 5 "openqrm-device-manager" "Resource $resource_id is preparing $DEVICE_MANAGER_DEVICE_NAME for LVM Volume Group $DEVICE_MANAGER_VG_NAME."
+			if ! pvcreate -ff -y $DEVICE_MANAGER_DEVICE_NAME; then
+				RETURN_CODE=1
+				RETURN_MSG="Could not init device $DEVICE_MANAGER_DEVICE_NAME for LVM on resource resource $resource_id."
+				openqrm_post_event 0 "add_vg" 3 "openqrm-device-manager" "$RETURN_MSG"
+			fi
+		fi
+		# new vg or extent existing vg
+		if [ "$RETURN_CODE" == 0 ]; then
+			if [ "$DEVICE_MANAGER_ADD_DEV_TO_VG" == "true" ]; then
+				if ! vgextend $DEVICE_MANAGER_VG_NAME $DEVICE_MANAGER_DEVICE_NAME; then
+					RETURN_CODE=1
+					RETURN_MSG="Could not extent existing LVM Volume Group $DEVICE_MANAGER_VG_NAME with $DEVICE_MANAGER_DEVICE_NAME."
+					openqrm_post_event 0 "add_vg" 3 "openqrm-device-manager" "$RETURN_MSG"
+				fi
+			else
+				if ! vgcreate $DEVICE_MANAGER_VG_NAME $DEVICE_MANAGER_DEVICE_NAME; then
+					RETURN_CODE=1
+					RETURN_MSG="Could not create new LVM Volume Group $DEVICE_MANAGER_VG_NAME from $DEVICE_MANAGER_DEVICE_NAME."
+					openqrm_post_event 0 "add_vg" 3 "openqrm-device-manager" "$RETURN_MSG"
+				fi
+			fi
+		fi
+		if [ "$RETURN_CODE" == 0 ]; then
+			RETURN_MSG="ok"
+		fi
+		# Send message
+		STORAGE_STATUS_TMP=$resource_id.device.stat
+		> $STORAGE_STATUS_TMP
+		echo $RETURN_MSG > $STORAGE_STATUS_TMP
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$DEVICE_MANAGER_OPENQRM_USERNAME --http-password=$DEVICE_MANAGER_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/device-manager/device-manager-action.php?device_manager_command=get_device_list; then
+			openqrm_post_event 0 "lvm" 2 "openqrm-device-manager" "Could not post the device list to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $STORAGE_STATUS_TMP
+
+		openqrm_lock_queue release device-manager $LOCK_TIME
+		trap '' EXIT
+
+		exit $RETURN_CODE
+		;;
+
+
+	remove_vg)
+		RETURN_CODE=0
+		RETURN_MSG=""
+		openqrm_post_event 0 "start" 5 "openqrm-device-manager" "Removing volume group on resource $resource_id."
+		if [ "$DEVICE_MANAGER_VG_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			device_manager_usage
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire device-manager`
+		trap "openqrm_lock_queue release device-manager $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# check that the vg does not contain any lvols
+		if lvs | grep -w $DEVICE_MANAGER_VG_NAME 1>/dev/null; then
+			RETURN_CODE=1
+			RETURN_MSG="LVM Volume Group $DEVICE_MANAGER_VG_NAME on resource $resource_id still contains logical Volumes."
+			openqrm_post_event 0 "remove_vg" 3 "openqrm-device-manager" "$RETURN_MSG"
+		fi
+		# check which pvs are going to be free when removing the vg
+		for FREE_PVS in `pvs | grep -w $DEVICE_MANAGER_VG_NAME | awk {' print $1  '}`; do
+			FREE_PVS_LIST="$FREE_PVS_LIST $FREE_PVS"
+		done
+		# remove vg
+		if [ "$RETURN_CODE" == 0 ]; then
+			if ! vgremove -f $DEVICE_MANAGER_VG_NAME; then
+				RETURN_CODE=1
+				RETURN_MSG="Could not remove LVM Volume Group $DEVICE_MANAGER_VG_NAME on resource $resource_id."
+				openqrm_post_event 0 "remove_vg" 3 "openqrm-device-manager" "$RETURN_MSG"
+			fi
+		fi
+		# remove freed pvs
+		if [ "$RETURN_CODE" == 0 ]; then
+			for FREE_PVS_DEV in $FREE_PVS_LIST; do
+				if ! pvremove -f -y $FREE_PVS_DEV; then
+					openqrm_post_event 0 "remove_vg" 3 "openqrm-device-manager" "Could not free physical Device $FREE_PVS_DEV on resource $resource_id."
+				fi
+			done
+		fi
+		if [ "$RETURN_CODE" == 0 ]; then
+			RETURN_MSG="ok"
+			openqrm_post_event 0 "remove_vg" 5 "openqrm-device-manager" "Resource $resource_id removed LVM Volume Group $DEVICE_MANAGER_VG_NAME."
+		fi
+		# Send message
+		STORAGE_STATUS_TMP=$resource_id.device.stat
+		> $STORAGE_STATUS_TMP
+		echo $RETURN_MSG > $STORAGE_STATUS_TMP
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$DEVICE_MANAGER_OPENQRM_USERNAME --http-password=$DEVICE_MANAGER_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/device-manager/device-manager-action.php?device_manager_command=get_device_list; then
+			openqrm_post_event 0 "lvm" 2 "openqrm-device-manager" "Could not post the device list to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $STORAGE_STATUS_TMP
+
+		openqrm_lock_queue release device-manager $LOCK_TIME
+		trap '' EXIT
+
+		exit $RETURN_CODE
+		;;
+
+
+
+
+
+	*)
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		echo "ERROR: Free commandline arguments are not allowed!"
+		device_manager_usage
+		exit 6
+		;;
+esac
+

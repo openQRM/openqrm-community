@@ -1,0 +1,233 @@
+#!/bin/bash
+# init script for the openQRM dhcpd plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/include/openqrm-plugin-dhcpd-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/openqrm-plugin-dhcpd.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/dhcpd-interfaces.conf
+
+function openqrm_plugin_dhcpd_start() {
+	echo "Starting the openQRM dhcpd-plugin"
+	openqrm_plugin_dhcpd_stop 1>/dev/null 2>&1
+	# on debian/ubuntu dhcpd ver.3 is named dhcpd3
+	if [ -x /usr/sbin/dhcpd3 ]; then
+		# fix for ubuntu jaunty which does not like the lease file in the plugin dir
+		if ! /usr/sbin/dhcpd3 -cf $OPENQRM_PLUGIN_DHCPD_CONF -lf $OPENQRM_PLUGIN_DHCPD_LEASE_DIR/dhcpd.leases $OPENQRM_SERVER_INTERFACE $DHCPD_LISTEN_INTERFACES 2>&1; then
+			/usr/sbin/dhcpd3 -cf $OPENQRM_PLUGIN_DHCPD_CONF $OPENQRM_SERVER_INTERFACE $DHCPD_LISTEN_INTERFACES 2>&1
+			RET=$?
+		else
+			RET=0
+		fi
+	elif [ -x /usr/sbin/dhcpd ]; then
+		/usr/sbin/dhcpd -cf $OPENQRM_PLUGIN_DHCPD_CONF -lf $OPENQRM_PLUGIN_DHCPD_LEASE_DIR/dhcpd.leases $OPENQRM_SERVER_INTERFACE $DHCPD_LISTEN_INTERFACES 2>&1
+		RET=$?
+	else
+		echo "ERROR: Could not find the dhcpd (ver.3) binary"
+		exit 1
+	fi
+	touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/dhcpd/.running
+	return $RET
+
+}
+
+
+function openqrm_plugin_dhcpd_stop() {
+	echo "Stopping the openQRM dhcpd-plugin"
+	killall dhcpd 1>/dev/null 2>&1
+	killall dhcpd3 1>/dev/null 2>&1
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/dhcpd/.running
+	return 0
+}
+
+
+function openqrm_plugin_dhcpd_init() {
+	echo "Initializing the openQRM dhcpd-plugin"
+	openqrm_server_get_config
+	# create leases dir
+	mkdir -p $OPENQRM_PLUGIN_DHCPD_LEASE_DIR
+	touch $OPENQRM_PLUGIN_DHCPD_LEASE_DIR/dhcpd.leases
+	chmod -R 777 $OPENQRM_PLUGIN_DHCPD_LEASE_DIR
+
+
+	# openQRM Management network
+
+	# calculate the defaults
+	OPENQRM_SERVER_NETWORK=`openqrm_plugin_dhcpd_range_calculator $OPENQRM_SERVER_IP_ADDRESS $OPENQRM_SERVER_SUBNET_MASK net`
+	OPENQRM_PLUGIN_DHCPD_IP_RANGE_FIRST=`openqrm_plugin_dhcpd_range_calculator $OPENQRM_SERVER_IP_ADDRESS $OPENQRM_SERVER_SUBNET_MASK first`
+	OPENQRM_PLUGIN_DHCPD_IP_RANGE_LAST=`openqrm_plugin_dhcpd_range_calculator $OPENQRM_SERVER_IP_ADDRESS $OPENQRM_SERVER_SUBNET_MASK last`
+
+	OPENQRM_SERVER_DNS=`cat /etc/resolv.conf | grep -m 1 "nameserver" | awk {' print $2 '} | head -n1 2>/dev/null`
+	OPENQRM_SERVER_DEFAULT_GATEWAY=`route -n | grep '^0.0.0.0'  | grep $OPENQRM_SERVER_INTERFACE  | awk {' print $2 '} | head -n1 2>/dev/null`
+	OPENQRM_SERVER_DOMAIN=`cat /etc/resolv.conf | grep -m 1 "search" | awk '{print $2'} | head -n1 2>/dev/null`
+
+	# make sure we have got values to put in the dhcpd.conf
+	if [ "$OPENQRM_SERVER_DEFAULT_GATEWAY" == "" ]; then
+		OPENQRM_SERVER_DEFAULT_GATEWAY=$OPENQRM_SERVER_IP_ADDRESS
+		if ! openqrm_validate_ip $OPENQRM_SERVER_DEFAULT_GATEWAY; then
+			OPENQRM_SERVER_DEFAULT_GATEWAY=$OPENQRM_SERVER_IP_ADDRESS
+		fi
+	fi
+	if [ "$OPENQRM_SERVER_DNS" == "" ]; then
+		OPENQRM_SERVER_DNS=$OPENQRM_SERVER_IP_ADDRESS
+		if ! openqrm_validate_ip $OPENQRM_SERVER_DNS; then
+			OPENQRM_SERVER_DNS=$OPENQRM_SERVER_IP_ADDRESS
+		fi
+	fi
+	if [ "$OPENQRM_SERVER_DOMAIN" == "" ]; then
+		OPENQRM_SERVER_DOMAIN=$OPENQRM_SERVER_DEFAULT_DOMAIN
+	fi
+
+	# create default dhcpd configuration
+	cat $OPENQRM_PLUGIN_DHCPD_CONF_TEMPLATE |	\
+		sed -e "s/OPENQRM_SERVER_SUBNET_MASK/$OPENQRM_SERVER_SUBNET_MASK/g" |	\
+		sed -e "s/OPENQRM_SERVER_BROADCAST_ADDRESS/$OPENQRM_SERVER_BROADCAST_ADDRESS/g" |	\
+		sed -e "s/OPENQRM_SERVER_DEFAULT_GATEWAY/$OPENQRM_SERVER_DEFAULT_GATEWAY/g" |	\
+		sed -e "s/OPENQRM_SERVER_DOMAIN/$OPENQRM_SERVER_DOMAIN/g" |	\
+		sed -e "s/OPENQRM_SERVER_DNS/$OPENQRM_SERVER_DNS/g" |	\
+		sed -e "s/OPENQRM_SERVER_IP_ADDRESS/$OPENQRM_SERVER_IP_ADDRESS/g" |	\
+		sed -e "s/OPENQRM_SERVER_NETWORK/$OPENQRM_SERVER_NETWORK/g" |	\
+		sed -e "s/OPENQRM_PLUGIN_DHCPD_IP_RANGE_FIRST/$OPENQRM_PLUGIN_DHCPD_IP_RANGE_FIRST/g" |	\
+		sed -e "s/OPENQRM_PLUGIN_DHCPD_IP_RANGE_LAST/$OPENQRM_PLUGIN_DHCPD_IP_RANGE_LAST/g"	\
+		> $OPENQRM_PLUGIN_DHCPD_CONF
+
+	# additional networks to configure
+	if [ "$OPENQRM_PLUGIN_DHCPD_INTERFACES" != "" ]; then
+		for OPENQRM_PLUGIN_DHCPD_INTERFACE in `echo $OPENQRM_PLUGIN_DHCPD_INTERFACES | sed -e "s/,/ /g"`; do
+			OPENQRM_DHCPD_NETWORK_IP_ADDRESS=`ip a s $OPENQRM_PLUGIN_DHCPD_INTERFACE | grep -w $OPENQRM_PLUGIN_DHCPD_INTERFACE$ | grep -w inet | awk '{ print $2 }' | cut -d'/' -f1`
+			# if it has an ip address we create the dhcpd subnet delcaration for it
+			if [ "$OPENQRM_DHCPD_NETWORK_IP_ADDRESS" != "" ]; then
+				echo "- configuring additional network for $OPENQRM_PLUGIN_DHCPD_INTERFACE"
+				mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks
+				OPENQRM_DHCPD_NETWORK_BROADCAST_ADDRESS=`ip a s $OPENQRM_PLUGIN_DHCPD_INTERFACE | grep -w $OPENQRM_PLUGIN_DHCPD_INTERFACE$ | grep -w inet | awk '{ print $4 }' | cut -d'/' -f1`
+				OPENQRM_DHCPD_NETWORK_CIDR=`ip a s $OPENQRM_PLUGIN_DHCPD_INTERFACE | grep -w $OPENQRM_PLUGIN_DHCPD_INTERFACE$ | grep -w inet | awk '{ print $2 }' | cut -d'/' -f2`
+				OPENQRM_DHCPD_NETWORK_SUBNET_MASK=`cidr2subnet $OPENQRM_DHCPD_NETWORK_CIDR`
+				OPENQRM_DHCPD_NETWORK=`openqrm_plugin_dhcpd_range_calculator $OPENQRM_DHCPD_NETWORK_IP_ADDRESS $OPENQRM_DHCPD_NETWORK_SUBNET_MASK net`
+				OPENQRM_DHCPD_NETWORK_IP_RANGE_FIRST=`openqrm_plugin_dhcpd_range_calculator $OPENQRM_DHCPD_NETWORK_IP_ADDRESS $OPENQRM_DHCPD_NETWORK_SUBNET_MASK first`
+				OPENQRM_DHCPD_NETWORK_IP_RANGE_LAST=`openqrm_plugin_dhcpd_range_calculator $OPENQRM_DHCPD_NETWORK_IP_ADDRESS $OPENQRM_DHCPD_NETWORK_SUBNET_MASK last`
+
+				cat $OPENQRM_PLUGIN_DHCPD_NETWORK_TEMPLATE |	\
+					sed -e "s/OPENQRM_DHCPD_NETWORK/$OPENQRM_DHCPD_NETWORK/g" |	\
+					sed -e "s/OPENQRM_DHCPD_SUBNET_MASK/$OPENQRM_DHCPD_NETWORK_SUBNET_MASK/g" |	\
+					sed -e "s/OPENQRM_DHCPD_RANGE_FIRST/$OPENQRM_DHCPD_NETWORK_IP_RANGE_FIRST/g" |	\
+					sed -e "s/OPENQRM_DHCPD_RANGE_LAST/$OPENQRM_DHCPD_NETWORK_IP_RANGE_LAST/g" \
+					> $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks/$OPENQRM_PLUGIN_DHCPD_INTERFACE.conf
+
+				# add as include to dhcpd.conf
+				sed -i -e "s#^}#include \"$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks/$OPENQRM_PLUGIN_DHCPD_INTERFACE.conf\";\n}#" $OPENQRM_PLUGIN_DHCPD_CONF
+
+			fi
+		done
+	fi
+
+	# enable apparmor if needed
+	APPARMOR_DHCPD=""
+	if [ -f /etc/apparmor.d/usr.sbin.dhcpd3 ]; then
+		APPARMOR_DHCPD="/etc/apparmor.d/usr.sbin.dhcpd3"
+	elif [ -f /etc/apparmor.d/usr.sbin.dhcpd ]; then
+		APPARMOR_DHCPD="/etc/apparmor.d/usr.sbin.dhcpd"
+	fi
+	if [ "$APPARMOR_DHCPD" != "" ]; then
+		if ! grep openQRM $APPARMOR_DHCPD 1>/dev/null; then
+			sed -i -e "s#^}##g" $APPARMOR_DHCPD
+			echo "  # openQRM" >> $APPARMOR_DHCPD
+			echo "  $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/** rw," >> $APPARMOR_DHCPD
+			if [ -d /etc/openqrm/plugins/dhcpd/ ]; then
+				echo "  /etc/openqrm/plugins/dhcpd/** rw," >> $APPARMOR_DHCPD
+			fi
+			echo "  /var/run/dhcpd.pid rw," >> $APPARMOR_DHCPD
+			echo "  $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/var/state/dhcp/** lrw," >> $APPARMOR_DHCPD
+			echo "}" >> $APPARMOR_DHCPD
+			echo >> $APPARMOR_DHCPD
+			if [ -x "/etc/init.d/apparmor" ]; then
+				if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+					invoke-rc.d apparmor reload
+				else
+					/etc/init.d/apparmor reload
+				fi
+			fi
+			# create pid file
+			touch /var/run/dhcpd.pid
+			chown dhcpd:dhcpd /var/run/dhcpd.pid
+		fi
+	fi
+
+	# linking the web dir
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/web $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/dhcpd
+
+	return 0
+}
+
+
+function openqrm_plugin_dhcpd_uninstall() {
+	echo "Uninstalling the openQRM dhcpd-plugin"
+	openqrm_plugin_dhcpd_stop
+	/bin/rm -f $OPENQRM_PLUGIN_DHCPD_CONF
+	/bin/rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks
+
+	# remove apparmor setup
+	APPARMOR_DHCPD=""
+	if [ -f /etc/apparmor.d/usr.sbin.dhcpd3 ]; then
+		APPARMOR_DHCPD="/etc/apparmor.d/usr.sbin.dhcpd3"
+	elif [ -f /etc/apparmor.d/usr.sbin.dhcpd ]; then
+		APPARMOR_DHCPD="/etc/apparmor.d/usr.sbin.dhcpd"
+	fi
+	if [ "$APPARMOR_DHCPD" != "" ]; then
+		sed -i -e "s#.*openQRM.*##g" $APPARMOR_DHCPD
+		sed -i -e "s#.*openqrm.*##g" $APPARMOR_DHCPD
+		sed -i -e "s#/var/run/dhcpd.pid rw,##g" $APPARMOR_DHCPD
+		if [ -x "/etc/init.d/apparmor" ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d apparmor reload
+			else
+				/etc/init.d/apparmor reload
+			fi
+		fi
+	fi
+	# unlinking the web dir
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/dhcpd
+}
+
+
+
+case "$1" in
+	start)
+		openqrm_plugin_dhcpd_start
+		;;
+	stop)
+		openqrm_plugin_dhcpd_stop
+		;;
+	restart)
+		openqrm_plugin_dhcpd_stop
+		sleep 1
+		openqrm_plugin_dhcpd_start
+		;;
+	init)
+		openqrm_plugin_dhcpd_init
+		;;
+	uninstall)
+		openqrm_plugin_dhcpd_uninstall
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|init|uninstall}"
+		exit 1
+
+esac
+exit $?
+
+

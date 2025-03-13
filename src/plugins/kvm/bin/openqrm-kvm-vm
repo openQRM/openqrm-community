@@ -1,0 +1,2464 @@
+#!/bin/bash
+# this script automatically manages kvm
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2012, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2012, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+# unblock starting command queue early for non-blocking + ui commands
+KVM_COMMAND=$1
+if [ "$KVM_COMMAND" == "update" ] || [ "$KVM_COMMAND" == "clone" ] || [ "$KVM_COMMAND" == "post_vm_list" ] || [ "$KVM_COMMAND" == "post_vm_config" ] || [ "$KVM_COMMAND" == "list" ] || [ "$KVM_COMMAND" == "post_bridge_config" ] || [ "$KVM_COMMAND" == "iso" ] || [ "$KVM_COMMAND" == "monitor_migration" ]; then
+	openqrm_unblock_starting_queue $@
+	NON_BLOCKING=true
+fi
+
+export OPENQRM_SOURCE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/"
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/include/openqrm-plugin-kvm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/openqrm-plugin-kvm.conf
+if [ -f $OPENQRM_RESOURCE_PARAMETER_FILE ]; then
+	. $OPENQRM_RESOURCE_PARAMETER_FILE
+	OPENQRM_SERVER_IP=$resource_openqrmserver
+	OPENQRM_EXEC_PORT=$resource_execdport
+elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+	openqrm_server_get_config
+	OPENQRM_SERVER_IP=$OPENQRM_SERVER_IP_ADDRESS
+	resource_id=0
+	resource_ip=$OPENQRM_SERVER_IP_ADDRESS
+	resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+	openqrm_web_protocol=$OPENQRM_WEB_PROTOCOL
+fi
+OPENQRM_POSTENCODE="$OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-postencode"
+OPENQRM_KVM_VM_TEMPLATE="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-kvm-vm"
+OPENQRM_VM_DIR="/var/lib/kvm/openqrm/"
+OPENQRM_VM_MIGRATION_PORT_RANGE_START="7500"
+OPENQRM_VM_MONITOR_DIR="/var/run/openqrm/kvm"
+KVM_MIGRATION_MAX_WAIT=360
+KVM_REMOVE_MAX_WAIT=30
+KVM_VM_SHUTDOWN_DELAY=90
+OPENQRM_FIRST_VNC_ID=50
+export LANG=C
+# define wget to use with https
+if [ "$openqrm_web_protocol" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate"
+fi
+
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+# make sure required deps are installed
+if ! check_kvm_deps; then
+	if [ "$NON_BLOCKING" != "true" ]; then
+		openqrm_unblock_starting_queue $@
+	fi
+	exit 1
+fi
+
+# which screen binary to use
+if [ -x /usr/bin/screen.real ]; then
+	RUNSCREEN="/usr/bin/screen.real"
+else
+	RUNSCREEN=`which screen`
+fi
+
+
+
+function kvm_usage() {
+	echo "Usage : $0 start/stop/reboot/delete/list <-n vm-name>"
+	echo "        $0 restart_by_mac/start_by_mac <-m vm-mac> <-d root-disk>"
+	echo "        $0 setboot <-m mac-address> <-b local/net>"
+	echo "        $0 create/update <-n vm-name> <-m mac-address> <-r memory> [-c cpus ] [-o disk-interface(ide/virtio) ] [-b local/net/cdrom/iso] [-i iso-boot-image] [-v vncpassword ] [-l vnckeymap ]"
+	echo "        $0 clone <-n vm-name> <-w vm-clone-name> <-m vm-clone-mac>"
+	echo "        $0 post_vm_list <-u username> <-p password>"
+	echo "        $0 post_vm_config <-n vm-name> <-u username> <-p password>"
+	echo "        $0 post_bridge_config <-u username> <-p password>"
+	echo "        $0 update_vm_ram <-r memory> <-n vm-name>"
+	echo "        $0 update_vm_vnc <-v vncpassword> <-n vm-name>"
+	echo "        $0 add_vm_nic <-s nic-number> <-m mac-address> <-n vm-name>"
+	echo "        $0 remove_vm_nic <-s nic-number> <-n vm-name>"
+	echo "        $0 fence <-m mac-address>"
+	echo "        $0 start_as_incoming <-n vm-name> <-j migration-port>"
+	echo "        $0 migrate <-n vm-name> <-k destination-host-ip> <-j migration-port>"
+	echo "        $0 transfer_vm_config <-n vm-name> <-k destination-host-ip> <-k1 source-host-ip>"
+	echo "        $0 monitor_migrate <-n vm-name> <-j migration-port>"
+	echo "        $0 reset_vlans_by_mac <-m mac-address> <-b start/stop>"
+	echo "        $0 iso <-q path> <-u username> <-p password>"
+	exit 1
+}
+
+
+
+function kvm_gen_mac() {
+    CMAC=`dd if=/dev/urandom bs=1 count=5 2>/dev/null | od -tx1 | head -1 | cut -d' ' -f2- | awk '{ print $1":"$2":"$3":"$4":"$5 }' | tr "[:upper:]" "[:lower:]"`
+    CMAC="00:"$CMAC
+    echo $CMAC
+}
+
+function get_vm_type() {
+	local VM=$1
+	if [ "$KVM_VM_TYPE" == "" ]; then
+		if [ -f "$OPENQRM_VM_DIR/$VM/vm-type" ]; then
+			. $OPENQRM_VM_DIR/$VM/vm-type
+		else
+			KVM_VM_TYPE="kvm-vm-local"
+		fi
+	fi
+	echo "$KVM_VM_TYPE"
+}
+
+
+FULL_COMMANDLINE="$0 $@"
+KVM_COMMAND=$1
+shift
+
+while [ $# -ne 0 ]; do
+	case "$1" in
+		-n)
+			KVM_VM_NAME=$2
+			shift
+			;;
+		-m)
+			KVM_VM_MAC=$2
+			shift
+			;;
+		-m1)
+			KVM_VM_MAC2=$2
+			shift
+			;;
+		-m2)
+			KVM_VM_MAC3=$2
+			shift
+			;;
+		-m3)
+			KVM_VM_MAC4=$2
+			shift
+			;;
+		-m4)
+			KVM_VM_MAC5=$2
+			shift
+			;;
+		-r)
+			KVM_VM_RAM=$2
+			shift
+			;;
+		-d)
+			KVM_VM_DISK=$2
+			shift
+			;;
+		-s)
+			KVM_VM_SWAP=$2
+			shift
+			;;
+		-x)
+			KVM_VM_COMPONENT_NUMBER=$2
+			shift
+			;;
+		-u)
+			KVM_OPENQRM_USERNAME=$2
+			shift
+			;;
+		-p)
+			KVM_OPENQRM_PASSWORD=$2
+			shift
+			;;
+		-b)
+			KVM_VM_BOOT=$2
+			shift
+			;;
+		-i)
+			KVM_VM_BOOT_ISO=$2
+			shift
+			;;
+		-t)
+			KVM_VM_NIC_TYPE=$2
+			shift
+			;;
+		-t1)
+			KVM_VM_NIC_TYPE2=$2
+			shift
+			;;
+		-t2)
+			KVM_VM_NIC_TYPE3=$2
+			shift
+			;;
+		-t3)
+			KVM_VM_NIC_TYPE4=$2
+			shift
+			;;
+		-t4)
+			KVM_VM_NIC_TYPE5=$2
+			shift
+			;;
+		-z)
+			KVM_VM_MAC_BRIDGE=$2
+			shift
+			;;
+		-z1)
+			KVM_VM_MAC_BRIDGE2=$2
+			shift
+			;;
+		-z2)
+			KVM_VM_MAC_BRIDGE3=$2
+			shift
+			;;
+		-z3)
+			KVM_VM_MAC_BRIDGE4=$2
+			shift
+			;;
+		-z4)
+			KVM_VM_MAC_BRIDGE5=$2
+			shift
+			;;
+		-c)
+			KVM_VM_CPUS=$2
+			shift
+			;;
+		-o)
+			KVM_VM_DISK_INTERFACE=$2
+			shift
+			;;
+		-k)
+			KVM_MIGRATION_DESTINATION_HOST=$2
+			shift
+			;;
+		-k1)
+			KVM_MIGRATION_SOURCE_HOST=$2
+			shift
+			;;
+		-j)
+			KVM_MIGRATION_PORT=$2
+			shift
+			;;
+		-v)
+			KVM_VM_VNCPASSWORD=$2
+			shift
+			;;
+		-l)
+			KVM_VM_VNCKEYMAP=$2
+			shift
+			;;
+		-w)
+			KVM_VM_CLONE_NAME=$2
+			shift
+			;;
+		-q)
+			KVM_HOST_PATH=$2
+			shift
+			;;
+		-y)
+			KVM_VM_TYPE=$2
+			shift
+			;;
+		-cdrom)
+			KVM_VM_CDROM2=$2
+			shift
+			;;
+		--openqrm-ui-user)
+			OPENQRM_UI_USER=$2
+			shift
+			;;
+		--openqrm-internal-cmd)
+			OPENQRM_INTERNAL_CMD=$2
+			shift
+			;;
+		--openqrm-cmd-mode)
+			OPENQRM_CMD_MODE=$2
+			shift
+			;;
+
+		*)
+			if [ "$NON_BLOCKING" != "true" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			fi
+			echo "ERROR: Free commandline arguments are not allowed: $@"
+			kvm_usage
+			exit 6
+			;;
+	esac
+	shift
+done
+
+
+
+
+# main
+if [ "$KVM_COMMAND" == "" ]; then
+	openqrm_unblock_starting_queue $FULL_COMMANDLINE
+	kvm_usage
+fi
+
+if [ "$KVM_COMMAND" == "post_vm_list" ] || [ "$KVM_COMMAND" == "post_vm_config" ]; then
+		if [ "$KVM_OPENQRM_USERNAME" == "" ]; then
+			kvm_usage
+		fi
+		if [ "$KVM_OPENQRM_PASSWORD" == "" ]; then
+			kvm_usage
+		fi
+else
+
+	if [ "$KVM_COMMAND" != "list" ] && [ "$KVM_COMMAND" != "setboot" ] && [ "$KVM_COMMAND" != "start_by_mac" ] && [ "$KVM_COMMAND" != "restart_by_mac" ]  && [ "$KVM_COMMAND" != "post_bridge_config" ]  && [ "$KVM_COMMAND" != "stop_by_mac" ] && [ "$KVM_COMMAND" != "fence" ] && [ "$KVM_COMMAND" != "iso" ] && [ "$KVM_COMMAND" != "reset_vlans_by_mac" ]; then
+		if [ "$KVM_VM_NAME" == "" ]; then
+			if [ "$NON_BLOCKING" != "true" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			fi
+			kvm_usage
+		fi
+	fi
+fi
+
+# set defaults from the config
+if [ "$KVM_VM_NIC_TYPE" == "" ]; then
+	KVM_VM_NIC_TYPE=$OPENQRM_PLUGIN_KVM_PRIMARY_NIC_TYPE
+fi
+if [ "$KVM_VM_NIC_TYPE2" == "" ]; then
+	KVM_VM_NIC_TYPE2=$OPENQRM_PLUGIN_KVM_ADDITIONAL_NIC_TYPE
+fi
+if [ "$KVM_VM_NIC_TYPE3" == "" ]; then
+	KVM_VM_NIC_TYPE3=$OPENQRM_PLUGIN_KVM_ADDITIONAL_NIC_TYPE
+fi
+if [ "$KVM_VM_NIC_TYPE4" == "" ]; then
+	KVM_VM_NIC_TYPE4=$OPENQRM_PLUGIN_KVM_ADDITIONAL_NIC_TYPE
+fi
+if [ "$KVM_VM_NIC_TYPE5" == "" ]; then
+	KVM_VM_NIC_TYPE5=$OPENQRM_PLUGIN_KVM_ADDITIONAL_NIC_TYPE
+fi
+if [ "$KVM_VM_MAC_BRIDGE" == "" ]; then
+	KVM_VM_MAC_BRIDGE=$OPENQRM_PLUGIN_KVM_BRIDGE_NET1
+fi
+if [ "$KVM_VM_MAC_BRIDGE2" == "" ]; then
+	KVM_VM_MAC_BRIDGE2=$OPENQRM_PLUGIN_KVM_BRIDGE_NET2
+fi
+if [ "$KVM_VM_MAC_BRIDGE3" == "" ]; then
+	KVM_VM_MAC_BRIDGE3=$OPENQRM_PLUGIN_KVM_BRIDGE_NET3
+fi
+if [ "$KVM_VM_MAC_BRIDGE4" == "" ]; then
+	KVM_VM_MAC_BRIDGE4=$OPENQRM_PLUGIN_KVM_BRIDGE_NET4
+fi
+if [ "$KVM_VM_MAC_BRIDGE5" == "" ]; then
+	KVM_VM_MAC_BRIDGE5=OPENQRM_PLUGIN_KVM_BRIDGE_NET5
+fi
+if [ "$KVM_VM_VNCKEYMAP" == "" ]; then
+	KVM_VM_VNCKEYMAP=$OPENQRM_PLUGIN_KVM_DEFAULT_VNC_KEYMAP
+fi
+
+
+# calculate migration port
+if [ "$KVM_MIGRATION_PORT" == "" ]; then
+	KVM_MIGRATION_PORT=$OPENQRM_VM_MIGRATION_PORT_RANGE_START
+else
+	KVM_MIGRATION_PORT=$(( OPENQRM_VM_MIGRATION_PORT_RANGE_START + KVM_MIGRATION_PORT ))
+fi
+
+case "$KVM_COMMAND" in 
+
+	create)
+		if [ "$KVM_VM_MAC" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_VM_RAM" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_VM_CPUS" == "" ]; then
+			KVM_VM_CPUS=1
+		fi
+		if [ "$KVM_VM_BOOT" == "" ]; then
+			KVM_VM_BOOT=net
+		fi
+		# default vm type
+		if [ "$KVM_VM_TYPE" == "" ]; then
+			KVM_VM_TYPE="kvm-vm-local"
+		fi
+		# default disk interface ide
+		if [ "$KVM_VM_DISK_INTERFACE" == "" ]; then
+			KVM_VM_DISK_INTERFACE="virtio"
+		fi
+		# already existing ?
+		if [ -f $OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "create" 2 "openqrm-kvm" "KVM VM $KVM_VM_NAME already exist on this Host. Not creating new VM!"
+			exit 1
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# creating the kvm start script
+		mkdir -p $OPENQRM_VM_DIR/$KVM_VM_NAME/
+		cp -f $OPENQRM_KVM_VM_TEMPLATE $OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm
+		cp -f $OPENQRM_KVM_VM_TEMPLATE.incoming $OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm.incoming
+		# cpus
+		echo "KVM_VM_CPUS=\"$KVM_VM_CPUS\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/cpus
+		# ram
+		echo "KVM_VM_RAM=\"$KVM_VM_RAM\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/ram
+		# disk interface
+		echo "KVM_VM_DISK_INTERFACE=\"$KVM_VM_DISK_INTERFACE\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/disk-interface
+		# vm type
+		echo "KVM_VM_TYPE=\"$KVM_VM_TYPE\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/vm-type
+
+		# network
+		case "$OPENQRM_PLUGIN_KVM_BRIDGE_TYPE" in
+			bridge)
+				# regular bridging
+				# nic1
+				echo "KVM_VM_MAC_1=\"$KVM_VM_MAC\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				echo "KVM_VM_NET_1=\"-net nic,vlan=1,macaddr=$KVM_VM_MAC,model=$KVM_VM_NIC_TYPE -net tap,vlan=1,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				echo "KVM_VM_NIC_TYPE_1=\"$KVM_VM_NIC_TYPE\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				echo "KVM_VM_MAC_BRIDGE_1=\"$KVM_VM_MAC_BRIDGE\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				echo "KVM_VM_DETACH_MANAGEMENT_NIC=\"$OPENQRM_PLUGIN_VM_DETACH_MANAGEMENT_NIC\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE/g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE
+				sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE/g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE
+				sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE
+				# nic2 - 5
+				if [ "$KVM_VM_MAC2" != "" ]; then
+					echo "KVM_VM_NET_2=\"-net nic,vlan=2,macaddr=$KVM_VM_MAC2,model=$KVM_VM_NIC_TYPE2 -net tap,vlan=2,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE2,downscript=no\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_MAC_2=\"$KVM_VM_MAC2\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_NIC_TYPE_2=\"$KVM_VM_NIC_TYPE2\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_MAC_BRIDGE_2=\"$KVM_VM_MAC_BRIDGE2\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE2/g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE2
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE2
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE2/g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE2
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE2
+				else
+					echo "KVM_VM_NET_2=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_MAC_2=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_NIC_TYPE_2=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_MAC_BRIDGE_2=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+				fi
+				if [ "$KVM_VM_MAC3" != "" ]; then
+					echo "KVM_VM_NET_3=\"-net nic,vlan=3,macaddr=$KVM_VM_MAC3,model=$KVM_VM_NIC_TYPE3 -net tap,vlan=3,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE3,downscript=no\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_MAC_3=\"$KVM_VM_MAC3\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_NIC_TYPE_3=\"$KVM_VM_NIC_TYPE3\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_MAC_BRIDGE_3=\"$KVM_VM_MAC_BRIDGE3\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE3/g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE3
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE3
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE3/g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE3
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-down-$KVM_VM_MAC_BRIDGE3
+				else
+					echo "KVM_VM_NET_3=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_MAC_3=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_NIC_TYPE_3=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_MAC_BRIDGE_3=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+				fi
+				if [ "$KVM_VM_MAC4" != "" ]; then
+					echo "KVM_VM_NET_4=\"-net nic,vlan=4,macaddr=$KVM_VM_MAC4,model=$KVM_VM_NIC_TYPE4 -net tap,vlan=4,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE4,downscript=no\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_MAC_4=\"$KVM_VM_MAC4\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_NIC_TYPE_4=\"$KVM_VM_NIC_TYPE4\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_MAC_BRIDGE_4=\"$KVM_VM_MAC_BRIDGE4\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE4/g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE4
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE4
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE4/g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE4
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE4
+				else
+					echo "KVM_VM_NET_4=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_MAC_4=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_NIC_TYPE_4=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_MAC_BRIDGE_4=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+				fi
+				if [ "$KVM_VM_MAC5" != "" ]; then
+					echo "KVM_VM_NET_5=\"-net nic,vlan=5,macaddr=$KVM_VM_MAC5,model=$KVM_VM_NIC_TYPE5 -net tap,vlan=5,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE5,downscript=no\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_MAC_5=\"$KVM_VM_MAC5\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_NIC_TYPE_5=\"$KVM_VM_NIC_TYPE5\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_MAC_BRIDGE_5=\"$KVM_VM_MAC_BRIDGE5\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE5/g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE5
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net-$KVM_VM_MAC_BRIDGE5
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE5/g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE5
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE5
+				else
+					echo "KVM_VM_NET_5=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_MAC_5=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_NIC_TYPE_5=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_MAC_BRIDGE_5=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+				fi
+				chmod +x $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-kvm-ifup-net*
+				;;
+
+			openvswitch)
+				# openvswitch
+				# setup the nics
+				echo "KVM_VM_NET_1=\"-net nic,vlan=1,macaddr=$KVM_VM_MAC,model=$KVM_VM_NIC_TYPE -net tap,vlan=1,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				echo "KVM_VM_MAC_1=\"$KVM_VM_MAC\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				echo "KVM_VM_NIC_TYPE_1=\"$KVM_VM_NIC_TYPE\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				echo "KVM_VM_MAC_BRIDGE_1=\"$KVM_VM_MAC_BRIDGE\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				echo "KVM_VM_DETACH_MANAGEMENT_NIC=\"$OPENQRM_PLUGIN_VM_DETACH_MANAGEMENT_NIC\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-ovs-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#1#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE
+				sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-ovs-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#1#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-$KVM_VM_MAC_BRIDGE
+				sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-$KVM_VM_MAC_BRIDGE
+				if [ "$KVM_VM_MAC2" != "" ]; then
+					echo "KVM_VM_NET_2=\"-net nic,vlan=2,macaddr=$KVM_VM_MAC2,model=$KVM_VM_NIC_TYPE2 -net tap,vlan=2,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE2,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE2\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_MAC_2=\"$KVM_VM_MAC2\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_NIC_TYPE_2=\"$KVM_VM_NIC_TYPE2\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_MAC_BRIDGE_2=\"$KVM_VM_MAC_BRIDGE2\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-ovs-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE2/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#2#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE2
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE2
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-ovs-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE2/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#2#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-$KVM_VM_MAC_BRIDGE2
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE2
+				else
+					echo "KVM_VM_NET_2=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_MAC_2=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_NIC_TYPE_2=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_MAC_BRIDGE_2=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+				fi
+				if [ "$KVM_VM_MAC3" != "" ]; then
+					echo "KVM_VM_NET_3=\"-net nic,vlan=3,macaddr=$KVM_VM_MAC3,model=$KVM_VM_NIC_TYPE3 -net tap,vlan=3,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE3,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE3\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_MAC_3=\"$KVM_VM_MAC3\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_NIC_TYPE_3=\"$KVM_VM_NIC_TYPE3\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_MAC_BRIDGE_3=\"$KVM_VM_MAC_BRIDGE3\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-ovs-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE3/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#3#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE3
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE3
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-ovs-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE3/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#3#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-$KVM_VM_MAC_BRIDGE3
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-$KVM_VM_MAC_BRIDGE3
+				else
+					echo "KVM_VM_NET_3=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_MAC_3=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_NIC_TYPE_3=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_MAC_BRIDGE_3=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+				fi
+				if [ "$KVM_VM_MAC4" != "" ]; then
+					echo "KVM_VM_NET_4=\"-net nic,vlan=4,macaddr=$KVM_VM_MAC4,model=$KVM_VM_NIC_TYPE4 -net tap,vlan=4,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE4,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE4\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_MAC_4=\"$KVM_VM_MAC4\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_NIC_TYPE_4=\"$KVM_VM_NIC_TYPE4\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_MAC_BRIDGE_4=\"$KVM_VM_MAC_BRIDGE4\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-ovs-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE4/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#4#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE4
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE4
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-ovs-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE4/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#4#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-$KVM_VM_MAC_BRIDGE4
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-$KVM_VM_MAC_BRIDGE4
+				else
+					echo "KVM_VM_NET_4=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_MAC_4=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_NIC_TYPE_4=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_MAC_BRIDGE_4=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+				fi
+				if [ "$KVM_VM_MAC5" != "" ]; then
+					echo "KVM_VM_NET_5=\"-net nic,vlan=5,macaddr=$KVM_VM_MAC5,model=$KVM_VM_NIC_TYPE5 -net tap,vlan=5,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE5,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE5\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_MAC_5=\"$KVM_VM_MAC5\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_NIC_TYPE_5=\"$KVM_VM_NIC_TYPE5\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_MAC_BRIDGE_5=\"$KVM_VM_MAC_BRIDGE5\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-ovs-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE5/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#5#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE5
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup-$KVM_VM_MAC_BRIDGE5
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-ovs-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE5/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#5#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-$KVM_VM_MAC_BRIDGE5
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-$KVM_VM_MAC_BRIDGE5
+				else
+					echo "KVM_VM_NET_5=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_MAC_5=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_NIC_TYPE_5=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_MAC_BRIDGE_5=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+				fi
+				chmod +x $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-*
+				;;
+
+
+			vlanbridge)
+				# bridged vlans
+				modprobe 8021q
+				# setup the nics
+				echo "KVM_VM_NET_1=\"-net nic,vlan=1,macaddr=$KVM_VM_MAC,model=$KVM_VM_NIC_TYPE -net tap,vlan=1,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				echo "KVM_VM_MAC_1=\"$KVM_VM_MAC\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				echo "KVM_VM_NIC_TYPE_1=\"$KVM_VM_NIC_TYPE\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				echo "KVM_VM_MAC_BRIDGE_1=\"$KVM_VM_MAC_BRIDGE\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				echo "KVM_VM_DETACH_MANAGEMENT_NIC=\"$OPENQRM_PLUGIN_VM_DETACH_MANAGEMENT_NIC\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-vlan-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#0#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE
+				sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-vlan-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#0#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE
+				sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE
+				if [ "$KVM_VM_MAC2" != "" ]; then
+					echo "KVM_VM_NET_2=\"-net nic,vlan=2,macaddr=$KVM_VM_MAC2,model=$KVM_VM_NIC_TYPE2 -net tap,vlan=2,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE2,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE2\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_MAC_2=\"$KVM_VM_MAC2\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_NIC_TYPE_2=\"$KVM_VM_NIC_TYPE2\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_MAC_BRIDGE_2=\"$KVM_VM_MAC_BRIDGE2\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-vlan-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE2/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#1#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE2
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE2
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-vlan-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE2/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#1#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE2
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE2
+				else
+					echo "KVM_VM_NET_2=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_MAC_2=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_NIC_TYPE_2=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+					echo "KVM_VM_MAC_BRIDGE_2=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+				fi
+				if [ "$KVM_VM_MAC3" != "" ]; then
+					echo "KVM_VM_NET_3=\"-net nic,vlan=3,macaddr=$KVM_VM_MAC3,model=$KVM_VM_NIC_TYPE3 -net tap,vlan=3,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE3,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE3\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_MAC_3=\"$KVM_VM_MAC3\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_NIC_TYPE_3=\"$KVM_VM_NIC_TYPE3\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_MAC_BRIDGE_3=\"$KVM_VM_MAC_BRIDGE3\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-vlan-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE3/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#2#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE3
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE3
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-vlan-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE3/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#2#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE3
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE3
+				else
+					echo "KVM_VM_NET_3=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_MAC_3=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_NIC_TYPE_3=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+					echo "KVM_VM_MAC_BRIDGE_3=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+				fi
+				if [ "$KVM_VM_MAC4" != "" ]; then
+					echo "KVM_VM_NET_4=\"-net nic,vlan=4,macaddr=$KVM_VM_MAC4,model=$KVM_VM_NIC_TYPE4 -net tap,vlan=4,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE4,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE4\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_MAC_4=\"$KVM_VM_MAC4\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_NIC_TYPE_4=\"$KVM_VM_NIC_TYPE4\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_MAC_BRIDGE_4=\"$KVM_VM_MAC_BRIDGE4\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-vlan-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE4/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#3#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE4
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE4
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-vlan-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE4/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#3#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE4
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE4
+				else
+					echo "KVM_VM_NET_4=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_MAC_4=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_NIC_TYPE_4=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+					echo "KVM_VM_MAC_BRIDGE_4=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+				fi
+				if [ "$KVM_VM_MAC5" != "" ]; then
+					echo "KVM_VM_NET_5=\"-net nic,vlan=5,macaddr=$KVM_VM_MAC5,model=$KVM_VM_NIC_TYPE5 -net tap,vlan=5,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE5,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE5\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_MAC_5=\"$KVM_VM_MAC5\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_NIC_TYPE_5=\"$KVM_VM_NIC_TYPE5\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_MAC_BRIDGE_5=\"$KVM_VM_MAC_BRIDGE5\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-vlan-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE5/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#4#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE5
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net-$KVM_VM_MAC_BRIDGE5
+					cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-vlan-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_VM_MAC_BRIDGE5/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#4#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE5
+					sed -i -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net-$KVM_VM_MAC_BRIDGE5
+				else
+					echo "KVM_VM_NET_5=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_MAC_5=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_NIC_TYPE_5=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+					echo "KVM_VM_MAC_BRIDGE_5=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+				fi
+				chmod +x $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-*
+				;;
+
+		esac
+
+		# disk
+		# add empty disk disk parameter
+		echo "KVM_VM_DISK_1=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/disk1
+		echo "KVM_VM_DISK_SIZE_1=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/disk1
+		# empty 2. and 3. disk
+		echo "KVM_VM_DISK_2=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/disk2
+		echo "KVM_VM_DISK_SIZE_2=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/disk2
+		echo "KVM_VM_DISK_3=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/disk3
+		echo "KVM_VM_DISK_SIZE_3=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/disk3
+		# add empty disk disk parameter
+		echo "KVM_VM_DISK_4=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/disk4
+		echo "KVM_VM_DISK_SIZE_4=\"\"" >> $OPENQRM_VM_DIR/$KVM_VM_NAME/disk4
+
+		# CDROM
+		if [ "$KVM_VM_CDROM2" == "" ]; then
+			echo "KVM_VM_CDROM2=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom2
+		else
+			echo "KVM_VM_CDROM2=\"-drive file=$KVM_VM_CDROM2,media=cdrom\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom2
+		fi
+
+		# kvm-vm-local or kvm-vm-net
+		if [ "$KVM_VM_TYPE" == "kvm-vm-local" ]; then
+			# a cdrom/iso
+			if [ "$KVM_VM_BOOT_ISO" == "" ]; then
+				echo "KVM_VM_CDROM=\"\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom
+			else
+				echo "KVM_VM_CDROM=\"-cdrom $KVM_VM_BOOT_ISO\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom
+			fi
+			# boot from
+			case "$KVM_VM_BOOT" in
+				local)
+					echo "KVM_VM_BOOT=\"-boot cn\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+					;;
+				net)
+					echo "KVM_VM_BOOT=\"-boot n\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+					;;
+				network)
+					echo "KVM_VM_BOOT=\"-boot n\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+					;;
+				cdrom)
+					echo "KVM_VM_BOOT=\"-boot d\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+					echo "KVM_VM_CDROM=\"-cdrom /dev/cdrom\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom
+					;;
+				iso)
+					echo "KVM_VM_BOOT=\"-boot d\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+					echo "KVM_VM_CDROM=\"-cdrom $KVM_VM_BOOT_ISO\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom
+					;;
+			esac
+
+		elif [ "$KVM_VM_TYPE" == "kvm-vm-net" ]; then
+			echo "KVM_VM_BOOT=\"-boot n\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+			echo "" > $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom
+		fi
+
+		# vnc : check on which vnc display which can run it
+		ALREADY_USED_VNC_IDS=""
+		for VNC_CONF in `find $OPENQRM_VM_DIR/* -name vnc`; do
+			unset KVM_VM_VNC
+			. $VNC_CONF
+			USED_VNC_ID=`echo $KVM_VM_VNC | cut -d':' -f2`
+			ALREADY_USED_VNC_IDS="$USED_VNC_ID $ALREADY_USED_VNC_IDS"
+		done
+		NEW_VNC_ID=$OPENQRM_FIRST_VNC_ID
+		while (true); do
+			FOUND_VNC_ID="false"
+			for VNC_ID in $ALREADY_USED_VNC_IDS; do
+				if [ "$VNC_ID" == "$NEW_VNC_ID" ]; then
+					FOUND_VNC_ID="true"
+					continue
+				fi
+			done
+			if [ "$FOUND_VNC_ID" == "false" ]; then
+				break
+			else
+				NEW_VNC_ID=$(( NEW_VNC_ID + 1 ))
+			fi
+		done
+		# on which network to listen ?
+		if [ "$OPENQRM_PLUGIN_VM_VNC_LISTEN" == "all" ]; then
+			echo "KVM_VM_VNC=\"0.0.0.0:$NEW_VNC_ID\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/vnc
+			# prepare a list of all configured interfaces for the cloud vnc access
+			CLOUD_VNC_LISTEN=""
+			for LISTEN_IP in `ip a s | grep -w inet | awk '{ print $2 }' | cut -d'/' -f1 | grep -v 127.0.0.1`; do
+				CLOUD_VNC_LISTEN="$CLOUD_VNC_LISTEN, $LISTEN_IP:$NEW_VNC_ID"
+			done
+			CLOUD_VNC_LISTEN=`echo $CLOUD_VNC_LISTEN | sed -e "s/,//"`
+		else
+			echo "KVM_VM_VNC=\"$resource_ip:$NEW_VNC_ID\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/vnc
+			CLOUD_VNC_LISTEN="$resource_ip:$NEW_VNC_ID"
+		fi
+		# store the vnc infos for the cloud
+		echo "$CLOUD_VNC_LISTEN" > $KVM_VM_MAC.vnc
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $KVM_VM_MAC.vnc` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?kvm_server_command=put_vnc; then
+			openqrm_post_event 0 "create" 2 "openqrm-kvm-vm" "Could not post VM VNC access data to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $KVM_VM_MAC.vnc $KVM_VM_MAC.vnc.post
+		if [ "$KVM_VM_VNCPASSWORD" == "" ]; then
+			KVM_VM_VNCPASSWORD=`</dev/urandom tr -dc A-Za-z0-9 | head -c8`
+		fi
+		echo "KVM_VM_VNCPASSWORD=\"$KVM_VM_VNCPASSWORD\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/vncpassword
+		# vnc keymap
+		echo "KVM_VM_VNCKEYMAP=\"$KVM_VM_VNCKEYMAP\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/vnckeymap
+		# prepare directory for monitor sockets
+		mkdir -p $OPENQRM_VM_MONITOR_DIR
+		# do not start but fake as idle :)
+		chmod +x $OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm $OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm.incoming
+		# kvm-vm-local or kvm-vm-net
+		if [ "$KVM_VM_TYPE" == "kvm-vm-local" ]; then
+			# start monitor for the fake idle resource
+			kill `ps ax | grep openqrm-kvm-monitord | grep -v grep | grep -i $KVM_VM_MAC | awk {' print $1 '}` 2>/dev/null
+			$RUNSCREEN -dmS $KVM_VM_MAC $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/sbin/openqrm-kvm-monitord $KVM_VM_MAC
+		elif [ "$KVM_VM_TYPE" == "kvm-vm-net" ]; then
+
+			CMD_ERR=`$OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "create" 3 "openqrm-kvm-vm" "Error starting KVM VM $KVM_VM_NAME! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+		fi
+		touch $OPENQRM_VM_DIR/$KVM_VM_NAME/autostart.$resource_id
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+
+		openqrm_post_event 0 "create" 5 "openqrm-kvm-vm" "Created KVM VM $KVM_VM_NAME."
+		;;
+
+	update)
+		if [ "$KVM_VM_MAC" == "" ]; then
+			kvm_usage
+		fi
+		if [ "$KVM_VM_RAM" == "" ]; then
+			kvm_usage
+		fi
+		if [ "$KVM_VM_CPUS" == "" ]; then
+			KVM_VM_CPUS=1
+		fi
+		if [ "$KVM_VM_BOOT" == "" ]; then
+			KVM_VM_BOOT=net
+		fi
+		# get vm type
+		KVM_VM_TYPE=`get_vm_type $KVM_VM_NAME`
+		# already existing ?
+		if [ ! -f $OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm ]; then
+			openqrm_post_event 0 "update" 2 "openqrm-kvm" "KVM VM $KVM_VM_NAME does not exist on this Host. Not updating the VM!"
+			exit 1
+		fi
+		# prepare possible additional network cards
+		if [ "$KVM_VM_MAC2" != "" ]; then
+		    KVM_VM_NET_CONFIG2=" -m1 $KVM_VM_MAC2 -t1 $KVM_VM_NIC_TYPE2 -z1 $KVM_VM_MAC_BRIDGE2"
+		fi
+		if [ "$KVM_VM_MAC3" != "" ]; then
+		    KVM_VM_NET_CONFIG3=" -m2 $KVM_VM_MAC3 -t2 $KVM_VM_NIC_TYPE3 -z2 $KVM_VM_MAC_BRIDGE3"
+		fi
+		if [ "$KVM_VM_MAC4" != "" ]; then
+		    KVM_VM_NET_CONFIG4=" -m3 $KVM_VM_MAC4 -t3 $KVM_VM_NIC_TYPE4 -z3 $KVM_VM_MAC_BRIDGE4"
+		fi
+		if [ "$KVM_VM_MAC5" != "" ]; then
+		    KVM_VM_NET_CONFIG5=" -m4 $KVM_VM_MAC5 -t4 $KVM_VM_NIC_TYPE5 -z4 $KVM_VM_MAC_BRIDGE5"
+		fi
+		KVM_VM_NET_CONFIG="$KVM_VM_NET_CONFIG2 $KVM_VM_NET_CONFIG3 $KVM_VM_NET_CONFIG4 $KVM_VM_NET_CONFIG5"
+		# disk interface
+		if [ "$KVM_VM_DISK_INTERFACE" == "" ]; then
+			if [ -f "$OPENQRM_VM_DIR/$KVM_VM_NAME/disk-interface" ]; then
+				. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk-interface
+			else
+				KVM_VM_DISK_INTERFACE="ide"
+			fi
+		fi
+		# CDROM
+		if [ "$KVM_VM_CDROM2" != "" ]; then
+			KVM_VM_CDROM2="-cdrom $KVM_VM_CDROM2"
+		else
+			KVM_VM_CDROM2=""
+		fi
+
+		# kvm-vm-local or kvm-vm-net
+		if [ "$KVM_VM_TYPE" == "kvm-vm-local" ]; then
+			# boot ?
+			KVM_VM_BOOT_DEV_PARAM="local"
+			if [ "$KVM_VM_BOOT" != "" ]; then
+				case "$KVM_VM_BOOT" in
+					local)
+						KVM_VM_BOOT_DEV_PARAM="local"
+						;;
+					network)
+						KVM_VM_BOOT_DEV_PARAM="net"
+						;;
+					iso)
+						KVM_VM_BOOT_DEV_PARAM="iso"
+						;;
+					cdrom)
+						KVM_VM_BOOT_DEV_PARAM="cdrom"
+						;;
+				esac
+			fi
+			# iso ?
+			if [ "$KVM_VM_BOOT_ISO" != "" ]; then
+				KVM_VM_ISO_CONFIG="-i $KVM_VM_BOOT_ISO"
+			fi
+		elif [ "$KVM_VM_TYPE" == "kvm-vm-net" ]; then
+			KVM_VM_BOOT_DEV_PARAM="net"
+		fi
+
+		# vnc keymap
+		if [ "$KVM_VM_VNCKEYMAP" != "" ]; then
+			VNCKEYMAP_PARAMETER="-l $KVM_VM_VNCKEYMAP"
+		fi
+		# no lock for update since remove + create are locking
+		# save the disk files, we want to update everything else
+		KVM_VM_DISK_TMP_DIR=`mktemp -d /tmp/kvm-vm-disk-$KVM_VM_NAME.XXXXXX`
+		cp -f $OPENQRM_VM_DIR/$KVM_VM_NAME/disk[0-9] $KVM_VM_DISK_TMP_DIR/
+		# delete
+		$0 delete -n $KVM_VM_NAME
+		# re-create
+		$0 create -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD -n $KVM_VM_NAME -y $KVM_VM_TYPE -c $KVM_VM_CPUS -r $KVM_VM_RAM -o $KVM_VM_DISK_INTERFACE $KVM_VM_CDROM2 -b $KVM_VM_BOOT_DEV_PARAM $KVM_VM_ISO_CONFIG -m $KVM_VM_MAC -t $KVM_VM_NIC_TYPE -z $KVM_VM_MAC_BRIDGE $KVM_VM_NET_CONFIG -v $KVM_VM_VNCPASSWORD $VNCKEYMAP_PARAMETER
+		cp -f $KVM_VM_DISK_TMP_DIR/disk[0-9] $OPENQRM_VM_DIR/$KVM_VM_NAME/
+		rm -f $KVM_VM_DISK_TMP_DIR/disk*
+		rmdir $KVM_VM_DISK_TMP_DIR
+		openqrm_post_event 0 "update" 5 "openqrm-kvm-vm" "Updated KVM VM $KVM_VM_NAME."
+		;;
+
+
+
+	clone)
+		# new mac address
+		if [ "$KVM_VM_MAC" == "" ]; then
+			kvm_usage
+		fi
+		# origin existing ?
+		if [ ! -f $OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm ]; then
+			openqrm_post_event 0 "clone" 2 "openqrm-kvm" "KVM VM $KVM_VM_NAME does not exist on this Host. Not cloning the VM $KVM_VM_NAME!"
+			exit 1
+		fi
+		# clone name already existing ?
+		if [ -f $OPENQRM_VM_DIR/$KVM_VM_CLONE_NAME/$KVM_VM_CLONE_NAME.kvm ]; then
+			openqrm_post_event 0 "clone" 2 "openqrm-kvm" "KVM VM $KVM_VM_CLONE_NAME already exist on this Host. Not cloning the VM $KVM_VM_NAME!"
+			exit 1
+		fi
+		# read origin VM config
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/cpus
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/ram
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk1
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk2
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk3
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk4
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/vnc
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+
+		if [ -f "$OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom2" ]; then
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom2
+		fi
+		if [ -f "$OPENQRM_VM_DIR/$KVM_VM_NAME/vncpassword" ]; then
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/vncpassword
+		fi
+		if [ -f "$OPENQRM_VM_DIR/$KVM_VM_NAME/vnckeymap" ]; then
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/vnckeymap
+		fi
+		# disk interface
+		if [ "$KVM_VM_DISK_INTERFACE" == "" ]; then
+			if [ -f "$OPENQRM_VM_DIR/$KVM_VM_NAME/disk-interface" ]; then
+				. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk-interface
+			else
+				KVM_VM_DISK_INTERFACE="ide"
+			fi
+		fi
+		# CDROM
+		if [ -f "$OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom2" ]; then
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom2
+			if [ "$KVM_VM_CDROM2" != "" ]; then
+				KVM_VM_CDROM2=$(echo "$KVM_VM_CDROM2" | sed -e 's/-drive file=//' | sed -e 's/,media=cdrom//')
+				KVM_VM_CDROM2="-cdrom $KVM_VM_CDROM2"
+			else
+				KVM_VM_CDROM2=""
+			fi
+		else
+			KVM_VM_CDROM2=""
+		fi
+		# get vm type
+		KVM_VM_TYPE=`get_vm_type $KVM_VM_NAME`
+		# prepare possible additional network cards
+		if [ "$KVM_VM_MAC_2" != "" ]; then
+		    # generate new mac
+		    KVM_VM_MAC_2=`kvm_gen_mac`
+		    KVM_VM_NET_CONFIG_2=" -m1 $KVM_VM_MAC_2 -t1 $KVM_VM_NIC_TYPE_2 -z1 $KVM_VM_MAC_BRIDGE_2"
+		fi
+		if [ "$KVM_VM_MAC_3" != "" ]; then
+		    KVM_VM_MAC_3=`kvm_gen_mac`
+		    KVM_VM_NET_CONFIG_3=" -m2 $KVM_VM_MAC_3 -t2 $KVM_VM_NIC_TYPE_3 -z2 $KVM_VM_MAC_BRIDGE_3"
+		fi
+		if [ "$KVM_VM_MAC_4" != "" ]; then
+		    KVM_VM_MAC_4=`kvm_gen_mac`
+		    KVM_VM_NET_CONFIG_4=" -m3 $KVM_VM_MAC_4 -t3 $KVM_VM_NIC_TYPE_4 -z3 $KVM_VM_MAC_BRIDGE_4"
+		fi
+		if [ "$KVM_VM_MAC_5" != "" ]; then
+		    KVM_VM_MAC_5=`kvm_gen_mac`
+		    KVM_VM_NET_CONFIG_5=" -m4 $KVM_VM_MAC_5 -t4 $KVM_VM_NIC_TYPE_5 -z4 $KVM_VM_MAC_BRIDGE_5"
+		fi
+		KVM_VM_NET_CONFIG="$KVM_VM_NET_CONFIG_2 $KVM_VM_NET_CONFIG_3 $KVM_VM_NET_CONFIG_4 $KVM_VM_NET_CONFIG_5"
+		# kvm-vm-local or kvm-vm-net
+		if [ "$KVM_VM_TYPE" == "kvm-vm-local" ]; then
+			# boot ?
+			KVM_VM_BOOT_DEV_PARAM="local"
+			if [ "$KVM_VM_BOOT" != "" ]; then
+				KVM_VM_BOOT_DEV=`echo $KVM_VM_BOOT | awk '{ print $2 }'`
+				case "$KVM_VM_BOOT_DEV" in
+					c)
+						KVM_VM_BOOT_DEV_PARAM="local"
+						;;
+					n)
+						KVM_VM_BOOT_DEV_PARAM="net"
+						;;
+					d)
+						KVM_VM_BOOT_DEV_PARAM="iso"
+						;;
+				esac
+			fi
+			# iso ?
+			if [ "$KVM_VM_BOOT_ISO" != "" ]; then
+				KVM_VM_BOOT_ISO_DEV=`echo $KVM_VM_BOOT_ISO | awk '{ print $2 }'`
+				KVM_VM_ISO_CONFIG="-i $KVM_VM_BOOT_ISO_DEV"
+			fi
+		elif [ "$KVM_VM_TYPE" == "kvm-vm-net" ]; then
+			KVM_VM_BOOT_DEV_PARAM="net"
+		fi
+		# vnc
+		if [ "$KVM_VM_VNCPASSWORD" != "" ]; then
+			KVM_VM_VNCPASSWORD_CONFIG=" -v $KVM_VM_VNCPASSWORD"
+		fi
+		# vnc keymap
+		if [ "$KVM_VM_VNCKEYMAP" != "" ]; then
+			VNCKEYMAP_PARAMETER="-l $KVM_VM_VNCKEYMAP"
+		fi
+
+		$0 create -n $KVM_VM_CLONE_NAME -y $KVM_VM_TYPE -c $KVM_VM_CPUS -r $KVM_VM_RAM -o $KVM_VM_DISK_INTERFACE $KVM_VM_CDROM2 -b $KVM_VM_BOOT_DEV_PARAM $KVM_VM_ISO_CONFIG -m $KVM_VM_MAC -t $KVM_VM_NIC_TYPE_1 -z $KVM_VM_MAC_BRIDGE_1 $KVM_VM_NET_CONFIG $KVM_VM_VNCPASSWORD_CONFIG $VNCKEYMAP_PARAMETER $KVM_CDROM2
+		openqrm_post_event 0 "clone" 5 "openqrm-kvm-vm" "Cloned KVM VM $KVM_VM_NAME to $KVM_VM_CLONE_NAME."
+		;;
+
+
+	start)
+		# get vm type
+		KVM_VM_TYPE=`get_vm_type $KVM_VM_NAME`
+
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# kvm-vm-local or kvm-vm-net
+		if [ "$KVM_VM_TYPE" == "kvm-vm-local" ]; then
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+			# start only if we have a root-disk
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk1
+			if [ "$KVM_VM_DISK_1" != "" ]; then
+				# lvol or blockfile ?
+				if echo $KVM_VM_DISK_1 | grep ^/dev 1>/dev/null; then
+					# aquire global lock for lvm operations
+					if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+						if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+							openqrm_global_lock aquire lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD $LOCK_TIME "Start of VM $KVM_VM_NAME on volume $KVM_VM_DISK_1"
+						fi
+					fi
+					if [ ! -e "$KVM_VM_DISK_1" ]; then
+						# activate the lvol
+						kvm_refresh_lvm
+						lvchange -ay -y $KVM_VM_DISK_1
+						if [ ! -e "$KVM_VM_DISK_1" ]; then
+							lvchange -ay -y $KVM_VM_DISK_1
+						fi
+					fi
+					lvchange -ay -y $KVM_VM_DISK_1
+					# release global lock
+					if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+						if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+							openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+						fi
+					fi
+				fi
+				# start the vm
+				CMD_ERR=`$OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm 2>&1`
+				if [ "$?" != 0 ]; then
+					CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+					openqrm_post_event 0 "start" 3 "openqrm-kvm-vm" "Error starting KVM VM $KVM_VM_NAME! $CMD_ERR"
+
+					openqrm_lock_queue release kvm $LOCK_TIME
+					trap '' EXIT
+
+					exit 1
+				fi
+
+				# monitoring on the host or vm ?
+				if [ "$OPENQRM_PLUGIN_KVM_VM_MONITORING_ON_HOST" != "false" ]; then
+					kill `ps ax | grep openqrm-kvm-monitord | grep -v grep | grep -i $KVM_VM_MAC_1 | awk {' print $1 '}` 2>/dev/null
+					$RUNSCREEN -dmS $KVM_VM_MAC_1 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/sbin/openqrm-kvm-monitord $KVM_VM_MAC_1
+				fi
+			else
+				# idle, start the vm monitord / make sure it is stopped before
+				kill `ps ax | grep openqrm-kvm-monitord | grep -v grep | grep -i $KVM_VM_MAC_1 | awk {' print $1 '}` 2>/dev/null
+				$RUNSCREEN -dmS $KVM_VM_MAC_1 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/sbin/openqrm-kvm-monitord $KVM_VM_MAC_1
+			fi
+		elif [ "$KVM_VM_TYPE" == "kvm-vm-net" ]; then
+
+			CMD_ERR=`$OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "start" 3 "openqrm-kvm-vm" "Error starting KVM VM $KVM_VM_NAME! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+		fi
+		touch $OPENQRM_VM_DIR/$KVM_VM_NAME/autostart.$resource_id
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+
+		openqrm_post_event 0 "start" 5 "openqrm-kvm-vm" "Started KVM VM $KVM_VM_NAME."
+		;;
+	start_by_mac)
+		KVM_VM_NAME=`grep -rHi $KVM_VM_MAC $OPENQRM_VM_DIR/*/net1 2>/dev/null | grep KVM_VM_MAC | cut -d':' -f1 2>/dev/null` 2>/dev/null
+		KVM_VM_NAME=`dirname $KVM_VM_NAME` 2>/dev/null
+		KVM_VM_NAME=`basename $KVM_VM_NAME` 2>/dev/null
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "start_by_mac" 2 "openqrm-kvm-vm" "Could not find KVM VM $KVM_VM_MAC on host."
+			exit 1
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# get vm type
+		KVM_VM_TYPE=`get_vm_type $KVM_VM_NAME`
+		# kvm-vm-local or kvm-vm-net
+		if [ "$KVM_VM_TYPE" == "kvm-vm-local" ]; then
+			echo "KVM_VM_DISK_1=\"$KVM_VM_DISK\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/disk1
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk1
+			# start only if we have a root-disk
+			if [ "$KVM_VM_DISK_1" != "" ]; then
+				# lvol or blockfile ?
+				if echo $KVM_VM_DISK_1 | grep ^/dev 1>/dev/null; then
+					# aquire global lock for lvm operations
+					if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+						if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+							openqrm_global_lock aquire lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD $LOCK_TIME "Start-by-mac of VM $KVM_VM_NAME on volume $KVM_VM_DISK_1"
+						fi
+					fi
+					if [ ! -e "$KVM_VM_DISK_1" ]; then
+						# activate the lvol
+						kvm_refresh_lvm
+						lvchange -ay -y $KVM_VM_DISK_1
+						if [ ! -e "$KVM_VM_DISK_1" ]; then
+							lvchange -ay -y $KVM_VM_DISK_1
+						fi
+					fi
+					# always activate the lvol
+					lvchange -ay -y $KVM_VM_DISK_1
+					# release global lock
+					if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+						if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+							openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+						fi
+					fi
+
+					# ! We do not start here since this is done by the restart_by_mac function
+						# start + boot local
+						# $OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm
+				fi
+			fi
+			# ! We do not start here since this is done by the restart_by_mac function
+			#	# start the vm monitord / make sure it is stopped before
+			#	kill `ps ax | grep openqrm-kvm-monitord | grep -v grep | grep -i $KVM_VM_MAC | awk {' print $1 '}` 2>/dev/null
+			#	$RUNSCREEN -dmS $KVM_VM_MAC $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/sbin/openqrm-kvm-monitord $KVM_VM_MAC
+			#	touch $OPENQRM_VM_DIR/$KVM_VM_NAME/autostart.$resource_id
+		elif [ "$KVM_VM_TYPE" == "kvm-vm-net" ]; then
+			CMD_ERR=`$OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "start_by_mac" 2 "openqrm-kvm-vm" "Error starting KVM VM $KVM_VM_NAME! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+		fi
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+
+		openqrm_post_event 0 "start_by_mac" 5 "openqrm-kvm-vm" "Started KVM VM $KVM_VM_NAME."
+		;;
+	stop)
+		if [ ! -e "$OPENQRM_VM_DIR/$KVM_VM_NAME/net1" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "stop" 2 "openqrm-kvm-vm" "Network configuration of KVM VM $KVM_VM_NAME does not exists!"
+			exit 1
+		fi
+		# get mac
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+		if [ "$KVM_VM_MAC_1" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "stop" 2 "openqrm-kvm-vm" "Could not find mac address of KVM VM $KVM_VM_NAME!"
+			exit 1
+		fi
+		# get vm type
+		KVM_VM_TYPE=`get_vm_type $KVM_VM_NAME`
+
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# send powerdown
+		if [ -e "$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon" ]; then
+			echo "system_powerdown" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+		fi
+		# wait until shutdown-delay, if VM is not down then stop hard
+		KVM_VM_SHUTDOWN_LOOP=0
+		while ps ax | grep -i "macaddr=$KVM_VM_MAC_1" | grep kvm | grep -i screen | grep -v grep 1>/dev/null; do
+			sleep 1
+			KVM_VM_SHUTDOWN_LOOP=$(( KVM_VM_SHUTDOWN_LOOP + 1 ))
+			if [ "$KVM_VM_SHUTDOWN_LOOP" == "$KVM_VM_SHUTDOWN_DELAY" ]; then
+				break
+			fi
+			# send powerdown again
+			echo "system_powerdown" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+		done
+
+		# quit via the monitor socket does not run ifdown-net-script
+		VM_PID=`ps ax | grep -i "macaddr=$KVM_VM_MAC_1" | grep kvm | grep -i screen | grep -v grep | awk {' print $1 '}`
+		if [ "$VM_PID" != "" ]; then
+			if [ "$KVM_VM_TYPE" == "kvm-vm-local" ]; then
+				openqrm_post_event 0 "stop" 5 "openqrm-kvm-vm" "Force stopping KVM VM $KVM_VM_NAME! Stopping PID $VM_PID"
+			fi
+			kill $VM_PID
+		fi
+		# kill the status monitor
+		kill `ps ax | grep openqrm-kvm-monitord | grep -v grep | grep -i $KVM_VM_MAC_1 | awk {' print $1 '}` 2>/dev/null
+		rm -f $OPENQRM_VM_DIR/$KVM_VM_NAME/autostart.$resource_id
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+
+		openqrm_post_event 0 "stop" 5 "openqrm-kvm-vm" "Stopped KVM VM $KVM_VM_NAME."
+		;;
+
+	stop_by_mac)
+		KVM_VM_NAME=`grep -rHi $KVM_VM_MAC $OPENQRM_VM_DIR/*/net1 2>/dev/null | grep KVM_VM_MAC | cut -d':' -f1 2>/dev/null` 2>/dev/null
+		KVM_VM_NAME=`dirname $KVM_VM_NAME` 2>/dev/null
+		KVM_VM_NAME=`basename $KVM_VM_NAME` 2>/dev/null
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "stop_by_mac" 2 "openqrm-kvm-vm" "Could not find KVM VM $KVM_VM_MAC on host."
+			exit 1
+		fi
+		if [ ! -e "$OPENQRM_VM_DIR/$KVM_VM_NAME/net1" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "stop_by_mac" 2 "openqrm-kvm-vm" "Network configuration of KVM VM $KVM_VM_NAME does not exists!"
+			exit 1
+		fi
+		# refresh mac
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+		if [ "$KVM_VM_MAC_1" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "stop_by_mac" 2 "openqrm-kvm-vm" "Could not find mac address of KVM VM $KVM_VM_NAME!"
+			exit 1
+		fi
+		if [ "$KVM_VM_MAC" != "$KVM_VM_MAC_1" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "stop_by_mac" 2 "openqrm-kvm-vm" "Mac address mismatch on KVM VM $KVM_VM_NAME!"
+			exit 1
+		fi
+
+		# get vm type
+		KVM_VM_TYPE=`get_vm_type $KVM_VM_NAME`
+
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# send powerdown
+		if [ -e "$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon" ]; then
+			echo "system_powerdown" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+		fi
+		# wait until shutdown-delay, if VM is not down then stop hard
+		KVM_VM_SHUTDOWN_LOOP=0
+		while ps ax | grep -i "macaddr=$KVM_VM_MAC_1" | grep kvm | grep -i screen | grep -v grep 1>/dev/null; do
+			sleep 1
+			KVM_VM_SHUTDOWN_LOOP=$(( KVM_VM_SHUTDOWN_LOOP + 1 ))
+			if [ "$KVM_VM_SHUTDOWN_LOOP" == "$KVM_VM_SHUTDOWN_DELAY" ]; then
+				break
+			fi
+			# send powerdown again
+			echo "system_powerdown" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+		done
+
+		VM_PID=`ps ax | grep -i "macaddr=$KVM_VM_MAC_1" | grep kvm | grep -i screen | grep -v grep | awk {' print $1 '}`
+		if [ "$VM_PID" != "" ]; then
+			if [ "$KVM_VM_TYPE" == "kvm-vm-local" ]; then
+				openqrm_post_event 0 "stop_by_mac" 5 "openqrm-kvm-vm" "Force stopping KVM VM $KVM_VM_NAME."
+			fi
+			kill $VM_PID
+		fi
+		#echo "quit" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+		# kill the status monitor
+		kill `ps ax | grep openqrm-kvm-monitord | grep -v grep | grep -i $KVM_VM_MAC_1 | awk {' print $1 '}` 2>/dev/null
+		rm -f $OPENQRM_VM_DIR/$KVM_VM_NAME/autostart.$resource_id
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+
+		openqrm_post_event 0 "stop_by_mac" 5 "openqrm-kvm-vm" "Stopped KVM VM $KVM_VM_NAME."
+		;;
+
+	restart_by_mac)
+		KVM_VM_NAME=`grep -rHi $KVM_VM_MAC $OPENQRM_VM_DIR/*/net1 2>/dev/null | grep KVM_VM_MAC | cut -d':' -f1 2>/dev/null` 2>/dev/null
+		KVM_VM_NAME=`dirname $KVM_VM_NAME` 2>/dev/null
+		KVM_VM_NAME=`basename $KVM_VM_NAME` 2>/dev/null
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "restart_by_mac" 2 "openqrm-kvm-vm" "Could not find KVM VM $KVM_VM_MAC on host."
+			exit 1
+		fi
+		if [ ! -e "$OPENQRM_VM_DIR/$KVM_VM_NAME/net1" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "stop_by_mac" 2 "openqrm-kvm-vm" "Network configuration of KVM VM $KVM_VM_NAME does not exists!"
+			exit 1
+		fi
+		# refresh mac
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+		if [ "$KVM_VM_MAC_1" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "restart_by_mac" 2 "openqrm-kvm-vm" "Could not find mac address of KVM VM $KVM_VM_NAME!"
+			exit 1
+		fi
+		if [ "$KVM_VM_MAC" != "$KVM_VM_MAC_1" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "restart_by_mac" 2 "openqrm-kvm-vm" "Mac address mismatch on KVM VM $KVM_VM_NAME!"
+			exit 1
+		fi
+
+		# get vm type
+		KVM_VM_TYPE=`get_vm_type $KVM_VM_NAME`
+
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# kvm-vm-local or kvm-vm-net
+		if [ "$KVM_VM_TYPE" == "kvm-vm-local" ]; then
+			# send powerdown
+			if [ -e "$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon" ]; then
+				echo "system_powerdown" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+			fi
+			# vm is not running, we can skip waiting for shutdown
+			# wait until shutdown-delay, if VM is not down then stop hard
+			KVM_VM_SHUTDOWN_LOOP=0
+			while ps ax | grep -i "macaddr=$KVM_VM_MAC_1" | grep kvm | grep -i screen | grep -v grep 1>/dev/null; do
+				sleep 1
+				KVM_VM_SHUTDOWN_LOOP=$(( KVM_VM_SHUTDOWN_LOOP + 1 ))
+				if [ "$KVM_VM_SHUTDOWN_LOOP" == "$KVM_VM_SHUTDOWN_DELAY" ]; then
+					break
+				fi
+				# send powerdown again
+				echo "system_powerdown" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+			done
+			VM_PID=`ps ax | grep -i "macaddr=$KVM_VM_MAC_1" | grep kvm | grep -i screen | grep -v grep | awk {' print $1 '}`
+			if [ "$VM_PID" != "" ]; then
+				openqrm_post_event 0 "restart_by_mac" 5 "openqrm-kvm-vm" "Force stopping KVM VM $KVM_VM_NAME $VM_PID."
+				kill $VM_PID
+			fi
+			# add disk disk parameter if disk param is not set to noop
+			if [ "$KVM_VM_DISK" != "noop" ]; then
+				echo "KVM_VM_DISK_1=\"$KVM_VM_DISK\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/disk1
+			fi
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk1
+			if [ "$KVM_VM_DISK_1" != "" ]; then
+				# lvol or blockfile ?
+				if echo $KVM_VM_DISK_1 | grep ^/dev 1>/dev/null; then
+					# aquire global lock for lvm operations
+					if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+						if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+							openqrm_global_lock aquire lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD $LOCK_TIME "Restart-by-mac of VM $KVM_VM_NAME on volume $KVM_VM_DISK_1"
+						fi
+					fi
+					if [ ! -e "$KVM_VM_DISK_1" ]; then
+						# activate the lvol
+						kvm_refresh_lvm
+						lvchange -ay -y $KVM_VM_DISK_1
+						if [ ! -e "$KVM_VM_DISK_1" ]; then
+							lvchange -ay -y $KVM_VM_DISK_1
+						fi
+					fi
+					# activate the lvol
+					lvchange -ay -y $KVM_VM_DISK_1
+					# release global lock
+					if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+						if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+							openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+						fi
+					fi
+				fi
+			fi
+			# stop the vm monitor
+			kill `ps ax | grep openqrm-kvm-monitord | grep -v grep | grep -i $KVM_VM_MAC | awk {' print $1 '}` 2>/dev/null
+
+			# start only if we have a root-disk
+			if [ "$KVM_VM_DISK_1" != "" ]; then
+
+				if [ "$OPENQRM_PLUGIN_KVM_E2FSCK_AFTER_CLONE" == "true" ]; then
+					# filesystem resize e2fsck
+					FIRST_PARTITION=`kpartx -av $KVM_VM_DISK_1 | awk '{ print $3 }' | head -n1`
+					if [ "$?" != 0 ]; then
+						openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm-vm" "Adding device maps for volume $KVM_VM_DISK_1 failed!"
+						return
+					fi
+					sleep 2
+					# wait until the device link is created
+					DEVICE_MAPPER_TIMEOUT=30
+					if [ "$FIRST_PARTITION" != "" ]; then
+						while (:); do
+							if [ -e "/dev/mapper/$FIRST_PARTITION" ]; then
+								break
+							fi
+							sleep 1
+							DLT=$(( $DLT + 1 ))
+							if [ "$DLT" == $DEVICE_MAPPER_TIMEOUT ]; then
+								openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm-vm" "Adding device maps for volume /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME timed out! Not resizsing!"
+								break
+							fi
+						done
+						FSCKERROR=$(e2fsck -fy /dev/mapper/$FIRST_PARTITION 2>&1)
+						if [ $? != 0 ] ; then
+							openqrm_post_event 0 "kvm_resize_fs" 5 "openqrm-kvm-vm" "e2fsck -fy /dev/mapper/$FIRST_PARTITION: $? $FSCKERROR"
+						fi
+					fi
+					kpartx -d $KVM_VM_DISK_1
+				fi
+
+				# :) start + boot local
+				CMD_ERR=`$OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm 2>&1`
+				if [ "$?" != 0 ]; then
+					CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+					openqrm_post_event 0 "restart_by_mac" 2 "openqrm-kvm-vm" "Error restarting KVM VM $KVM_VM_NAME! $CMD_ERR"
+
+					openqrm_lock_queue release kvm $LOCK_TIME
+					trap '' EXIT
+
+					exit 1
+				fi
+				# monitoring on the host or vm ?
+				if [ "$OPENQRM_PLUGIN_KVM_VM_MONITORING_ON_HOST" != "false" ]; then
+					kill `ps ax | grep openqrm-kvm-monitord | grep -v grep | grep -i $KVM_VM_MAC | awk {' print $1 '}` 2>/dev/null
+					$RUNSCREEN -dmS $KVM_VM_MAC $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/sbin/openqrm-kvm-monitord $KVM_VM_MAC
+				fi
+			else
+				# start the vm monitord
+				kill `ps ax | grep openqrm-kvm-monitord | grep -v grep | grep -i $KVM_VM_MAC | awk {' print $1 '}` 2>/dev/null
+				$RUNSCREEN -dmS $KVM_VM_MAC $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/sbin/openqrm-kvm-monitord $KVM_VM_MAC
+			fi
+			touch $OPENQRM_VM_DIR/$KVM_VM_NAME/autostart.$resource_id
+			openqrm_post_event 0 "restart_by_mac" 5 "openqrm-kvm-vm" "Restarted KVM VM $KVM_VM_NAME."
+		fi
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+	reboot)
+		if [ ! -e "$OPENQRM_VM_DIR/$KVM_VM_NAME/net1" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "stop_by_mac" 2 "openqrm-kvm-vm" "Network configuration of KVM VM $KVM_VM_NAME does not exists!"
+			exit 1
+		fi
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+		if [ "$KVM_VM_MAC_1" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "restart_by_mac" 2 "openqrm-kvm-vm" "Could not find mac address of KVM VM $KVM_VM_NAME!"
+			exit 1
+		fi
+		# get vm type
+		KVM_VM_TYPE=`get_vm_type $KVM_VM_NAME`
+		# kvm-vm-local or kvm-vm-net
+		if [ "$KVM_VM_TYPE" == "kvm-vm-local" ]; then
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			# send powerdown
+			if [ -e "$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon" ]; then
+				echo "system_powerdown" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+			fi
+			# wait until shutdown-delay, if VM is not down then stop hard
+			KVM_VM_SHUTDOWN_LOOP=0
+			while ps ax | grep -i "macaddr=$KVM_VM_MAC_1" | grep kvm | grep -i screen | grep -v grep 1>/dev/null; do
+				sleep 1
+				KVM_VM_SHUTDOWN_LOOP=$(( KVM_VM_SHUTDOWN_LOOP + 1 ))
+				if [ "$KVM_VM_SHUTDOWN_LOOP" == "$KVM_VM_SHUTDOWN_DELAY" ]; then
+					break
+				fi
+				# send powerdown again
+				echo "system_powerdown" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+			done
+			VM_PID=`ps ax | grep -i "macaddr=$KVM_VM_MAC_1" | grep kvm | grep -i screen | grep -v grep | awk {' print $1 '}`
+			if [ "$VM_PID" != "" ]; then
+				openqrm_post_event 0 "reboot" 5 "openqrm-kvm-vm" "Force stopping KVM VM $KVM_VM_NAME! $VM_PID"
+				kill $VM_PID
+			fi
+
+			# start only if we have a root-disk
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk1
+			if [ "$KVM_VM_DISK_1" != "" ]; then
+				CMD_ERR=`$OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm 2>&1`
+				if [ "$?" != 0 ]; then
+					CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+					openqrm_post_event 0 "reboot" 2 "openqrm-kvm-vm" "Error rebooting KVM VM $KVM_VM_NAME! $CMD_ERR"
+
+					openqrm_lock_queue release kvm $LOCK_TIME
+					trap '' EXIT
+
+					exit 1
+				fi
+				
+				# monitoring on the host or vm ?
+				if [ "$OPENQRM_PLUGIN_KVM_VM_MONITORING_ON_HOST" != "false" ]; then
+					kill `ps ax | grep openqrm-kvm-monitord | grep -v grep | grep -i $KVM_VM_MAC_1 | awk {' print $1 '}` 2>/dev/null
+					$RUNSCREEN -dmS $KVM_VM_MAC_1 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/sbin/openqrm-kvm-monitord $KVM_VM_MAC_1
+				fi
+			else
+				# restart the vm monitord
+				kill `ps ax | grep openqrm-kvm-monitord | grep -v grep | grep -i $KVM_VM_MAC_1 | awk {' print $1 '}` 2>/dev/null
+				$RUNSCREEN -dmS $KVM_VM_MAC_1 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/sbin/openqrm-kvm-monitord $KVM_VM_MAC_1
+			fi
+			touch $OPENQRM_VM_DIR/$KVM_VM_NAME/autostart.$resource_id
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+		elif [ "$KVM_VM_TYPE" == "kvm-vm-net" ]; then
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			echo "system_reset" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+			touch $OPENQRM_VM_DIR/$KVM_VM_NAME/autostart.$resource_id
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+		fi
+		openqrm_post_event 0 "reboot" 5 "openqrm-kvm-vm" "Rebooted KVM VM $KVM_VM_NAME."
+		;;
+	delete)
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		if [ -e "$OPENQRM_VM_DIR/$KVM_VM_NAME/net1" ]; then
+			# be sure it is stopped
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+			if [ "$KVM_VM_MAC_1" != "" ]; then
+				# wait until shutdown-delay, if VM is not down then stop hard
+				KVM_VM_SHUTDOWN_LOOP=0
+				while ps ax | grep -i "macaddr=$KVM_VM_MAC_1" | grep kvm | grep -i screen | grep -v grep 1>/dev/null; do
+					sleep 1
+					KVM_VM_SHUTDOWN_LOOP=$(( KVM_VM_SHUTDOWN_LOOP + 1 ))
+					if [ "$KVM_VM_SHUTDOWN_LOOP" == "$KVM_VM_SHUTDOWN_DELAY" ]; then
+						break
+					fi
+					# send powerdown again
+					echo "system_powerdown" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+				done
+				# still running, force stop
+				VM_PID=`ps ax | grep -i "macaddr=$KVM_VM_MAC_1" | grep kvm | grep -i screen | grep -v grep | awk {' print $1 '}`
+				if [ "$VM_PID" != "" ]; then
+					openqrm_post_event 0 "delete" 5 "openqrm-kvm-vm" "KVM VM $KVM_VM_NAME still running in delete! Stopping $VM_PID"
+					kill $VM_PID
+				fi
+			fi
+		fi
+		#echo "quit" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+		sleep 2
+
+		rm -rf $OPENQRM_VM_DIR/$KVM_VM_NAME
+		rm -f $OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+		# we have to wait here because when having a shared config dir
+		# nfs can still have files in use/lock
+		KVM_REMOVE_WAIT=0
+		while (:); do
+			if [ -d "$OPENQRM_VM_DIR/$KVM_VM_NAME" ]; then
+				openqrm_post_event 0 "delete" 5 "openqrm-kvm-vm" "Delete KVM VM $KVM_VM_NAME failed, retrying."
+			else
+				openqrm_post_event 0 "delete" 5 "openqrm-kvm-vm" "Delete KVM VM $KVM_VM_NAME success."
+				break
+			fi
+			if [ "$KVM_REMOVE_WAIT" == "$KVM_REMOVE_MAX_WAIT" ]; then
+				openqrm_post_event 0 "delete" 3 "openqrm-kvm-vm" "Delete KVM VM $KVM_VM_NAME failed, giving up!"
+				break
+			fi
+			KVM_REMOVE_WAIT=$(( KVM_REMOVE_WAIT + 1 ))
+			rm -rf $OPENQRM_VM_DIR/$KVM_VM_NAME
+			sleep 1
+		done
+		openqrm_post_event 0 "delete" 5 "openqrm-kvm-vm" "Deleted KVM VM $KVM_VM_NAME."
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+	list)
+		ls $OPENQRM_VM_DIR/
+		;;
+	post_vm_list)
+		VM_LIST_TMP=$resource_id.vm_list
+		> $VM_LIST_TMP
+		if [ ! -d $OPENQRM_VM_DIR ]; then
+			mkdir -p $OPENQRM_VM_DIR
+		fi
+		# create processlist
+		ps ax > $resource_id.process_list
+		for kvmvm in `ls $OPENQRM_VM_DIR/`; do
+			if [ ! -f "$OPENQRM_VM_DIR/$kvmvm/cpus" ]; then
+				continue
+			fi
+			# get mac address
+			. $OPENQRM_VM_DIR/$kvmvm/cpus
+			. $OPENQRM_VM_DIR/$kvmvm/ram
+			. $OPENQRM_VM_DIR/$kvmvm/net1
+			. $OPENQRM_VM_DIR/$kvmvm/net2
+			. $OPENQRM_VM_DIR/$kvmvm/net3
+			. $OPENQRM_VM_DIR/$kvmvm/net4
+			. $OPENQRM_VM_DIR/$kvmvm/net5
+			. $OPENQRM_VM_DIR/$kvmvm/vnc
+			. $OPENQRM_VM_DIR/$kvmvm/vncpassword
+
+			# check if active
+			if grep -i "macaddr=$KVM_VM_MAC_1" $resource_id.process_list | grep -i screen 1>/dev/null; then
+			    if [ -f "$OPENQRM_VM_DIR/$kvmvm/migration_in_progress" ]; then
+				# migration active !
+				VM_ACTIVE=2
+			    else
+				VM_ACTIVE=1
+			    fi
+			else
+				VM_ACTIVE=0
+			fi
+			echo "$VM_ACTIVE""@""$kvmvm""@""$KVM_VM_MAC_1""@""$KVM_VM_CPUS""@""$KVM_VM_RAM""@""$KVM_VM_VNC""@""$KVM_VM_VNCPASSWORD""@""$KVM_VM_MAC_2,$KVM_VM_MAC_3,$KVM_VM_MAC_4,$KVM_VM_MAC_5""@" >> $VM_LIST_TMP
+		done
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $VM_LIST_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?kvm_server_command=get_kvm_server; then
+			openqrm_post_event 0 "post_vm_list" 2 "openqrm-kvm-vm" "Could not post VM list to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $resource_id.process_list
+		rm -f $VM_LIST_TMP
+		rm -f $VM_LIST_TMP.post
+		;;
+	post_vm_config)
+		if [ "$KVM_VM_NAME" == "" ]; then
+			kvm_usage
+		fi
+		VM_CONFIG_TMP=$resource_id.$KVM_VM_NAME.vm_config
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/cpus
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/ram
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk1
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk2
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk3
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk4
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/vnc
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+		if [ -f "$OPENQRM_VM_DIR/$KVM_VM_NAME/vncpassword" ]; then
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/vncpassword
+		fi
+		if [ -f "$OPENQRM_VM_DIR/$KVM_VM_NAME/vnckeymap" ]; then
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/vnckeymap
+		fi
+		# disk interface
+		if [ -f "$OPENQRM_VM_DIR/$KVM_VM_NAME/disk-interface" ]; then
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk-interface
+		else
+			KVM_VM_DISK_INTERFACE="ide"
+		fi
+		# CDROM
+		if [ -f "$OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom2" ]; then
+			. $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom2
+		else
+			KVM_VM_CDROM2=""
+		fi
+		# get vm type
+		KVM_VM_TYPE=`get_vm_type $KVM_VM_NAME`
+		# made the boot device readable
+		KVM_VM_BOOT_STR="local"
+		KVM_VM_BOOT=`echo $KVM_VM_BOOT | awk {' print $2 '}`
+		case "$KVM_VM_BOOT" in
+			d*)
+				if echo $KVM_VM_CDROM | grep /dev/cdrom &>/dev/null; then
+					KVM_VM_BOOT_STR="cdrom"
+				else
+					KVM_VM_ISO=`echo $KVM_VM_CDROM | awk '{ print $2 }'`
+					KVM_VM_BOOT_STR="iso:$KVM_VM_ISO"
+				fi
+				;;
+			c*)
+				KVM_VM_BOOT_STR="local"
+				;;
+			n*)
+				KVM_VM_BOOT_STR="network"
+				;;
+		esac
+
+		echo "OPENQRM_KVM_VM_CPUS=\"$KVM_VM_CPUS\"" > $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_RAM=\"$KVM_VM_RAM\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_NET_1=\"$KVM_VM_NET_1\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_MAC_1=\"$KVM_VM_MAC_1\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_BRIDGE_1=\"$KVM_VM_MAC_BRIDGE_1\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_NIC_TYPE_1=\"$KVM_VM_NIC_TYPE_1\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_NET_2=\"$KVM_VM_NET_2\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_MAC_2=\"$KVM_VM_MAC_2\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_BRIDGE_2=\"$KVM_VM_MAC_BRIDGE_2\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_NIC_TYPE_2=\"$KVM_VM_NIC_TYPE_2\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_NET_3=\"$KVM_VM_NET_3\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_MAC_3=\"$KVM_VM_MAC_3\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_BRIDGE_3=\"$KVM_VM_MAC_BRIDGE_3\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_NIC_TYPE_3=\"$KVM_VM_NIC_TYPE_3\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_NET_4=\"$KVM_VM_NET_4\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_MAC_4=\"$KVM_VM_MAC_4\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_BRIDGE_4=\"$KVM_VM_MAC_BRIDGE_4\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_NIC_TYPE_4=\"$KVM_VM_NIC_TYPE_4\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_NET_5=\"$KVM_VM_NET_5\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_MAC_5=\"$KVM_VM_MAC_5\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_BRIDGE_5=\"$KVM_VM_MAC_BRIDGE_5\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_NIC_TYPE_5=\"$KVM_VM_NIC_TYPE_5\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_DISK_1=\"$KVM_VM_DISK_1\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_DISK_SIZE_1=\"$KVM_VM_DISK_SIZE_1\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_DISK_2=\"$KVM_VM_DISK_2\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_DISK_SIZE_2=\"$KVM_VM_DISK_SIZE_2\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_DISK_3=\"$KVM_VM_DISK_3\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_DISK_SIZE_3=\"$KVM_VM_DISK_SIZE_3\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_DISK_4=\"$KVM_VM_DISK_4\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_DISK_SIZE_4=\"$KVM_VM_DISK_SIZE_4\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_DISK_INTERFACE=\"$KVM_VM_DISK_INTERFACE\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_CDROM=\"$KVM_VM_CDROM\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_CDROM2=\"$KVM_VM_CDROM2\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_VNC=\"$KVM_VM_VNC\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_VNCPASSWORD=\"$KVM_VM_VNCPASSWORD\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_VNCKEYMAP=\"$KVM_VM_VNCKEYMAP\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_BOOT=\"$KVM_VM_BOOT_STR\"" >> $VM_CONFIG_TMP
+		echo "OPENQRM_KVM_VM_TYPE=\"$KVM_VM_TYPE\"" >> $VM_CONFIG_TMP
+		# and the host bridge config to avoid a second script run
+		echo -n "OPENQRM_KVM_BRIDGES=\"" >> $VM_CONFIG_TMP
+		for BRIDGE in `brctl show | tail -n+2 | awk '{ print $1 }'`; do
+			echo -n "$BRIDGE"":" >> $VM_CONFIG_TMP
+		done
+                if which ovs-vsctl 1>/dev/null; then
+                        for OVS in `ovs-vsctl show | grep -w Bridge | awk '{ print $2 }' | sed -e 's/\"//g'`; do
+                                echo -n "$OVS"":" >> $VM_CONFIG_TMP
+                        done
+
+                fi
+		echo -n "\"" >> $VM_CONFIG_TMP
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $VM_CONFIG_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?kvm_server_command=get_kvm_config; then
+			openqrm_post_event 0 "post_vm_config" 2 "openqrm-kvm-vm" "Could not post VM $KVM_VM_NAME config to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $VM_CONFIG_TMP
+		rm -f $VM_CONFIG_TMP.post
+		;;
+
+	post_bridge_config)
+		BRIDGE_CONFIG_TMP=$resource_id.bridge_config
+		echo -n "OPENQRM_KVM_BRIDGES=\"" > $BRIDGE_CONFIG_TMP
+		for BRIDGE in `brctl show | tail -n+2 | awk '{ print $1 }'`; do
+			echo -n "$BRIDGE"":" >> $BRIDGE_CONFIG_TMP
+		done
+		if which ovs-vsctl 1>/dev/null; then
+			for OVS in `ovs-vsctl show | grep -w Bridge | awk '{ print $2 }' | sed -e 's/\"//g'`; do
+				echo -n "$OVS"":" >> $BRIDGE_CONFIG_TMP
+			done
+
+		fi
+		echo -n "\"" >> $BRIDGE_CONFIG_TMP
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $BRIDGE_CONFIG_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?kvm_server_command=get_bridge_config; then
+			openqrm_post_event 0 "post_bridge_config" 2 "openqrm-kvm-vm" "Could not post bridge config to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $BRIDGE_CONFIG_TMP
+		rm -f $BRIDGE_CONFIG_TMP.post
+		;;
+
+
+	update_vm_cpus)
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_VM_CPUS" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		sed -i -e s"#KVM_VM_CPUS=.*#KVM_VM_CPUS=\"$KVM_VM_CPUS\"#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/cpus
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+	update_vm_ram)
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_VM_RAM" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		sed -i -e s"#KVM_VM_RAM=.*#KVM_VM_RAM=\"$KVM_VM_RAM\"#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/ram
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+	update_vm_vnc)
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_VM_VNCPASSWORD" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		sed -i -e s"#KVM_VM_VNCPASSWORD=.*#KVM_VM_VNCPASSWORD=\"$KVM_VM_VNCPASSWORD\"#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/vncpassword
+		# change it directly if the vm is running
+		echo "change vnc password $KVM_VM_VNCPASSWORD" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+
+	add_vm_nic)
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_VM_MAC" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_VM_COMPONENT_NUMBER" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		OPENQRM_APP_NIC=$(( $KVM_VM_COMPONENT_NUMBER - 1 ))
+		case "$KVM_VM_MAC_BRIDGE" in
+			1)
+				KVM_BRIDGE_NAME=$OPENQRM_PLUGIN_KVM_BRIDGE_NET1
+				;;
+			2)
+				KVM_BRIDGE_NAME=$OPENQRM_PLUGIN_KVM_BRIDGE_NET2
+				;;
+			3)
+				KVM_BRIDGE_NAME=$OPENQRM_PLUGIN_KVM_BRIDGE_NET3
+				;;
+			4)
+				KVM_BRIDGE_NAME=$OPENQRM_PLUGIN_KVM_BRIDGE_NET4
+				;;
+			5)
+				KVM_BRIDGE_NAME=$OPENQRM_PLUGIN_KVM_BRIDGE_NET5
+				;;
+		esac
+
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		# network
+		case "$OPENQRM_PLUGIN_KVM_BRIDGE_TYPE" in
+			bridge)
+				# regular bridging
+				sed -i -e s"#KVM_VM_NET_$KVM_VM_COMPONENT_NUMBER=.*#KVM_VM_NET_$KVM_VM_COMPONENT_NUMBER=\"-net nic,vlan=$KVM_VM_COMPONENT_NUMBER,macaddr=$KVM_VM_MAC,model=$KVM_VM_NIC_TYPE -net tap,vlan=$KVM_VM_COMPONENT_NUMBER,script=$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/bin/openqrm-kvm-ifup-net$KVM_VM_MAC_BRIDGE,downscript=$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/bin/openqrm-kvm-ifdown-net$KVM_VM_MAC_BRIDGE\"#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/net""$KVM_VM_COMPONENT_NUMBER
+				;;
+			openvswitch)
+				# ovs
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-ovs-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_BRIDGE_NAME/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#$OPENQRM_APP_NIC#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup""$KVM_VM_MAC_BRIDGE.$KVM_VM_COMPONENT_NUMBER
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-ovs-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_BRIDGE_NAME/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#$OPENQRM_APP_NIC#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-net""$KVM_VM_MAC_BRIDGE.$KVM_VM_COMPONENT_NUMBER
+				chmod +x $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm*
+				sed -i -e s"#KVM_VM_NET_$KVM_VM_COMPONENT_NUMBER=.*#KVM_VM_NET_$KVM_VM_COMPONENT_NUMBER=\"-net nic,vlan=$KVM_VM_COMPONENT_NUMBER,macaddr=$KVM_VM_MAC,model=$KVM_VM_NIC_TYPE -net tap,vlan=$KVM_VM_COMPONENT_NUMBER,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifup$KVM_VM_MAC_BRIDGE.$KVM_VM_COMPONENT_NUMBER,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-ovs-kvm-ifdown-net$KVM_VM_MAC_BRIDGE.$KVM_VM_COMPONENT_NUMBER\"#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/net""$KVM_VM_COMPONENT_NUMBER
+				;;
+			vlanbridge)
+				# bridged vlans
+				# here we need to create a new ifup/down script with the right app_nic number in it
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-vlan-kvm-ifup | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_BRIDGE_NAME/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#$OPENQRM_APP_NIC#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net""$KVM_VM_MAC_BRIDGE.$KVM_VM_COMPONENT_NUMBER
+				cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/templates/openqrm-vlan-kvm-ifdown | sed -e "s/@@OPENQRM_PLUGIN_KVM_BRIDGE@@/$KVM_BRIDGE_NAME/g" | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" | sed -e "s#@@OPENQRM_APP_NIC@@#$OPENQRM_APP_NIC#g" > $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net""$KVM_VM_MAC_BRIDGE.$KVM_VM_COMPONENT_NUMBER
+				chmod +x $OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm*
+				sed -i -e s"#KVM_VM_NET_$KVM_VM_COMPONENT_NUMBER=.*#KVM_VM_NET_$KVM_VM_COMPONENT_NUMBER=\"-net nic,vlan=$KVM_VM_COMPONENT_NUMBER,macaddr=$KVM_VM_MAC,model=$KVM_VM_NIC_TYPE -net tap,vlan=$KVM_VM_COMPONENT_NUMBER,script=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifup-net$KVM_VM_MAC_BRIDGE.$KVM_VM_COMPONENT_NUMBER,downscript=$OPENQRM_VM_DIR/$KVM_VM_NAME/openqrm-vlan-kvm-ifdown-net$KVM_VM_MAC_BRIDGE.$KVM_VM_COMPONENT_NUMBER\"#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/net""$KVM_VM_COMPONENT_NUMBER
+				;;
+
+		esac
+		sed -i -e s"#KVM_VM_MAC_$KVM_VM_COMPONENT_NUMBER=.*#KVM_VM_MAC_$KVM_VM_COMPONENT_NUMBER=\"$KVM_VM_MAC\"#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/net""$KVM_VM_COMPONENT_NUMBER
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+	remove_vm_nic)
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_VM_COMPONENT_NUMBER" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		sed -i -e s"#KVM_VM_NET_$KVM_VM_COMPONENT_NUMBER=.*#KVM_VM_NET_$KVM_VM_COMPONENT_NUMBER=\"\"#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/net""$KVM_VM_COMPONENT_NUMBER
+		sed -i -e s"#KVM_VM_MAC_$KVM_VM_COMPONENT_NUMBER=.*#KVM_VM_MAC_$KVM_VM_COMPONENT_NUMBER=\"\"#g" $OPENQRM_VM_DIR/$KVM_VM_NAME/net""$KVM_VM_COMPONENT_NUMBER
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+
+	setboot)
+		unset KVM_VM_NAME
+		if [ "$KVM_VM_MAC" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_VM_BOOT" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# this command is is running from the openQRM engine which does
+		# not know about the kvm-name
+		KVM_VM_NAME=`grep -rHi $KVM_VM_MAC $OPENQRM_VM_DIR/*/net1 2>/dev/null | grep KVM_VM_MAC | cut -d':' -f1 2>/dev/null` 2>/dev/null
+		KVM_VM_NAME=`dirname $KVM_VM_NAME` 2>/dev/null
+		KVM_VM_NAME=`basename $KVM_VM_NAME` 2>/dev/null
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_post_event 0 "setboot" 2 "openqrm-kvm-vm" "Could not find KVM VM $KVM_VM_MAC on host."
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			exit 1
+		fi
+		case "$KVM_VM_BOOT" in
+			local)
+				echo "KVM_VM_BOOT=\"-boot cn\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+				echo "boot_set c" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+				;;
+			net)
+				echo "KVM_VM_BOOT=\"-boot n\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+				echo "boot_set n" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+				;;
+			network)
+				echo "KVM_VM_BOOT=\"-boot n\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+				echo "boot_set n" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+				;;
+			cdrom)
+				echo "KVM_VM_BOOT=\"-boot d\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+				echo "KVM_VM_CDROM=\"-cdrom /dev/cdrom\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom
+				echo "boot_set d" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+				;;
+			iso)
+				echo "KVM_VM_BOOT=\"-boot d\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+				echo "KVM_VM_CDROM=\"-cdrom $KVM_VM_BOOT_ISO\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom
+				echo "boot_set d" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+				;;
+		esac
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+	setboot_by_name)
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_VM_BOOT" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		case "$KVM_VM_BOOT" in
+			local)
+				echo "KVM_VM_BOOT=\"-boot c\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+				;;
+			net)
+				echo "KVM_VM_BOOT=\"-boot n\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+				;;
+			network)
+				echo "KVM_VM_BOOT=\"-boot n\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+				;;
+			cdrom)
+				echo "KVM_VM_BOOT=\"-boot d\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+				echo "KVM_VM_CDROM=\"-cdrom /dev/cdrom\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom
+				;;
+			iso)
+				echo "KVM_VM_BOOT=\"-boot d\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/boot
+				echo "KVM_VM_CDROM=\"-cdrom $KVM_VM_BOOT_ISO\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/cdrom
+				;;
+		esac
+		# no restart here, this is from the vm config
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+	fence)
+		unset KVM_VM_NAME
+		if [ "$KVM_VM_MAC" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		# this command is is running from the openQRM engine which does
+		# not know about the kvm-name
+		KVM_VM_NAME=`grep -rHi $KVM_VM_MAC $OPENQRM_VM_DIR/*/net1 2>/dev/null | grep KVM_VM_MAC | cut -d':' -f1 2>/dev/null` 2>/dev/null
+		KVM_VM_NAME=`dirname $KVM_VM_NAME` 2>/dev/null
+		KVM_VM_NAME=`basename $KVM_VM_NAME` 2>/dev/null
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "fence" 2 "openqrm-kvm-vm" "Could not find KVM VM $KVM_VM_MAC on host."
+			exit 1
+		fi
+		if [ ! -e "$OPENQRM_VM_DIR/$KVM_VM_NAME/net1" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "fence" 2 "openqrm-kvm-vm" "Network configuration of KVM VM $KVM_VM_NAME does not exists!"
+			exit 1
+		fi
+		# refresh mac
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+		if [ "$KVM_VM_MAC_1" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "fence" 2 "openqrm-kvm-vm" "Could not find mac address of KVM VM $KVM_VM_NAME!"
+			exit 1
+		fi
+		if [ "$KVM_VM_MAC" != "$KVM_VM_MAC_1" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "fence" 2 "openqrm-kvm-vm" "Mac address mismatch on KVM VM $KVM_VM_NAME!"
+			exit 1
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# stop it hard
+		VM_PID=`ps ax | grep -i "macaddr=$KVM_VM_MAC_1" | grep kvm | grep -i screen | grep -v grep | awk {' print $1 '}`
+		if [ "$VM_PID" != "" ]; then
+			kill $VM_PID
+			openqrm_post_event 0 "fence" 5 "openqrm-kvm-vm" "Fenced KVM VM $KVM_VM_MAC! $VM_PID"
+		fi
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+	transfer_vm_config)
+		# this is running on the openQRM server to transfer a VM config from one host to another
+		if [ "$KVM_VM_NAME" == "" ] || [ "$KVM_MIGRATION_DESTINATION_HOST" == "" ] || [ "$KVM_MIGRATION_SOURCE_HOST" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_MIGRATION_DESTINATION_HOST" == "$KVM_MIGRATION_SOURCE_HOST" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/tmp/
+		KVM_VM_TRANSFER_TMP_DIR=`mktemp -d $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/tmp/kvm-transfer-$KVM_VM_NAME.XXXXXX`
+
+		CMD_ERR=`rsync -a -e "dbclient -K 10 -y -i $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/dropbear_rsa_host_key -p $OPENQRM_EXEC_PORT" $KVM_MIGRATION_SOURCE_HOST:$OPENQRM_VM_DIR/$KVM_VM_NAME $KVM_VM_TRANSFER_TMP_DIR/ 2>&1`
+		if [ "$?" != 0 ]; then
+			CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+			openqrm_post_event 0 "transfer_vm_config" 2 "openqrm-kvm-vm" "Error get KVM VM $KVM_VM_NAME from $KVM_MIGRATION_SOURCE_HOST! $CMD_ERR"
+			rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/tmp/kvm-transfer-$KVM_VM_NAME.*
+
+			echo "Failed to get the configuration for VM $KVM_VM_NAME from Host $KVM_MIGRATION_SOURCE_HOST" > $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/web/kvm-stat/$KVM_VM_NAME.transfer_status_tmp
+			chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/web/kvm-stat/$KVM_VM_NAME.transfer_status_tmp
+			mv $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/web/kvm-stat/$KVM_VM_NAME.transfer_status_tmp $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/web/kvm-stat/$KVM_VM_NAME.transfer_status
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			exit 1
+		fi
+
+		CMD_ERR=`rsync -a -e "dbclient -K 10 -y -i $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/dropbear_rsa_host_key -p $OPENQRM_EXEC_PORT" $KVM_VM_TRANSFER_TMP_DIR/$KVM_VM_NAME $KVM_MIGRATION_DESTINATION_HOST:$OPENQRM_VM_DIR/ 2>&1`
+		if [ "$?" != 0 ]; then
+			CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+			openqrm_post_event 0 "transfer_vm_config" 2 "openqrm-kvm-vm" "Error transfering KVM VM $KVM_VM_NAME to $KVM_MIGRATION_DESTINATION_HOST! $CMD_ERR"
+			rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/tmp/kvm-transfer-$KVM_VM_NAME.*
+
+			echo "Failed to transfer configuration for the VM $KVM_VM_NAME to Host $KVM_MIGRATION_DESTINATION_HOST" > $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/web/kvm-stat/$KVM_VM_NAME.transfer_status_tmp
+			chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/web/kvm-stat/$KVM_VM_NAME.transfer_status_tmp
+			mv $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/web/kvm-stat/$KVM_VM_NAME.transfer_status_tmp $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/web/kvm-stat/$KVM_VM_NAME.transfer_status
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			exit 1
+		fi
+
+		rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/tmp/kvm-transfer-$KVM_VM_NAME.*
+		echo "ok" > $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/web/kvm-stat/$KVM_VM_NAME.transfer_status_tmp
+		chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/web/kvm-stat/$KVM_VM_NAME.transfer_status_tmp
+		mv $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/web/kvm-stat/$KVM_VM_NAME.transfer_status_tmp $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/web/kvm-stat/$KVM_VM_NAME.transfer_status
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+	start_as_incoming)
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_MIGRATION_PORT" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ ! -e "$OPENQRM_VM_DIR/$KVM_VM_NAME/net1" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "start_as_incoming" 2 "openqrm-kvm-vm" "Network configuration of KVM VM $KVM_VM_NAME does not exists!"
+			exit 1
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# make sure it is stopped before
+		if [ -e "$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon" ]; then
+			echo "quit" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+		fi
+		# if we have a disk make sure it is activated
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk1
+		if [ "$KVM_VM_DISK_1" != "" ]; then
+			# lvol or blockfile ?
+			if echo $KVM_VM_DISK_1 | grep ^/dev 1>/dev/null; then
+				# aquire global lock for lvm operations
+				if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+					if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+						openqrm_global_lock aquire lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD $LOCK_TIME "Start_as_incoming of VM $KVM_VM_NAME on volume $KVM_VM_DISK_1"
+					fi
+				fi
+				if [ ! -e "$KVM_VM_DISK_1" ]; then
+					# activate the lvol
+					kvm_refresh_lvm
+					lvchange -ay -y $KVM_VM_DISK_1
+					if [ ! -e "$KVM_VM_DISK_1" ]; then
+						lvchange -ay -y $KVM_VM_DISK_1
+					fi
+				fi
+				lvchange -ay -y $KVM_VM_DISK_1
+				# release global lock
+				if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+					if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+						openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+					fi
+				fi
+			fi
+		fi
+		# before we start as incoming we have to adjust the vnc server ip in the vm config
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/vnc
+		VM_VNC_ID=`echo $KVM_VM_VNC | cut -d':' -f2`
+		if [ "$OPENQRM_PLUGIN_VM_VNC_LISTEN" == "all" ]; then
+			echo "KVM_VM_VNC=\"0.0.0.0:$VM_VNC_ID\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/vnc
+		else
+			echo "KVM_VM_VNC=\"$resource_ip:$VM_VNC_ID\"" > $OPENQRM_VM_DIR/$KVM_VM_NAME/vnc
+		fi
+		# and remove the source host autostart file
+		rm -f $OPENQRM_VM_DIR/$KVM_VM_NAME/autostart.*
+		# create long-term-action start event
+		openqrm_post_event 0 "$KVM_VM_NAME" 9 "kvm" "Started migration of KVM VM $KVM_VM_NAME"
+		#touch $OPENQRM_VM_DIR/$KVM_VM_NAME/migration_in_progress
+		rm -f $OPENQRM_VM_DIR/$KVM_VM_NAME/migration_in_progress
+
+		# posting migration progress 0 to openQRM
+		if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+			# post 0%
+			KVM_VM_MIGRATION_PROGRESS=0
+			echo "$KVM_VM_MIGRATION_PROGRESS" > $KVM_VM_NAME.vm_migration_progress
+			if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD --post-file=`$OPENQRM_POSTENCODE $KVM_VM_NAME.vm_migration_progress` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?kvm_server_command=get_vm_migration; then
+				openqrm_post_event 0 "start_as_incoming" 2 "openqrm-kvm-vm" "Could not post KVM VM $KVM_VM_NAME migration progress the openQRM-server at $OPENQRM_SERVER_IP!"
+			fi
+			rm -f $KVM_VM_NAME.vm_migration_progress
+			rm -f $KVM_VM_NAME.vm_migration_progress.post
+		fi
+
+		# now start as incoming migration
+		CMD_ERR=`$OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm.incoming $KVM_MIGRATION_PORT 2>&1`
+		if [ "$?" != 0 ]; then
+			CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+			openqrm_post_event 0 "start_as_incoming" 2 "openqrm-kvm-vm" "Error starting KVM VM $KVM_VM_NAME! $CMD_ERR"
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			exit 1
+		fi
+		# restart the vm monitord
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+		# monitoring on the host or vm ?
+		if [ "$OPENQRM_PLUGIN_KVM_VM_MONITORING_ON_HOST" != "false" ]; then
+			kill `ps ax | grep openqrm-kvm-monitord | grep -v grep | grep -i $KVM_VM_MAC_1 | awk {' print $1 '}` 2>/dev/null
+			$RUNSCREEN -dmS $KVM_VM_MAC_1 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/sbin/openqrm-kvm-monitord $KVM_VM_MAC_1
+		fi
+		touch $OPENQRM_VM_DIR/$KVM_VM_NAME/autostart.$resource_id
+		openqrm_post_event 0 "start_as_incoming" 5 "openqrm-kvm-vm" "Started KVM VM $KVM_VM_NAME as incoming migration."
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+
+	migrate)
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_MIGRATION_PORT" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_MIGRATION_DESTINATION_HOST" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ ! -e "$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon" ]; then
+			# end long term event
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "$KVM_VM_NAME" 10 "kvm" "Stopped migration of VM $KVM_VM_NAME"
+			openqrm_post_event 0 "migrate" 3 "openqrm-kvm-vm" "Migrating KVM VM $KVM_VM_NAME failed. VM is not running!"
+			rm -f $OPENQRM_VM_DIR/$KVM_VM_NAME/migration_in_progress
+			exit 1
+		fi
+		# migrate runs after start_as_incoming so we delay the trigger for the migrate action a bit
+		sleep 10
+
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		echo "migrate -d tcp:$KVM_MIGRATION_DESTINATION_HOST:$KVM_MIGRATION_PORT" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+		# release the lock early
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+
+		# start to monitor the migration, this stop the source vm when migration completed
+		$RUNSCREEN -dmS migration_monitor.$KVM_VM_NAME $0 monitor_migration -n $KVM_VM_NAME -j $KVM_MIGRATION_PORT -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD --openqrm-internal-cmd true
+		openqrm_post_event 0 "migrate" 5 "openqrm-kvm-vm" "Migrating KVM VM $KVM_VM_MAC to $KVM_MIGRATION_DESTINATION_HOST."
+		;;
+
+
+	monitor_migration)
+		if [ "$KVM_VM_NAME" == "" ]; then
+			kvm_usage
+		fi
+		if [ "$KVM_MIGRATION_PORT" == "" ]; then
+			kvm_usage
+		fi
+		# no need to lock
+		# monitor migration and stop the vm on the source host after the transfer is complete
+		KVM_MIGRATION_LOG="/tmp/kvm-migration.$KVM_VM_NAME.log"
+		KVM_MIGRATION_LOOP=0
+		. $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+		while (true); do
+			if ! echo "info migrate" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon > $KVM_MIGRATION_LOG; then
+				# socket is gone, migration finished
+				# posting migration success to openQRM
+				if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+					echo "success" > $KVM_VM_NAME.vm_migrated_successfully
+					if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD --post-file=`$OPENQRM_POSTENCODE $KVM_VM_NAME.vm_migrated_successfully` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?kvm_server_command=get_vm_migration; then
+						openqrm_post_event 0 "migrate" 2 "openqrm-kvm-vm" "Could not post KVM VM $KVM_VM_NAME migration status the openQRM-server at $OPENQRM_SERVER_IP!"
+					fi
+					rm -f $KVM_VM_NAME.vm_migrated_successfully
+					rm -f $KVM_VM_NAME.vm_migrated_successfully.post
+					# post 100%
+					KVM_VM_MIGRATION_PROGRESS=100
+					echo "$KVM_VM_MIGRATION_PROGRESS" > $KVM_VM_NAME.vm_migration_progress
+					if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD --post-file=`$OPENQRM_POSTENCODE $KVM_VM_NAME.vm_migration_progress` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?kvm_server_command=get_vm_migration; then
+						openqrm_post_event 0 "migrate" 2 "openqrm-kvm-vm" "Could not post KVM VM $KVM_VM_NAME migration progress the openQRM-server at $OPENQRM_SERVER_IP!"
+					fi
+					rm -f $KVM_VM_NAME.vm_migration_progress
+					rm -f $KVM_VM_NAME.vm_migration_progress.post
+				fi
+				rm -f $OPENQRM_VM_DIR/$KVM_VM_NAME/migration_in_progress
+				# end long term event
+				openqrm_post_event 0 "$KVM_VM_NAME" 10 "kvm" "Finished migration of VM $KVM_VM_NAME"
+				break
+
+			fi
+
+			if grep completed $KVM_MIGRATION_LOG 1>/dev/null; then
+				# quit via the monitor socket does not run ifdown-net-script
+				VM_PID=`ps ax | grep $KVM_VM_MAC_1 | grep kvm | grep -v monitor_migration | grep -i screen | grep -v grep | awk {' print $1 '}`
+				if [ "$VM_PID" != "" ]; then
+					kill $VM_PID
+				fi
+				#echo "quit" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+				# posting migration success to openQRM
+				if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+					echo "success" > $KVM_VM_NAME.vm_migrated_successfully
+					if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD --post-file=`$OPENQRM_POSTENCODE $KVM_VM_NAME.vm_migrated_successfully` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?kvm_server_command=get_vm_migration; then
+						openqrm_post_event 0 "migrate" 2 "openqrm-kvm-vm" "Could not post KVM VM $KVM_VM_NAME migration status the openQRM-server at $OPENQRM_SERVER_IP!"
+					fi
+					rm -f $KVM_VM_NAME.vm_migrated_successfully
+					rm -f $KVM_VM_NAME.vm_migrated_successfully.post
+					# post 100%
+					KVM_VM_MIGRATION_PROGRESS=100
+					echo "$KVM_VM_MIGRATION_PROGRESS" > $KVM_VM_NAME.vm_migration_progress
+					if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD --post-file=`$OPENQRM_POSTENCODE $KVM_VM_NAME.vm_migration_progress` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?kvm_server_command=get_vm_migration; then
+						openqrm_post_event 0 "migrate" 2 "openqrm-kvm-vm" "Could not post KVM VM $KVM_VM_NAME migration progress the openQRM-server at $OPENQRM_SERVER_IP!"
+					fi
+					rm -f $KVM_VM_NAME.vm_migration_progress
+					rm -f $KVM_VM_NAME.vm_migration_progress.post
+				fi
+				rm -f $OPENQRM_VM_DIR/$KVM_VM_NAME/migration_in_progress
+				# end long term event
+				openqrm_post_event 0 "$KVM_VM_NAME" 10 "kvm" "Finished migration of VM $KVM_VM_NAME"
+				break
+			fi
+			if grep failed $KVM_MIGRATION_LOG 1>/dev/null; then
+				# end long term event
+				openqrm_post_event 0 "$KVM_VM_NAME" 10 "kvm" "Stopped migration of VM $KVM_VM_NAME"
+				# post error
+				openqrm_post_event 0 "migrate" 2 "openqrm-kvm-vm" "Migration of KVM VM $KVM_VM_NAME failed!"
+				rm -f $OPENQRM_VM_DIR/$KVM_VM_NAME/migration_in_progress
+				break
+			fi
+			KVM_MIGRATION_LOOP=$(( KVM_MIGRATION_LOOP + 1 ))
+			if [ "$KVM_MIGRATION_LOOP" == "$KVM_MIGRATION_MAX_WAIT" ]; then
+				# end long term event
+				openqrm_post_event 0 "$KVM_VM_NAME" 10 "kvm" "Stopped migration of VM $KVM_VM_NAME"
+				# post error
+				openqrm_post_event 0 "migrate" 2 "openqrm-kvm-vm" "Migration of KVM VM $KVM_VM_NAME timed out!"
+				rm -f $OPENQRM_VM_DIR/$KVM_VM_NAME/migration_in_progress
+				break
+			fi
+
+			# posting migration progress to openQRM - this is for the progressbar
+			if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+				# do not post more than 99%
+				KVM_VM_MIGRATION_PROGRESS=$KVM_MIGRATION_LOOP
+				if [ $KVM_VM_MIGRATION_PROGRESS -ge 100 ]; then
+				    KVM_VM_MIGRATION_PROGRESS=99
+				fi
+				echo "$KVM_VM_MIGRATION_PROGRESS" > $KVM_VM_NAME.vm_migration_progress
+				if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD --post-file=`$OPENQRM_POSTENCODE $KVM_VM_NAME.vm_migration_progress` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?kvm_server_command=get_vm_migration; then
+					openqrm_post_event 0 "migrate" 2 "openqrm-kvm-vm" "Could not post KVM VM $KVM_VM_NAME migration progress the openQRM-server at $OPENQRM_SERVER_IP!"
+				fi
+				rm -f $KVM_VM_NAME.vm_migration_progress
+				rm -f $KVM_VM_NAME.vm_migration_progress.post
+			fi
+
+			sleep 1
+		done
+
+		# here we remove the VM configuration from the source host
+		VM_PID=`ps ax | grep $KVM_VM_MAC_1 | grep kvm | grep -v monitor_migration | grep -i screen | grep -v grep | awk {' print $1 '}`
+		if [ "$VM_PID" != "" ]; then
+			openqrm_post_event 0 "migrate" 5 "openqrm-kvm-vm" "Force stopping KVM VM $KVM_VM_NAME on source Host!"
+			kill $VM_PID
+		fi
+		rm -f $OPENQRM_VM_DIR/$KVM_VM_NAME/*
+		rmdir $OPENQRM_VM_DIR/$KVM_VM_NAME
+		rm -f $KVM_MIGRATION_LOG
+		;;
+
+		# this is used to re-attach the virtual network devices to the configured vlans
+	reset_vlans_by_mac)
+		if [ "$KVM_VM_MAC" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_VM_BOOT" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		# find vm-name according its mac
+		KVM_VM_NAME=`grep -rHi $KVM_VM_MAC $OPENQRM_VM_DIR/*/net1 2>/dev/null | grep KVM_VM_MAC | cut -d':' -f1 2>/dev/null` 2>/dev/null
+		KVM_VM_NAME=`dirname $KVM_VM_NAME` 2>/dev/null
+		KVM_VM_NAME=`basename $KVM_VM_NAME` 2>/dev/null
+		if [ "$KVM_VM_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "reset_vlans_by_mac" 2 "openqrm-kvm-vm" "Could not find KVM VM $KVM_VM_MAC on host!"
+			exit 1
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire kvm`
+		trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		if [ "$KVM_VM_BOOT" == "stop" ]; then
+			# send powerdown
+			if [ -e "$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon" ]; then
+				echo "system_powerdown" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+			fi
+			# vm is not running, we can skip waiting for shutdown
+			# wait until shutdown-delay, if VM is not down then stop hard
+			KVM_VM_SHUTDOWN_LOOP=0
+			while ps ax | grep -i "macaddr=$KVM_VM_MAC_1" | grep kvm | grep -i screen | grep -v grep 1>/dev/null; do
+				sleep 1
+				KVM_VM_SHUTDOWN_LOOP=$(( KVM_VM_SHUTDOWN_LOOP + 1 ))
+				if [ "$KVM_VM_SHUTDOWN_LOOP" == "$KVM_VM_SHUTDOWN_DELAY" ]; then
+					break
+				fi
+				# send powerdown again
+				echo "system_powerdown" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+			done
+		fi
+		# stop hard, this will make the vm re-attach the network devices
+		VM_PID=`ps ax | grep $KVM_VM_MAC | grep kvm | grep -v reset_vlans_by_mac | grep -i screen | grep -v grep | awk {' print $1 '}`
+		if [ "$VM_PID" != "" ]; then
+			openqrm_post_event 0 "reset_vlans_by_mac" 3 "openqrm-kvm-vm" "KVM VM $KVM_VM_NAME still running in reset_vlans_by_mac! Stopping $VM_PID"
+			kill $VM_PID
+		fi
+		# echo "quit" | socat stdio unix:$OPENQRM_VM_MONITOR_DIR/kvm.$KVM_VM_NAME.mon
+		rm -f $OPENQRM_VM_DIR/$KVM_VM_NAME/autostart.$resource_id
+		# delay startup to make sure the old taps are gone
+		sleep 4
+		CMD_ERR=`$OPENQRM_VM_DIR/$KVM_VM_NAME/$KVM_VM_NAME.kvm 2>&1`
+		if [ "$?" != 0 ]; then
+			CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+			openqrm_post_event 0 "reset_vlans_by_mac" 3 "openqrm-kvm-vm" "Error starting KVM VM $KVM_VM_NAME! $CMD_ERR"
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			exit 1
+		fi
+
+		touch $OPENQRM_VM_DIR/$KVM_VM_NAME/autostart.$resource_id
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+	iso)
+		if [ "$KVM_HOST_PATH" == "" ]; then
+			kvm_usage
+		fi
+		# validate path
+		KVM_HOST_PATH=`echo "$KVM_HOST_PATH" | cut -d';' -f1`
+		KVM_HOST_PATH=`echo "$KVM_HOST_PATH" | cut -d'&' -f1`
+		KVM_HOST_PATH=`echo "$KVM_HOST_PATH" | cut -d' ' -f1`
+		KVM_HOST_PATH=`echo "$KVM_HOST_PATH" | cut -d'$' -f1`
+		if [ ! -d "$KVM_HOST_PATH" ]; then
+			openqrm_post_event 0 "iso" 2 "openqrm-kvm-vm" "No such directory $KVM_HOST_PATH !"
+			exit 1
+		fi
+		# post dir list
+		PICK_ISO_CONFIG_TMP=$resource_id.pick_iso_config
+		echo "P@$KVM_HOST_PATH" > $PICK_ISO_CONFIG_TMP
+		for DIR_CONTENT in `ls -f $KVM_HOST_PATH`; do
+		    if [ -d "$KVM_HOST_PATH"/"$DIR_CONTENT" ]; then
+			echo "D@$DIR_CONTENT" >> $PICK_ISO_CONFIG_TMP
+		    elif [ -f "$KVM_HOST_PATH"/"$DIR_CONTENT" ]; then
+			echo "F@$DIR_CONTENT" >> $PICK_ISO_CONFIG_TMP
+		    fi
+		done
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $PICK_ISO_CONFIG_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?kvm_server_command=get_pick_iso_config; then
+			openqrm_post_event 0 "iso" 2 "openqrm-kvm-vm" "Could not post pick_iso_config to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $PICK_ISO_CONFIG_TMP
+		rm -f $PICK_ISO_CONFIG_TMP.post
+		;;
+
+	*)
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		kvm_usage
+		;;
+
+
+esac
+

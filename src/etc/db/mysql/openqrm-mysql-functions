@@ -1,0 +1,772 @@
+#!/bin/bash
+# openQRM mysql-specfic functions
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+if [ "$OPENQRM_SERVER_BASE_DIR" == "" ]; then
+	echo "ERROR: Please export OPENQRM_SERVER_BASE_DIR before sourcing $0"
+	exit 1
+fi
+
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+
+# get full server config
+openqrm_server_get_config
+OPENQRM_DATABASE_INIT="$OPENQRM_SERVER_BASE_DIR/openqrm/etc/db/mysql/openqrm-mysql-init.sql"
+
+OPENQRM_DATABASE_MAINTENANCE="$OPENQRM_SERVER_BASE_DIR/openqrm/etc/db/mysql/openqrm-mysql-maintenance"
+OPENQRM_DATABASE_MAINTENANCE_FNAME=`basename $OPENQRM_DATABASE_MAINTENANCE`
+
+if ! which mysql 1>/dev/null 2>&1; then
+	echo "ERROR: Mysql client 'mysql' not installed/found on this system"
+	exit 1
+else
+	export MYSQL_CLIENT=`which mysql`
+fi
+if ! which mysqldump 1>/dev/null 2>&1; then
+	echo "ERROR: Mysql 'mysqldump' not installed/found on this system"
+	exit 1
+else
+	export MYSQL_DUMP=`which mysqldump`
+fi
+if ! which mysqladmin 1>/dev/null 2>&1; then
+	echo "ERROR: Mysql 'mysqladmin' not installed/found on this system"
+	exit 1
+else
+	export MYSQL_ADMIN=`which mysqladmin`
+fi
+
+
+
+function initialize_database() {
+	# set the dbname in the sql init-script
+	OPENQRM_DATABASE_INIT_TMP=/tmp/openqrm-mysql-init.sql
+	cat $OPENQRM_DATABASE_INIT |	\
+		sed -e "s/OPENQRM_DB/$OPENQRM_DATABASE_NAME/g" |	\
+		sed -e "s/OPENQRM_SERVER_IP_ADDRESS/$OPENQRM_SERVER_IP_ADDRESS/g"	\
+		> $OPENQRM_DATABASE_INIT_TMP
+
+	echo "Initializing the openQRM-database"
+	
+	if [ -z "$OPENQRM_DATABASE_PASSWORD" ]; then
+		$MYSQL_CLIENT -u $OPENQRM_DATABASE_USER --host $OPENQRM_DATABASE_SERVER -e "drop database $OPENQRM_DATABASE_NAME" 1>/dev/null 2>&1
+		$MYSQL_CLIENT -u $OPENQRM_DATABASE_USER --host $OPENQRM_DATABASE_SERVER < $OPENQRM_DATABASE_INIT_TMP 2>&1
+		RET="${PIPESTATUS[0]}"
+	else
+		$MYSQL_CLIENT -u $OPENQRM_DATABASE_USER -p$OPENQRM_DATABASE_PASSWORD --host $OPENQRM_DATABASE_SERVER -e "drop database $OPENQRM_DATABASE_NAME" 1>/dev/null 2>&1
+		$MYSQL_CLIENT -u $OPENQRM_DATABASE_USER -p$OPENQRM_DATABASE_PASSWORD --host $OPENQRM_DATABASE_SERVER < $OPENQRM_DATABASE_INIT_TMP 2>&1
+                RET="${PIPESTATUS[0]}"
+	fi
+	
+	rm -f $OPENQRM_DATABASE_INIT_TMP
+
+	# check for mariadb authentication
+	if [ -z "$OPENQRM_DATABASE_PASSWORD" ]; then
+	    OPENQRM_DATABASE_PASSWORD_PARAM=""
+	    PASSWORD_SET="0"
+	else
+	    OPENQRM_DATABASE_PASSWORD_PARAM="-p$OPENQRM_DATABASE_PASSWORD"
+	    PASSWORD_SET="1"
+	fi
+
+#	# this is only needed for Debian
+#	if [ -f /etc/debian_version ]; then
+#	    if $MYSQL_CLIENT -u $OPENQRM_DATABASE_USER $OPENQRM_DATABASE_PASSWORD_PARAM --host $OPENQRM_DATABASE_SERVER -e "status" | grep -i maria 1>/dev/null; then
+#		echo "openQRM init database: Mariadb detected, applying mysql_native_password authentication" | logger
+#		if [ "$PASSWORD_SET" == "1" ]; then
+#		    $MYSQL_CLIENT -u $OPENQRM_DATABASE_USER $OPENQRM_DATABASE_PASSWORD_PARAM --host $OPENQRM_DATABASE_SERVER -e "update mysql.user set Password=PASSWORD(\"$OPENQRM_DATABASE_PASSWORD\") where User=\"$OPENQRM_DATABASE_USER\";flush privileges;"
+#		fi
+#		$MYSQL_CLIENT -u $OPENQRM_DATABASE_USER $OPENQRM_DATABASE_PASSWORD_PARAM --host $OPENQRM_DATABASE_SERVER -e "update mysql.user set plugin='mysql_native_password';flush privileges;"
+#	    fi
+#	fi
+
+	# add the db maintenance to cron
+	cat $OPENQRM_DATABASE_MAINTENANCE | sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" > /etc/cron.daily/$OPENQRM_DATABASE_MAINTENANCE_FNAME
+	chmod +x /etc/cron.daily/$OPENQRM_DATABASE_MAINTENANCE_FNAME
+	if [ -x "/etc/init.d/cron" ]; then
+	    if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+		invoke-rc.d cron reload
+	    else
+		/etc/init.d/cron reload
+	    fi
+	    elif [ -x "/etc/init.d/crond" ]; then
+	    if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+		invoke-rc.d crond reload
+	    else
+		/etc/init.d/crond reload
+	    fi
+	else
+	    echo "Could not find cron init script in /etc/init.d/. Please reload cron manually!"
+	fi
+	
+	return $RET
+}
+
+function backup_database() {
+	local SQL=$1
+	echo "Creating backup of the openQRM-database at $SQL"
+	if [ -z "$OPENQRM_DATABASE_PASSWORD" ]; then
+		$MYSQL_DUMP -u $OPENQRM_DATABASE_USER --host $OPENQRM_DATABASE_SERVER $OPENQRM_DATABASE_NAME > $SQL
+		RET=$?
+	else
+		$MYSQL_DUMP -u $OPENQRM_DATABASE_USER -p$OPENQRM_DATABASE_PASSWORD --host $OPENQRM_DATABASE_SERVER  $OPENQRM_DATABASE_NAME > $SQL
+		RET=$?
+	fi
+	return $RET
+
+}
+
+function restore_database() {
+	local SQL=$1
+	echo "Restoring the openQRM-database from $SQL"
+	if [ -z "$OPENQRM_DATABASE_PASSWORD" ]; then
+		$MYSQL_CLIENT -u $OPENQRM_DATABASE_USER --host $OPENQRM_DATABASE_SERVER $OPENQRM_DATABASE_NAME < $SQL
+		RET=$?
+	else
+		$MYSQL_CLIENT -u $OPENQRM_DATABASE_USER -p$OPENQRM_DATABASE_PASSWORD --host $OPENQRM_DATABASE_SERVER $OPENQRM_DATABASE_NAME < $SQL
+		RET=$?
+	fi
+	return $RET
+
+}
+
+function drop_database() {
+	echo "Dropping the openQRM-database"
+	if [ -z "$OPENQRM_DATABASE_PASSWORD" ]; then
+		$MYSQL_CLIENT -u $OPENQRM_DATABASE_USER --host $OPENQRM_DATABASE_SERVER -e "drop database $OPENQRM_DATABASE_NAME" 1>/dev/null 2>&1
+		RET=$?
+	else
+		$MYSQL_CLIENT -u $OPENQRM_DATABASE_USER -p$OPENQRM_DATABASE_PASSWORD --host $OPENQRM_DATABASE_SERVER -e "drop database $OPENQRM_DATABASE_NAME" 1>/dev/null 2>&1
+		RET=$?
+	fi
+
+	# remove maintenance cron job
+	rm -f /etc/cron.daily/$OPENQRM_DATABASE_MAINTENANCE_FNAME
+	if [ -x "/etc/init.d/cron" ]; then
+	    if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+		invoke-rc.d cron reload
+	    else
+		/etc/init.d/cron reload
+	    fi
+	    elif [ -x "/etc/init.d/crond" ]; then
+	    if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+		invoke-rc.d crond reload
+	    else
+		/etc/init.d/crond reload
+	    fi
+	else
+	    echo "Could not find cron init script in /etc/init.d/. Please reload cron manually!"
+	fi
+
+	return $RET
+}
+
+
+
+########################### functions to update the db shema ###########################
+
+function check_table_exists(){
+    local DB_TABLE=$1
+	if [ -z "$OPENQRM_DATABASE_PASSWORD" ]; then
+        $MYSQL_CLIENT -u $OPENQRM_DATABASE_USER --host $OPENQRM_DATABASE_SERVER  $OPENQRM_DATABASE_NAME -e "select * from $DB_TABLE" 1>/dev/null 2>&1
+		RET=$?
+	else
+        $MYSQL_CLIENT -u $OPENQRM_DATABASE_USER -p$OPENQRM_DATABASE_PASSWORD --host $OPENQRM_DATABASE_SERVER  $OPENQRM_DATABASE_NAME -e "select * from $DB_TABLE" 1>/dev/null 2>&1
+		RET=$?
+	fi
+    return $RET
+}
+
+
+function check_column_in_table_exists(){
+    local DB_TABLE=$1
+    local DB_COLUMN=$2
+	if [ -z "$OPENQRM_DATABASE_PASSWORD" ]; then
+        $MYSQL_CLIENT -u $OPENQRM_DATABASE_USER --host $OPENQRM_DATABASE_SERVER  $OPENQRM_DATABASE_NAME -e "select $DB_COLUMN from $DB_TABLE" 1>/dev/null 2>&1
+		RET=$?
+	else
+        $MYSQL_CLIENT -u $OPENQRM_DATABASE_USER -p$OPENQRM_DATABASE_PASSWORD --host $OPENQRM_DATABASE_SERVER  $OPENQRM_DATABASE_NAME -e "select $DB_COLUMN from $DB_TABLE" 1>/dev/null 2>&1
+		RET=$?
+	fi
+    return $RET
+}
+
+
+function check_if_data_in_column_of_table_exists(){
+    local DB_TABLE=$1
+    local DB_COLUMN=$2
+    local DB_DATA=$3
+    local DB_OUTPUT_LOG="/tmp/dboutput.log"
+	if [ -z "$OPENQRM_DATABASE_PASSWORD" ]; then
+        $MYSQL_CLIENT -u $OPENQRM_DATABASE_USER --host $OPENQRM_DATABASE_SERVER  $OPENQRM_DATABASE_NAME -e "select * from $DB_TABLE where $DB_COLUMN=$DB_DATA" > $DB_OUTPUT_LOG
+		RET=$?
+	else
+        $MYSQL_CLIENT -u $OPENQRM_DATABASE_USER -p$OPENQRM_DATABASE_PASSWORD --host $OPENQRM_DATABASE_SERVER  $OPENQRM_DATABASE_NAME -e "select * from $DB_TABLE where $DB_COLUMN=$DB_DATA" > $DB_OUTPUT_LOG
+		RET=$?
+	fi
+    DB_OUTPUT=`cat $DB_OUTPUT_LOG`
+    if [ "$RET" == 0 ]; then
+        if [ "$DB_OUTPUT" == "" ]; then
+            return 1
+        else
+            return 0
+        fi
+    else
+        return $RET
+    fi
+}
+
+
+
+function run_sql(){
+    local DB_SQL=$@
+	if [ -z "$OPENQRM_DATABASE_PASSWORD" ]; then
+        $MYSQL_CLIENT -sN -u $OPENQRM_DATABASE_USER --host $OPENQRM_DATABASE_SERVER  $OPENQRM_DATABASE_NAME -e "$DB_SQL" 2>&1
+		RET=$?
+	else
+        $MYSQL_CLIENT -sN -u $OPENQRM_DATABASE_USER -p$OPENQRM_DATABASE_PASSWORD --host $OPENQRM_DATABASE_SERVER  $OPENQRM_DATABASE_NAME -e "$DB_SQL" 2>&1
+		RET=$?
+	fi
+    return $RET
+}
+
+
+
+
+function db_update()  {
+
+    # this function applies needed updates to the db-shema if needed in an idempotent way
+	if [ -f "$OPENQRM_SERVER_BASE_DIR/openqrm_pre_update/etc/openqrm-server.conf" ]; then
+		# for update we have to source the old configuration
+		. $OPENQRM_SERVER_BASE_DIR/openqrm_pre_update/etc/openqrm-server.conf
+	else
+		. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+	fi
+
+    #---------------------------------------------------------------------------
+    # from 4.9 to 5.0 the following db changes are needed
+    #---------------------------------------------------------------------------
+	# 1  > ALTER TABLE cloud_users ADD cu_lang VARCHAR(4);
+	# 2  > UPDATE user_info set user_lang = 'en';
+	# 3  > ALTER TABLE user_info ADD user_wizard_name VARCHAR(255) AFTER user_capabilities;
+	# 4  > ALTER TABLE user_info ADD user_wizard_step INT(5) AFTER user_wizard_name;
+	# 5  > ALTER TABLE user_info ADD user_wizard_id INT(5) AFTER user_wizard_step;
+	# 6  > ALTER TABLE appliance_info ADD appliance_wizard VARCHAR(255) AFTER appliance_comment;
+	# 7  > ALTER TABLE appliance_info MODIFY appliance_cpumodel VARCHAR(255);
+	# 8  > ALTER TABLE resource_info MODIFY resource_cpumodel VARCHAR(255);
+	# 9  > ALTER TABLE cloud_config MODIFY cc_value VARCHAR(255);
+	# 10 > ALTER TABLE event_info MODIFY event_id BIGINT;
+	# 11 > insert into cloud_config(cc_id, cc_key, cc_value) values (38, 'deprovision_warning', '100');
+	# 12 > insert into cloud_config(cc_id, cc_key, cc_value) values (39, 'deprovision_pause', '50')
+
+
+    echo "- Checking database shema ..."
+
+    # if cloud enabled .....
+    if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/cloud" ]; then
+
+		# 1  > ALTER TABLE cloud_users ADD cu_lang VARCHAR(4);
+		if ! check_column_in_table_exists cloud_users cu_lang; then
+			echo " -- db change : ALTER TABLE cloud_users ADD cu_lang VARCHAR(4)"
+			run_sql "ALTER TABLE cloud_users ADD cu_lang VARCHAR(4);"
+		fi
+		# 9  > ALTER TABLE cloud_config MODIFY cc_value VARCHAR(255);
+		echo " -- db change : ALTER TABLE cloud_config MODIFY cc_value VARCHAR(255)"
+		run_sql "ALTER TABLE cloud_config MODIFY cc_value VARCHAR(255);"
+
+		# 11  > insert into cloud_config(cc_id, cc_key, cc_value) values (38, 'deprovision_warning', '100');
+        if check_table_exists cloud_config; then
+            if ! check_if_data_in_column_of_table_exists cloud_config cc_id 38; then
+                echo " -- db change : insert into cloud_config(cc_id, cc_key, cc_value) values (38, 'deprovision_warning', '100')"
+                run_sql "insert into cloud_config(cc_id, cc_key, cc_value) values (38, 'deprovision_warning', '100');"
+            fi
+        fi
+
+		# 12  > insert into cloud_config(cc_id, cc_key, cc_value) values (39, 'deprovision_pause', '50')
+        if check_table_exists cloud_config; then
+            if ! check_if_data_in_column_of_table_exists cloud_config cc_id 39; then
+                echo " -- db change : insert into cloud_config(cc_id, cc_key, cc_value) values (39, 'deprovision_pause', '50')"
+                run_sql "insert into cloud_config(cc_id, cc_key, cc_value) values (39, 'deprovision_pause', '50');"
+            fi
+        fi
+	fi
+
+	# 2  > UPDATE user_info set user_lang = 'en';
+	echo " -- db change : UPDATE user_info set user_lang = 'en'"
+	run_sql "UPDATE user_info set user_lang = 'en';"
+
+	# 3  > ALTER TABLE user_info ADD user_wizard_name VARCHAR(255) AFTER user_capabilities;
+	if ! check_column_in_table_exists user_info user_wizard_name; then
+		echo " -- db change : ALTER TABLE user_info ADD user_wizard_name VARCHAR(255) AFTER user_capabilities"
+		run_sql "ALTER TABLE user_info ADD user_wizard_name VARCHAR(255) AFTER user_capabilities;"
+	fi
+
+	# 4  > ALTER TABLE user_info ADD user_wizard_step INT(5) AFTER user_wizard_name;
+	if ! check_column_in_table_exists user_info user_wizard_step; then
+		echo " -- db change : ALTER TABLE user_info ADD user_wizard_step INT(5) AFTER user_wizard_name"
+		run_sql "ALTER TABLE user_info ADD user_wizard_step INT(5) AFTER user_wizard_name;"
+	fi
+
+	# 5  > ALTER TABLE user_info ADD user_wizard_id INT(5) AFTER user_wizard_step;
+	if ! check_column_in_table_exists user_info user_wizard_id; then
+		echo " -- db change : ALTER TABLE user_info ADD user_wizard_id INT(5) AFTER user_wizard_step"
+		run_sql "ALTER TABLE user_info ADD user_wizard_id INT(5) AFTER user_wizard_step;"
+	fi
+
+	# 6  > ALTER TABLE appliance_info ADD appliance_wizard VARCHAR(255) AFTER appliance_comment;
+	if ! check_column_in_table_exists appliance_info appliance_wizard; then
+		echo " -- db change : ALTER TABLE appliance_info ADD appliance_wizard VARCHAR(255) AFTER appliance_comment"
+		run_sql "ALTER TABLE appliance_info ADD appliance_wizard VARCHAR(255) AFTER appliance_comment;"
+	fi
+
+	# 7 > ALTER TABLE appliance_info MODIFY appliance_cpumodel VARCHAR(255);
+	echo " -- db change : ALTER TABLE appliance_info MODIFY appliance_cpumodel VARCHAR(255)"
+	run_sql "ALTER TABLE appliance_info MODIFY appliance_cpumodel VARCHAR(255);"
+
+	# 8 > ALTER TABLE resource_info MODIFY resource_cpumodel VARCHAR(255);
+	echo " -- db change : ALTER TABLE resource_info MODIFY resource_cpumodel VARCHAR(255)"
+	run_sql "ALTER TABLE resource_info MODIFY resource_cpumodel VARCHAR(255);"
+
+	# 10  > ALTER TABLE event_info MODIFY event_id BIGINT;
+	echo " -- db change : ALTER TABLE event_info MODIFY event_id BIGINT"
+	run_sql "ALTER TABLE event_info MODIFY event_id BIGINT;"
+
+	echo "- Database sanity check for version 4.9 to 5.0 finished"
+
+	# from 5.0 to 5.1
+    #---------------------------------------------------------------------------
+    # from 5.0 to 5.1 the following db changes are needed
+    #---------------------------------------------------------------------------
+	# 1  > insert into cloud_config(cc_id, cc_key, cc_value) values (40, 'vm_provision_delay', '0');
+	# 2  > insert into cloud_config(cc_id, cc_key, cc_value) values (41, 'vm_loadbalance_algorithm', '0');
+	# 3  > ALTER TABLE role_info ADD role_comment VARCHAR(255);
+	# 4  > ALTER TABLE virtualization_info MODIFY virtualization_type VARCHAR(50);
+	# 5  > ALTER TABLE image_info MODIFY image_type VARCHAR(255);
+	# 6  > update virtualization_info set virtualization_name = 'KVM VM (networkboot)', virtualization_type='kvm-vm-net' where virtualization_type='kvm-vm';
+	# 7  > update virtualization_info set virtualization_name = 'KVM VM (localboot)', virtualization_type='kvm-vm-local' where virtualization_type='kvm-storage-vm';
+	# 8  > insert into deployment_info(deployment_id, deployment_name, deployment_type, deployment_description, deployment_storagetype, deployment_storagedescription) values ($NEW_DEPLOYMENT_ID, 'kvm-gluster-deployment', 'kvm-gluster-deployment', 'Glusterfs deployment for KVM', 'kvm', 'KVM Gluster Storage');
+	# 9  > update virtualization_info set virtualization_name = 'Citrix VM (networkboot)', virtualization_type='citrix-vm-net' where virtualization_type='citrix-vm';
+	# 10 > update virtualization_info set virtualization_name = 'Citrix VM (localboot)', virtualization_type='citrix-vm-local' where virtualization_type='citrix-storage-vm';
+	# 11 > update virtualization_info set virtualization_name = 'LXC VM (localboot)', virtualization_type='lxc-vm-local' where virtualization_type='lxc-storage-vm';
+	# 12 > update virtualization_info set virtualization_name = 'OpenVZ VM (localboot)', virtualization_type='openvz-vm-local' where virtualization_type='openvz-storage-vm';
+	# 13 > update virtualization_info set virtualization_name = 'ESX VM (networkboot)', virtualization_type='vmware-esx-vm-net' where virtualization_type='vmware-esx-vm';
+	# 14 > update virtualization_info set virtualization_name = 'Xen VM (networkboot)', virtualization_type='xen-vm-net' where virtualization_type='xen-vm';
+	# 15 > update virtualization_info set virtualization_name = 'Xen VM (localboot)', virtualization_type='xen-vm-local' where virtualization_type='xen-storage-vm';
+	# 16 > create table datacenter_info(datacenter_id BIGINT NOT NULL PRIMARY KEY, datacenter_load_overall VARCHAR(50), datacenter_load_server VARCHAR(50), datacenter_load_storage VARCHAR(50), datacenter_cpu_total VARCHAR(50), datacenter_mem_total VARCHAR(50), datacenter_mem_used VARCHAR(50));
+	# 17 > ALTER TABLE appliance_info MODIFY appliance_comment VARCHAR(255);
+
+	# 3  > ALTER TABLE role_info ADD role_comment VARCHAR(255);
+	if ! check_column_in_table_exists role_info role_comment; then
+		echo " -- db change : ALTER TABLE role_info ADD role_comment VARCHAR(255)"
+		run_sql "ALTER TABLE role_info ADD role_comment VARCHAR(255);"
+	fi
+	# 4  > ALTER TABLE virtualization_info MODIFY virtualization_type VARCHAR(50);
+	echo " -- db change : ALTER TABLE virtualization_info MODIFY virtualization_type VARCHAR(50)"
+	run_sql "ALTER TABLE virtualization_info MODIFY virtualization_type VARCHAR(50);"
+	# 5  > ALTER TABLE image_info MODIFY image_type VARCHAR(255);
+	echo " -- db change : ALTER TABLE image_info MODIFY image_type VARCHAR(255)"
+	run_sql "ALTER TABLE image_info MODIFY image_type VARCHAR(255);"
+
+	# virtualization plugin merge
+	# citrix
+	if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/citrix" ]; then
+		# 9  > update virtualization_info set virtualization_name = 'Citrix VM (networkboot)', virtualization_type='citrix-vm-net' where virtualization_type='citrix-vm';
+		echo " -- db change : update virtualization_info set virtualization_name = 'Citrix VM (networkboot)', virtualization_type='citrix-vm-net' where virtualization_type='citrix-vm'"
+		run_sql "update virtualization_info set virtualization_name = 'Citrix VM (networkboot)', virtualization_type='citrix-vm-net' where virtualization_type='citrix-vm';"
+	fi
+	# citrix-storage
+	if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/citrix-storage" ]; then
+		# 10  > update virtualization_info set virtualization_name = 'Citrix VM (localboot)', virtualization_type='citrix-vm-local' where virtualization_type='citrix-storage-vm';
+		run_sql "update virtualization_info set virtualization_name = 'Citrix VM (localboot)', virtualization_type='citrix-vm-local' where virtualization_type='citrix-storage-vm';"
+	fi
+	# kvm
+	if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/kvm" ]; then
+		echo "- adapting KVM Plugin database tables"
+		# 6  > update virtualization_info set virtualization_name = 'KVM VM (networkboot)', virtualization_type='kvm-vm-net' where virtualization_type='kvm-vm';
+		echo " -- db change : update virtualization_info set virtualization_name = 'KVM VM (networkboot)', virtualization_type='kvm-vm-net' where virtualization_type='kvm-vm';"
+		run_sql "update virtualization_info set virtualization_name = 'KVM VM (networkboot)', virtualization_type='kvm-vm-net' where virtualization_type='kvm-vm';"
+		# 8  > insert into deployment_info(deployment_id, deployment_name, deployment_type, deployment_description, deployment_storagetype, deployment_storagedescription) values ($NEW_DEPLOYMENT_ID, 'kvm-gluster-deployment', 'kvm-gluster-deployment', 'Glusterfs deployment for KVM', 'kvm', 'KVM Gluster Storage');
+		# glusterfs deployment
+		DEPLOYMENT_EXISTS=`run_sql "select deployment_id from deployment_info where deployment_type='kvm-gluster-deployment';"`
+		if [ "$DEPLOYMENT_EXISTS" == "" ]; then
+			NEW_DEPLOYMENT_ID=`run_sql "select count(deployment_id) from deployment_info;"`
+			NEW_DEPLOYMENT_ID=$(( NEW_DEPLOYMENT_ID + 1 ))
+			echo " -- db change : insert into deployment_info(deployment_id, deployment_name, deployment_type, deployment_description, deployment_storagetype, deployment_storagedescription) values ($NEW_DEPLOYMENT_ID, 'kvm-gluster-deployment', 'kvm-gluster-deployment', 'Glusterfs deployment for KVM', 'kvm', 'KVM Gluster Storage')"
+			run_sql "insert into deployment_info(deployment_id, deployment_name, deployment_type, deployment_description, deployment_storagetype, deployment_storagedescription) values ($NEW_DEPLOYMENT_ID, 'kvm-gluster-deployment', 'kvm-gluster-deployment', 'Glusterfs deployment for KVM', 'kvm', 'KVM Gluster Storage');"
+		fi
+	fi
+	# kvm-storage
+	if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/kvm-storage" ]; then
+		# 7  > update virtualization_info set virtualization_name = 'KVM VM (localboot)', virtualization_type='kvm-vm-local' where virtualization_type='kvm-storage-vm';
+		echo " -- db change : update virtualization_info set virtualization_name = 'KVM VM (localboot)', virtualization_type='kvm-vm-local' where virtualization_type='kvm-storage-vm';"
+		run_sql "update virtualization_info set virtualization_name = 'KVM VM (localboot)', virtualization_type='kvm-vm-local' where virtualization_type='kvm-storage-vm';"
+	fi
+	# lxc-storage
+	if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/lxc-storage" ]; then
+		# 11 > update virtualization_info set virtualization_name = 'LXC VM (localboot)', virtualization_type='lxc-vm-local' where virtualization_type='lxc-storage-vm';
+		run_sql "update virtualization_info set virtualization_name = 'LXC VM (localboot)', virtualization_type='lxc-vm-local' where virtualization_type='lxc-storage-vm';"
+	fi
+	# openvz
+	if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/openvz-storage" ]; then
+		# 12 > update virtualization_info set virtualization_name = 'OpenVZ VM (localboot)', virtualization_type='openvz-vm-local' where virtualization_type='openvz-storage-vm';
+		run_sql "update virtualization_info set virtualization_name = 'OpenVZ VM (localboot)', virtualization_type='openvz-vm-local' where virtualization_type='openvz-storage-vm';"
+	fi
+	# vmware-esx
+	if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/vmware-esx" ]; then
+		# 13  > update virtualization_info set virtualization_name = 'ESX VM (networkboot)', virtualization_type='vmware-esx-vm-net' where virtualization_type='vmware-esx-vm';
+		run_sql "update virtualization_info set virtualization_name = 'ESX VM (networkboot)', virtualization_type='vmware-esx-vm-net' where virtualization_type='vmware-esx-vm';"
+	fi
+	# xen
+	if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/xen" ]; then
+		# 14 > update virtualization_info set virtualization_name = 'Xen VM (networkboot)', virtualization_type='xen-vm-net' where virtualization_type='xen-vm';
+		run_sql "update virtualization_info set virtualization_name = 'Xen VM (networkboot)', virtualization_type='xen-vm-net' where virtualization_type='xen-vm';"
+	fi
+	# xen-storage
+	if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/xen-storage" ]; then
+		# 15 > update virtualization_info set virtualization_name = 'Xen VM (localboot)', virtualization_type='xen-vm-local' where virtualization_type='xen-storage-vm';
+		run_sql "update virtualization_info set virtualization_name = 'Xen VM (localboot)', virtualization_type='xen-vm-local' where virtualization_type='xen-storage-vm';"
+	fi
+    # if cloud enabled .....
+    if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/cloud" ]; then
+		# 1  > insert into cloud_config(cc_id, cc_key, cc_value) values (40, 'vm_provision_delay', '0');
+        if check_table_exists cloud_config; then
+            if ! check_if_data_in_column_of_table_exists cloud_config cc_id 40; then
+                echo " -- db change : insert into cloud_config(cc_id, cc_key, cc_value) values (40, 'vm_provision_delay', '0')"
+                run_sql "insert into cloud_config(cc_id, cc_key, cc_value) values (40, 'vm_provision_delay', '0');"
+            fi
+        fi
+		# 2  > insert into cloud_config(cc_id, cc_key, cc_value) values (41, 'vm_loadbalance_algorithm', '0');
+        if check_table_exists cloud_config; then
+            if ! check_if_data_in_column_of_table_exists cloud_config cc_id 41; then
+                echo " -- db change : insert into cloud_config(cc_id, cc_key, cc_value) values (41, 'vm_loadbalance_algorithm', '0')"
+                run_sql "insert into cloud_config(cc_id, cc_key, cc_value) values (41, 'vm_loadbalance_algorithm', '0');"
+            fi
+        fi
+	fi
+	# 16 > create table datacenter_info(datacenter_id INT(5) NOT NULL PRIMARY KEY, datacenter_load_overall VARCHAR(50), datacenter_load_server VARCHAR(50), datacenter_load_storage VARCHAR(50), datacenter_cpu_total VARCHAR(50), datacenter_mem_total VARCHAR(50), datacenter_mem_used VARCHAR(50));
+	if ! check_table_exists datacenter_info; then
+		echo " -- db change : create table datacenter_info(datacenter_id BIGINT NOT NULL PRIMARY KEY, datacenter_load_overall VARCHAR(50), datacenter_load_server VARCHAR(50), datacenter_load_storage VARCHAR(50), datacenter_cpu_total VARCHAR(50), datacenter_mem_total VARCHAR(50), datacenter_mem_used VARCHAR(50))"
+		run_sql "create table datacenter_info(datacenter_id BIGINT NOT NULL PRIMARY KEY, datacenter_load_overall VARCHAR(50), datacenter_load_server VARCHAR(50), datacenter_load_storage VARCHAR(50), datacenter_cpu_total VARCHAR(50), datacenter_mem_total VARCHAR(50), datacenter_mem_used VARCHAR(50));"
+	fi
+
+	# 17 > ALTER TABLE appliance_info MODIFY appliance_comment VARCHAR(255);
+	echo " -- db change : ALTER TABLE appliance_info MODIFY appliance_comment VARCHAR(255)"
+	run_sql "ALTER TABLE appliance_info MODIFY appliance_comment VARCHAR(255);"
+
+	echo "- Database sanity check for version 5.0 to 5.1 finished"
+
+	# from 5.1 to 5.2
+    #---------------------------------------------------------------------------
+    # from 5.1 to 5.2 the following db changes are needed
+    #---------------------------------------------------------------------------
+	# 1  > insert into cloud_config(cc_id, cc_key, cc_value) values (42, 'allow_vnc_access', 'true');
+	# 2  > ALTER TABLE cloud_requests ADD cr_image_password VARCHAR(255);
+	# 3  > create table lock_info(lock_id BIGINT NOT NULL PRIMARY KEY,lock_time VARCHAR(50),lock_section VARCHAR(50),lock_resource_id INT(5),lock_token VARCHAR(50),lock_description VARCHAR(255));
+	# 4  > adjust all base objects id to BIGINT
+	# 5  > adjust all cloud objects id to BIGINT
+	# 6  > adjust all plugin objects id to BIGINT
+	# 7  > ALTER TABLE appliance_info MODIFY appliance_capabilities VARCHAR(1000);
+	# 8  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_username VARCHAR(255);
+	# 9  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_password VARCHAR(255);
+	# 10  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_host VARCHAR(255);
+	# 11  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_port VARCHAR(255);
+	# 12  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_tenant VARCHAR(255);
+	# 13  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_endpoint VARCHAR(255);
+	# 14  > ALTER TABLE cloud_create_vm_lc MODIFY vc_cr_resource_number BIGINT;
+	# 15  > ALTER TABLE kernel_info MODIFY kernel_name VARCHAR(255);
+	# 16  > ALTER TABLE image_info MODIFY image_name VARCHAR(255);
+	# 17  > ALTER TABLE storage_info MODIFY storage_name VARCHAR(255);
+	# 18  > ALTER TABLE auth_blocker_info MODIFY ab_image_name VARCHAR(255);
+	# 19  > ALTER TABLE resource_info ADD resource_vname VARCHAR(255);
+	# 20  > ALTER TABLE resource_info ADD resource_vnc VARCHAR(30);
+	# 21  > insert into cloud_config(cc_id, cc_key, cc_value) values (43, 'max_network', '1000');
+	# 22  > insert into cloud_config(cc_id, cc_key, cc_value) values (44, 'max_memory', '10000');
+	# 23  > insert into cloud_config(cc_id, cc_key, cc_value) values (45, 'max_cpu', '100');
+	# 24  > ALTER TABLE cloud_selector MODIFY name VARCHAR(255);
+	# 25  > ALTER TABLE cloud_requests ADD cr_appliance_capabilities VARCHAR(1000);
+	# 26  > ALTER TABLE cloud_profiles ADD pr_appliance_capabilities VARCHAR(1000);
+	# 27  > update resource_info set resource_vtype=1 where resource_id=0 and resource_vtype IS NULL;
+	# 28  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_subscription_id VARCHAR(255);
+	# 29  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_keyfile VARCHAR(5000);
+
+
+    # if cloud enabled .....
+    if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/cloud" ]; then
+		# 1  > insert into cloud_config(cc_id, cc_key, cc_value) values (42, 'allow_vnc_access', 'true');
+        if check_table_exists cloud_config; then
+            if ! check_if_data_in_column_of_table_exists cloud_config cc_id 42; then
+                echo " -- db change : insert into cloud_config(cc_id, cc_key, cc_value) values (42, 'allow_vnc_access', 'true')"
+                run_sql "insert into cloud_config(cc_id, cc_key, cc_value) values (42, 'allow_vnc_access', 'false');"
+            fi
+        fi
+		# 21  > insert into cloud_config(cc_id, cc_key, cc_value) values (43, 'max_network', '1000');
+        if check_table_exists cloud_config; then
+            if ! check_if_data_in_column_of_table_exists cloud_config cc_id 43; then
+                echo " -- db change : insert into cloud_config(cc_id, cc_key, cc_value) values (43, 'max_network', '1000')"
+                run_sql "insert into cloud_config(cc_id, cc_key, cc_value) values (43, 'max_network', '1000');"
+            fi
+        fi
+		# 22  > insert into cloud_config(cc_id, cc_key, cc_value) values (44, 'max_memory', '10000');
+        if check_table_exists cloud_config; then
+            if ! check_if_data_in_column_of_table_exists cloud_config cc_id 44; then
+                echo " -- db change : insert into cloud_config(cc_id, cc_key, cc_value) values (44, 'max_memory', '10000')"
+                run_sql "insert into cloud_config(cc_id, cc_key, cc_value) values (44, 'max_memory', '10000');"
+            fi
+        fi
+		# 23  > insert into cloud_config(cc_id, cc_key, cc_value) values (45, 'max_cpu', '100');
+        if check_table_exists cloud_config; then
+            if ! check_if_data_in_column_of_table_exists cloud_config cc_id 45; then
+                echo " -- db change : insert into cloud_config(cc_id, cc_key, cc_value) values (45, 'max_cpu', '100')"
+                run_sql "insert into cloud_config(cc_id, cc_key, cc_value) values (45, 'max_cpu', '100');"
+            fi
+        fi
+		# 24  > ALTER TABLE cloud_selector MODIFY name VARCHAR(255);
+        if check_table_exists cloud_selector; then
+			echo " -- db change : ALTER TABLE cloud_selector MODIFY name VARCHAR(255);"
+			run_sql "ALTER TABLE cloud_selector MODIFY name VARCHAR(255);"
+		fi
+		# 2  > ALTER TABLE cloud_requests ADD cr_image_password VARCHAR(255);
+        if check_table_exists cloud_requests; then
+			if ! check_column_in_table_exists cloud_requests cr_image_password; then
+				echo " -- db change : ALTER TABLE cloud_requests ADD cr_image_password VARCHAR(255)"
+				run_sql "ALTER TABLE cloud_requests ADD cr_image_password VARCHAR(255);"
+			fi
+		fi
+		# 14  > ALTER TABLE cloud_create_vm_lc MODIFY vc_cr_resource_number BIGINT;
+        if check_table_exists cloud_create_vm_lc; then
+			echo " -- db change : ALTER TABLE cloud_create_vm_lc MODIFY vc_cr_resource_number BIGINT;"
+			run_sql "ALTER TABLE cloud_create_vm_lc MODIFY vc_cr_resource_number BIGINT;"
+		fi
+
+
+		# 25  > ALTER TABLE cloud_requests ADD cr_appliance_capabilities VARCHAR(1000);
+        if check_table_exists cloud_requests; then
+			if ! check_column_in_table_exists cloud_requests cr_appliance_capabilities; then
+				echo " -- db change : ALTER TABLE cloud_requests ADD cr_appliance_capabilities VARCHAR(1000);"
+				run_sql "ALTER TABLE cloud_requests ADD cr_appliance_capabilities VARCHAR(1000);"
+			fi
+		fi
+		# 26  > ALTER TABLE cloud_profiles ADD pr_appliance_capabilities VARCHAR(1000);
+        if check_table_exists cloud_profiles; then
+			if ! check_column_in_table_exists cloud_profiles pr_appliance_capabilities; then
+				echo " -- db change : ALTER TABLE cloud_profiles ADD pr_appliance_capabilities VARCHAR(1000);"
+				run_sql "ALTER TABLE cloud_profiles ADD pr_appliance_capabilities VARCHAR(1000);"
+			fi
+		fi
+	fi
+
+
+	# 3  > create table lock_info(lock_id BIGINT NOT NULL PRIMARY KEY,lock_time VARCHAR(50),lock_section VARCHAR(50),lock_resource_id INT(5),lock_token VARCHAR(50),lock_description VARCHAR(255));
+	if ! check_table_exists lock_info; then
+		echo " -- db change : create table lock_info(lock_id BIGINT NOT NULL PRIMARY KEY,lock_time VARCHAR(50),lock_section VARCHAR(50),lock_resource_id INT(5),lock_token VARCHAR(50),lock_description VARCHAR(255))"
+		run_sql "create table lock_info(lock_id BIGINT NOT NULL PRIMARY KEY,lock_time VARCHAR(50),lock_section VARCHAR(50),lock_resource_id INT(5),lock_token VARCHAR(50),lock_description VARCHAR(255));"
+	fi
+
+
+	# 4  > adjust all base objects id to BIGINT
+	echo " -- db change : adjusting all base object ids to BIGINT"
+	run_sql "ALTER TABLE resource_info MODIFY resource_id BIGINT;"
+	run_sql "ALTER TABLE resource_info MODIFY resource_imageid BIGINT;"
+	run_sql "ALTER TABLE resource_info MODIFY resource_applianceid BIGINT;"
+	run_sql "ALTER TABLE resource_info MODIFY resource_vtype BIGINT;"
+	run_sql "ALTER TABLE resource_info MODIFY resource_vhostid BIGINT;"
+	run_sql "ALTER TABLE resource_info MODIFY resource_execdport BIGINT;"
+	run_sql "ALTER TABLE resource_info MODIFY resource_senddelay BIGINT;"
+	run_sql "ALTER TABLE kernel_info MODIFY kernel_id BIGINT;"
+	run_sql "ALTER TABLE image_info MODIFY image_id BIGINT;"
+	run_sql "ALTER TABLE image_info MODIFY image_storageid BIGINT;"
+	run_sql "ALTER TABLE appliance_info MODIFY appliance_id BIGINT;"
+	run_sql "ALTER TABLE appliance_info MODIFY appliance_imageid BIGINT;"
+	run_sql "ALTER TABLE appliance_info MODIFY appliance_cluster BIGINT;"
+	run_sql "ALTER TABLE appliance_info MODIFY appliance_ssi BIGINT;"
+	run_sql "ALTER TABLE appliance_info MODIFY appliance_resources BIGINT;"
+	run_sql "ALTER TABLE appliance_info MODIFY appliance_highavailable BIGINT;"
+	run_sql "ALTER TABLE appliance_info MODIFY appliance_virtual BIGINT;"
+	run_sql "ALTER TABLE appliance_info MODIFY appliance_virtualization_host BIGINT;"
+	run_sql "ALTER TABLE event_info MODIFY event_image_id BIGINT;"
+	run_sql "ALTER TABLE event_info MODIFY event_resource_id BIGINT;"
+	run_sql "ALTER TABLE user_info MODIFY user_id BIGINT;"
+	run_sql "ALTER TABLE user_info MODIFY user_role BIGINT;"
+	run_sql "ALTER TABLE user_info MODIFY user_wizard_step BIGINT;"
+	run_sql "ALTER TABLE user_info MODIFY user_wizard_id BIGINT;"
+	run_sql "ALTER TABLE role_info MODIFY role_id BIGINT;"
+	run_sql "ALTER TABLE storage_info MODIFY storage_id BIGINT;"
+	run_sql "ALTER TABLE storage_info MODIFY storage_type BIGINT;"
+	run_sql "ALTER TABLE storage_info MODIFY storage_resource_id BIGINT;"
+	run_sql "ALTER TABLE resource_service MODIFY resource_id BIGINT;"
+	run_sql "ALTER TABLE image_service MODIFY image_id BIGINT;"
+	run_sql "ALTER TABLE image_authentication_info MODIFY ia_id BIGINT;"
+	run_sql "ALTER TABLE image_authentication_info MODIFY ia_image_id BIGINT;"
+	run_sql "ALTER TABLE image_authentication_info MODIFY ia_resource_id BIGINT;"
+	run_sql "ALTER TABLE image_authentication_info MODIFY ia_auth_type BIGINT;"
+	run_sql "ALTER TABLE auth_blocker_info MODIFY ab_id BIGINT;"
+	run_sql "ALTER TABLE auth_blocker_info MODIFY ab_image_id BIGINT;"
+	run_sql "ALTER TABLE deployment_info MODIFY deployment_id BIGINT;"
+	run_sql "ALTER TABLE virtualization_info MODIFY virtualization_id BIGINT;"
+	run_sql "ALTER TABLE lock_info MODIFY lock_resource_id BIGINT;"
+
+	# 6  > adjust all plugin objects id to BIGINT
+	if check_table_exists wakeuponlan; then
+		run_sql "ALTER TABLE wakeuponlan MODIFY wakeuponlan_id BIGINT;"
+		run_sql "ALTER TABLE wakeuponlan MODIFY wakeuponlan_user_id BIGINT;"
+		run_sql "ALTER TABLE wakeuponlan MODIFY wakeuponlan_appliance_id BIGINT;"
+		run_sql "ALTER TABLE wakeuponlan MODIFY wakeuponlan_nic_id BIGINT;"
+		run_sql "ALTER TABLE wakeuponlan MODIFY wakeuponlan_state BIGINT;"
+	fi
+
+	# 7  > ALTER TABLE appliance_info MODIFY appliance_capabilities VARCHAR(1000);
+	echo " -- db change : ALTER TABLE appliance_info MODIFY appliance_capabilities VARCHAR(1000);"
+	run_sql "ALTER TABLE appliance_info MODIFY appliance_capabilities VARCHAR(1000);"
+
+    # if hybrid-cloud enabled .....
+    if [ -e "$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/hybrid-cloud" ]; then
+        if check_table_exists hybrid_cloud_accounts; then
+			if ! check_column_in_table_exists hybrid_cloud_accounts hybrid_cloud_username; then
+				# 8  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_username VARCHAR(255);
+				run_sql "ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_username VARCHAR(255);"
+			fi
+			if ! check_column_in_table_exists hybrid_cloud_accounts hybrid_cloud_password; then
+				# 9  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_password VARCHAR(255);
+				run_sql "ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_password VARCHAR(255);"
+			fi
+			if ! check_column_in_table_exists hybrid_cloud_accounts hybrid_cloud_host; then
+				# 10  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_host VARCHAR(255);
+				run_sql "ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_host VARCHAR(255);"
+			fi
+			if ! check_column_in_table_exists hybrid_cloud_accounts hybrid_cloud_port; then
+				# 11  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_port VARCHAR(255);
+				run_sql "ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_port VARCHAR(255);"
+			fi
+			if ! check_column_in_table_exists hybrid_cloud_accounts hybrid_cloud_tenant; then
+				# 12  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_tenant VARCHAR(255);
+				run_sql "ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_tenant VARCHAR(255);"
+			fi
+			if ! check_column_in_table_exists hybrid_cloud_accounts hybrid_cloud_endpoint; then
+				# 13  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_endpoint VARCHAR(255);
+				run_sql "ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_endpoint VARCHAR(255);"
+			fi
+			if ! check_column_in_table_exists hybrid_cloud_accounts hybrid_cloud_subscription_id; then
+				# 28  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_subscription_id VARCHAR(255);
+				run_sql "ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_subscription_id VARCHAR(255);"
+			fi
+			if ! check_column_in_table_exists hybrid_cloud_accounts hybrid_cloud_keyfile; then
+				# 29  > ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_keyfile VARCHAR(5000);
+				run_sql "ALTER TABLE hybrid_cloud_accounts ADD hybrid_cloud_keyfile VARCHAR(5000);"
+			fi
+		fi
+	fi
+
+	# 15  > ALTER TABLE kernel_info MODIFY kernel_name VARCHAR(255);
+	run_sql "ALTER TABLE kernel_info MODIFY kernel_name VARCHAR(255);"
+	# 16  > ALTER TABLE image_info MODIFY image_name VARCHAR(255);
+	run_sql "ALTER TABLE image_info MODIFY image_name VARCHAR(255);"
+	# 17  > ALTER TABLE storage_info MODIFY storage_name VARCHAR(255);
+	run_sql "ALTER TABLE storage_info MODIFY storage_name VARCHAR(255);"
+	# 18  > ALTER TABLE auth_blocker_info MODIFY ab_image_name VARCHAR(255);
+	run_sql "ALTER TABLE auth_blocker_info MODIFY ab_image_name VARCHAR(255);"
+
+	if ! check_column_in_table_exists resource_info resource_vname; then
+		# 19  > ALTER TABLE resource_info ADD resource_vname VARCHAR(255);
+		run_sql "ALTER TABLE resource_info ADD resource_vname VARCHAR(255);"
+	fi
+	if ! check_column_in_table_exists resource_info resource_vnc; then
+		# 20  > ALTER TABLE resource_info ADD resource_vnc VARCHAR(30);
+		run_sql "ALTER TABLE resource_info ADD resource_vnc VARCHAR(30);"
+	fi
+
+	# 27  > update resource_info set resource_vtype=1 where resource_id=0 and resource_vtype IS NULL;
+	run_sql "update resource_info set resource_vtype=1 where resource_id=0 and resource_vtype IS NULL;"
+
+	echo "- Database sanity check for version 5.1 to 5.2 finished"
+
+
+	# from 5.2 to 5.3
+    #---------------------------------------------------------------------------
+    # from 5.2 to 5.3 the following db changes are needed
+    #---------------------------------------------------------------------------
+	# 1  > ALTER TABLE image_info ADD image_size BIGINT(30);
+	# 2  > ALTER TABLE image_info MODIFY image_deployment_parameter VARCHAR(1000);
+	# 3  > ALTER TABLE cloud_requests ADD cr_size_req VARCHAR(255);
+	# 4  > ALTER TABLE cloud_profiles ADD pr_size_req VARCHAR(255);
+	# 5  > ALTER TABLE ip_mgmt ADD ip_mgmt_resource_id BIGINT(30);
+	# 6  > ALTER TABLE ip_mgmt ADD ip_mgmt_bridge_name VARCHAR(50);
+	# 7 > insert into cloud_config(cc_id, cc_key, cc_value) values (46, 'bandwidth_metering', 'true');
+
+	if ! check_column_in_table_exists image_info image_size; then
+		# 1  > ALTER TABLE image_info ADD image_size BIGINT(30);
+		run_sql "ALTER TABLE image_info ADD image_size BIGINT(30);"
+	fi
+
+	# 2  > ALTER TABLE image_info MODIFY image_deployment_parameter VARCHAR(1000);
+	echo " -- db change : ALTER TABLE image_info MODIFY image_deployment_parameter VARCHAR(1000);"
+	run_sql "ALTER TABLE image_info MODIFY image_deployment_parameter VARCHAR(1000);"
+
+	if ! check_column_in_table_exists cloud_requests cr_size_req; then
+		# 3  > ALTER TABLE cloud_requests ADD cr_size_req VARCHAR(255);
+		run_sql "ALTER TABLE cloud_requests ADD cr_size_req VARCHAR(255);"
+	fi
+	if ! check_column_in_table_exists cloud_profiles pr_size_req; then
+		# 4  > ALTER TABLE cloud_profiles ADD pr_size_req VARCHAR(255);
+		run_sql "ALTER TABLE cloud_profiles ADD pr_size_req VARCHAR(255);"
+	fi
+
+	if ! check_column_in_table_exists ip_mgmt ip_mgmt_resource_id; then
+		# 5  > ALTER TABLE ip_mgmt ADD ip_mgmt_resource_id BIGINT(30);
+		run_sql "ALTER TABLE ip_mgmt ADD ip_mgmt_resource_id BIGINT(30);"
+	fi
+
+	if ! check_column_in_table_exists ip_mgmt ip_mgmt_bridge_name; then
+		# 6  > ALTER TABLE ip_mgmt ADD ip_mgmt_bridge_name VARCHAR(50);
+		run_sql "ALTER TABLE ip_mgmt ADD ip_mgmt_bridge_name VARCHAR(50);"
+	fi
+
+	# 7 > insert into cloud_config(cc_id, cc_key, cc_value) values (46, 'bandwidth_metering', 'true');
+        if check_table_exists cloud_config; then
+            if ! check_if_data_in_column_of_table_exists cloud_config cc_id 46; then
+                echo " -- db change : insert into cloud_config(cc_id, cc_key, cc_value) values (46, 'bandwidth_metering', 'true')"
+                run_sql "insert into cloud_config(cc_id, cc_key, cc_value) values (46, 'bandwidth_metering', 'true');"
+            fi
+        fi
+
+
+	echo "- Database sanity check for version 5.2 to 5.3 finished"
+
+
+}
+
+
+
+
+
+
+
+case "$1" in
+	init)
+		initialize_database
+		;;
+	backup)
+		backup_database $2
+		;;
+	restore)
+		restore_database $2
+		;;
+	drop)
+		drop_database
+		;;
+	update)
+		db_update
+		;;
+esac

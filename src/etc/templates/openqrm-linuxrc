@@ -1,0 +1,893 @@
+#!/bin/bash
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+# linuxrc for the openQRM initrd
+export SHELL=/bin/ash
+PATH=/sbin:/bin:/usr/bin:/usr/sbin
+export PATH
+
+#export PS1='\n\e[31m\e[1m\u@\h\e[0m \e[94m\w\n \e[31m\e[1m#\e[0m\e[0m\e[39m\e[49m '
+
+# some defines 
+export IMAGE_FSTAB=/mnt/etc/fstab
+export IMAGE_FSTAB_STATIC=/mnt/etc/fstab-static
+export NETWORK_SERVICES_TO_ADJUST="/etc/init.d/portmap /etc/init.d/netfs /etc/rc.d/init.d/portmap /etc/rc.d/init.d/netfs /etc/init.d/network /etc/rc.d/init.d/network /etc/init.d/networking /etc/rc.d/init.d/networking"
+
+#export NOT_START_SERVICE="dbus avahi-daemon kudzu"
+export NOT_START_SERVICE="avahi-daemon kudzu"
+
+
+# functions
+
+function prepare_udev() {
+	#initrd
+	mkdir -p /dev/.udevdb/ /etc/udev/rules.d/ /usr/lib/udev/rules.d/
+
+	# firmware rules existing ?
+	if [ ! -f /etc/udev/rules.d/50-firmware.rules ]; then
+		# debian/ubuntu
+		if [ -x /lib/udev/firmware ]; then
+			echo 'SUBSYSTEM=="firmware", ACTION=="add", RUN+="firmware"' > /etc/udev/rules.d/50-firmware.rules
+		fi
+		# centos/rh
+		if [ -x /lib/udev/firmware.sh ]; then
+			echo 'SUBSYSTEM=="firmware", ACTION=="add", RUN+="firmware.sh"' > /etc/udev/rules.d/50-firmware.rules
+		fi
+	fi
+
+	### NOT NEEDED
+	##alternative to avoid using net.ifnames=0 on pxe boot
+	#if [ -f /lib/udev/rules.d/80-net-setup-link.rules ]; then
+	#	mv /lib/udev/rules.d/80-net-setup-link.rules /lib/udev/rules.d/80-net-setup-link.rules_
+	#fi
+	#ln -s /dev/null /lib/udev/rules.d/80-net-setup-link.rules
+
+	#rootfs
+	mkdir -p /mnt/initrd
+	if [ ! -e /mnt/dev/console ] || [ ! -e /mnt/dev/null ]; then
+		if [ ! -d /mnt/dev ]; then
+			mkdir -p /mnt/dev
+		fi
+		mount -t tmpfs none /mnt/dev/
+		cp -a /dev/* /mnt/dev/
+		mkdir -p /mnt/dev/.udevdb/
+	fi
+	# clean udev rulez
+	rm -f /mnt/etc/udev/rules.d/*
+}
+
+
+function prepare_var() {
+	VAR_LOOP=0
+	local OLD_IFS=$IFS
+	IFS=$'\n'
+	for var_run_dir in $(ls -al /mnt/var/run | grep ^d); do
+		unset IFS
+		VAR_ARRAY=($var_run_dir)
+		VAR_DIR=${VAR_ARRAY[8]}
+		if [ "$VAR_DIR" != "." ] && [ "$VAR_DIR" != ".." ]; then
+			VAR_USER=${VAR_ARRAY[2]}
+			VAR_GROUP=${VAR_ARRAY[3]}
+			VAR_RUN_DIR[$VAR_LOOP]="$VAR_DIR $VAR_USER $VAR_GROUP"
+			VAR_LOOP=$(( VAR_LOOP + 1 ))
+		fi
+	done
+	mount -n -t tmpfs none /mnt/var/run
+	rm -f /mnt/var/log/wtmp
+	ln -s -f ../run/wtmp /mnt/var/log/wtmp
+	touch /mnt/var/run/wtmp
+	chmod 0664 /mnt/var/run/wtmp
+	for (( d=0;d<$VAR_LOOP;d++)); do
+		VAR_ARRAY=(${VAR_RUN_DIR[$d]})
+		VAR_DIR=${VAR_ARRAY[0]}
+		VAR_USER=${VAR_ARRAY[1]}
+		VAR_GROUP=${VAR_ARRAY[2]}
+		mkdir -p /mnt/var/run/$VAR_DIR
+		chown $VAR_USER:$VAR_GROUP /mnt/var/run/$VAR_DIR 1>/dev/null
+	done
+	unset IFS
+	return 0
+}
+
+function import_kernel() {
+
+	mkdir -p /tmp_download
+
+	mount -t tmpfs none /tmp_download
+	mount -t tmpfs none /lib/modules
+
+	cd /tmp_download
+
+	echo -n "Attempting $openqrm_web_protocol get - Modules"
+	if ! $WGET -q -O modules-$kernel_name.tgz $openqrm_web_protocol://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/boot/modules-$kernel_name.tgz; then
+		echo ": skipped"
+		echo "Attempting tftp modules"
+		tftp $OPENQRM_SERVER_IP_ADDRESS -g -r boot/modules-$kernel_name.tgz -l modules-$kernel_name.tgz
+	else
+		#echo "...."
+		echo -n " = Done. "
+	fi
+	tar -C / -xzf /tmp_download/modules-$kernel_name.tgz
+	rm -f modules-$kernel_name.tgz
+	sync
+	mkdir -p /boot
+	mount -t tmpfs none /boot
+	cd /boot
+
+	#echo -n "Attempting $openqrm_web_protocol get kernel"
+	echo -n "Kernel"
+	if ! $WGET -q -O vmlinuz-$kernel_name $openqrm_web_protocol://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/boot/vmlinuz-$kernel_name; then
+		echo ": skipped"
+		echo "Attempting tftp get kernel"
+		tftp $OPENQRM_SERVER_IP_ADDRESS -g -r boot/vmlinuz-$kernel_name -l vmlinuz-$kernel_name
+	else
+		#echo "...."
+		echo -n " = Done. "
+	fi
+	mv vmlinuz-$kernel_name vmlinuz-$kernel_version
+
+	#echo -n "Attempting $openqrm_web_protocol get System.map"
+	echo -n "System.map"
+	if ! $WGET -q -O System.map-$kernel_name $openqrm_web_protocol://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/boot/System.map-$kernel_name; then
+		echo ": skipped"
+		echo "Attempting tftp get System.map"
+		tftp $OPENQRM_SERVER_IP_ADDRESS -g -r boot/System.map-$kernel_name -l System.map-$kernel_name
+	else
+		#echo "...."
+		echo " = Done. "
+	fi
+	mv System.map-$kernel_name System.map-$kernel_version
+	cd /
+
+	depmod -a
+
+	## pcimap ?
+	#if [ ! -f /lib/modules/$KERNEL_VERSION/modules.pcimap ]; then
+	#	depmod -a -m
+	#	if [ ! -f /lib/modules/$KERNEL_VERSION/modules.pcimap ]; then
+	#		echo "WARNING: Could not create /lib/modules/$KERNEL_VERSION/modules.pcimap!"
+	#		echo "WARNING: Automatic hardware-detection may fail!"
+	#	fi
+	#fi
+
+	# manually load ide disk + cdroms
+	modprobe ide-core 2>/mplog1
+	modprobe ide-generic 2>/mplog1
+	modprobe ide-disk 2>/mplog1
+	modprobe ata_piix 2>/mplog1
+	modprobe sata_nv 2>/mplog1
+	modprobe sd_mod 2>/mplog1
+	rm -f /mplog1
+
+	#echo "- (2) Starting hardware detection (all system components)"
+	#for module in `/sbin/pcimodules`; do
+	#	if [ "$module" == "matroxfb_base" ]; then
+	#		# skip this, it makes the kvm vm vnc console unreadable
+	#		continue
+	#	fi
+	#	if [ "$module" == "cirrusfb" ]; then
+	#		# skip this, it crashes the xen vm qemu-dm when accessing the vnc console on debian-lenny
+	#		continue
+	#	fi
+	#	if [ "$module" == "virtio" ] || [ "$module" == "virtio_pci" ] || [ "$module" == "virtio_ring" ] || [ "$module" == "virtio_net" ]; then
+	#		#skip these modules already loaded
+	#		echo "Skipping modules; virtio, virtio_pci, virtio_ring, virtio_net"
+	#		continue
+	#	fi
+	#	echo " -- loading $module"
+	#	modprobe -s "$module"
+	#done
+
+	umount /tmp_download
+	rmdir /tmp_download
+
+
+	###	Start udev
+	prepare_udev
+	mkdir -p /run/udev
+	#/bin/udevd --daemon
+	/bin/udevd --daemon --resolve-names=never
+	/bin/udevadm trigger --type=subsystems --action=add
+	/bin/udevadm trigger --type=devices --action=add
+	#/bin/udevadm hwdb --update
+	/bin/udevadm trigger --sysname-match="event*"
+	bin/udevadm control --reload
+	/bin/udevadm settle || true
+	# give time to settle, especially needed for some scsi devices
+	#sleep 3
+	### end udev
+
+
+}
+	
+function prepare_lvm(){
+
+	#lvm
+	if [ -x /bin/lvm ]; then
+		if /bin/lvm lvdisplay | grep -E "LV Path" 1>/dev/null; then
+			LVM_VOLME_GREP="LV Path"
+		else
+			LVM_VOLME_GREP="LV Name"
+		fi
+		echo "- Scanning for physical lvm drives"
+		/bin/lvm pvscan
+		echo "- Scanning for logical volume groups"
+		/bin/lvm vgscan --mknodes
+		echo "- Activating logical volume groups"
+		/bin/lvm vgchange -ay
+		echo "- Scanning for logical volumes"
+		/bin/lvm lvscan
+		echo "- Activating logical volumes"
+		for LVOL in `/bin/lvm lvdisplay | grep -i "$LVM_VOLME_GREP" | awk {' print $3 '}`; do
+			echo "- Activating $LVOL"
+			/bin/lvm lvchange -ay -y $LVOL
+		done
+	fi
+	
+}
+
+
+function prepare_swap(){
+	FOUND_SWAP=0
+	for SWPSPACE in $(cat /proc/partitions |grep '[0-9]' | awk '{print $4}'); do
+		if swapon /dev/${SWPSPACE} 1>/dev/null 2>&1; then
+			swapoff /dev/${SWPSPACE} 1>/dev/null
+			echo "Adding /dev/${SWPSPACE} as swap space"
+			echo "/dev/${SWPSPACE} swap	swap	defaults	0 0" >> $IMAGE_FSTAB
+			FOUND_SWAP=1
+		fi
+	done
+	if [ "$FOUND_SWAP" == "0" ]; then
+		# we need to create a small swap file
+		dd if=/dev/zero of=/mnt/tmp/mini-swap.swap bs=1M count=1
+		mkswap /mnt/tmp/mini-swap.swap
+		echo "Adding mini-swap file as swap space"
+		echo "/tmp/mini-swap.swap swap	swap	noauto	0 0" >> $IMAGE_FSTAB
+	fi
+}
+
+# this functions adds the common entries to the images fstab
+function create_fstab() {
+	local OLD_IFS=$IFS
+	echo "none         /dev/pts     devpts   gid=5,mode=620     0 0" >>$IMAGE_FSTAB
+	echo "none         /proc        proc     defaults           0 0" >>$IMAGE_FSTAB
+	echo "none         /dev/shm     tmpfs    defaults           0 0" >>$IMAGE_FSTAB
+	echo "/dev/fd0     /mnt/floppy  auto     noauto,owner,kudzu 0 0" >>$IMAGE_FSTAB
+	IFS=$'\n'
+
+	if [ -d /proc/ide ]; then
+		for IDEDEVICES in `ls /proc/ide`; do
+			if grep cdrom /proc/ide/$IDEDEVICES/media 1>/dev/null 2>&1; then
+				echo "Found cdrom at $IDEDEVICES"
+				mkdir -p /mnt/cdrom$LOOP 1>/dev/null
+				echo "/dev/$IDEDEVICES     /mnt/cdrom$LOOP   udf,iso9660 noauto,owner,kudzu,ro 0 0" >> $IMAGE_FSTAB
+				LOOP=$((LOOP + 1))
+			fi
+		done
+	fi
+
+	IFS=$OLD_IFS
+
+#	# fetch a custom fstab part from openqrm if exists
+#	if $WGET -q -O /fstab-custom "$openqrm_web_protocol://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/atu/custom/fstab/fstab.$appliance_name"; then
+#		cat /fstab-custom >> $IMAGE_FSTAB
+#	elif [ -f $IMAGE_FSTAB_STATIC ]; then
+#		echo "Found $IMAGE_FSTAB_STATIC, adding to $IMAGE_FSTAB"
+#		cat $IMAGE_FSTAB_STATIC >> $IMAGE_FSTAB
+#	fi
+
+}
+
+function create_fstab_customs() {
+
+	if [ -f /custom/fstab-static ]; then
+		cat /custom/fstab-static >> $IMAGE_FSTAB
+	fi
+
+	if [ -f /custom/fstab.$appliance_name ]; then
+		cat /custom/fstab.$appliance_name >> $IMAGE_FSTAB
+	fi
+
+	if [ -f /custom/modules.$appliance_name ]; then
+		/bin/cp -f /custom/modules.$appliance_name /mnt/etc/modules
+	elif [ -f /custom/modules ]; then
+		/bin/cp -f /custom/modules /mnt/etc/modules
+	fi
+
+	if [ -f /custom/interfaces.$appliance_name ]; then
+		/bin/cp -f /custom/interfaces.$appliance_name /mnt/etc/network/interfaces
+	fi
+
+
+	if [ -f /custom/hosts-static ]; then
+		/bin/cp -f /custom/hosts-static /mnt/etc/hosts
+	fi
+
+	if [ -f /custom/hosts-atu ]; then
+		cat /custom/hosts-atu >> /mnt/etc/hosts
+	fi
+
+	if [ -f /custom/hosts.$appliance_name ]; then
+		cat /custom/hosts.$appliance_name >> /mnt/etc/hosts
+	fi
+
+}
+
+function set_root_password() {
+	local id=$1
+
+	if $WGET -q -O /iauth.$id $openqrm_web_protocol://$OPENQRM_SERVER_IP_ADDRESS/openqrm/action/image-auth/iauth.$id.php 2>/iauth.log; then
+		cryptedpassword=`cat /iauth.$id`
+		rm -f /iauth.$id iauth.log
+		if [ "$cryptedpassword" != "" ]; then
+			sed -i "s#^root:[^:]*#root:$cryptedpassword#" /mnt/etc/shadow
+			sed -i "s#^root:[^:]*#root:$cryptedpassword#" /mnt/etc/shadow-
+		fi
+		#rm -f /iauth.$id
+	fi
+}
+
+function prepare_services() {
+
+	if [ ! -e /mnt/bin/systemd ] && [ ! -e /mnt/usr/bin/systemd ]; then
+		chroot /mnt ln -sf /$resource_basedir/openqrm/etc/init.d/openqrm-client /etc/init.d/openqrm-client
+	fi
+	
+	echo "#!/bin/bash -x" >/mnt/tmp/openqrm-client.enable
+	echo "OPENQRM_SERVER_BASE_DIR=$resource_basedir" >>/mnt/tmp/openqrm-client.enable
+	echo ". /$resource_basedir/openqrm/include/openqrm-functions" >>/mnt/tmp/openqrm-client.enable
+	echo "openqrm_chkconfig add openqrm-client" >>/mnt/tmp/openqrm-client.enable
+
+	for SERVICE in $NOT_START_SERVICE; do
+		echo "openqrm_chkconfig del $SERVICE" >>/mnt/tmp/openqrm-client.enable
+	done
+
+	chmod +x /mnt/tmp/openqrm-client.enable
+	chroot /mnt /tmp/openqrm-client.enable 1>/dev/null 2>&1
+	rm -f /mnt/tmp/openqrm-client.enable
+}
+
+function prepare_net_init() {
+	INIT_SCRIPTS_TO_PREPARE="$@"
+	for INIT_SCRIPT in $INIT_SCRIPTS_TO_PREPARE; do
+		if [ -f /mnt/$INIT_SCRIPT ]; then
+			if ! grep -A2 "stop)" /mnt/$INIT_SCRIPT | grep -q "openqrm"; then
+				echo "Preparing init script $INIT_SCRIPT"
+				sed -e "s/^[ \t]*stop)\(.*\)/stop) exit # added by openqrm \n\1/" /mnt/$INIT_SCRIPT >/mnt/${INIT_SCRIPT}.openqrm
+				mv -f /mnt/${INIT_SCRIPT}.openqrm /mnt/$INIT_SCRIPT
+				chmod +x /mnt/$INIT_SCRIPT
+			fi
+		fi
+	done
+}
+
+function make_serial_console() {
+	#getty -n -l /bin/bash /dev/ttyS0 9600 vt102 &
+
+		# Try to use setsid, which will enable job control in the shell
+        # and paging in more
+        if command -v setsid >/dev/null 2>&1; then
+                unset IFS
+                read -r console rest </proc/consoles
+                if [ "${console}" = "ttyS0" ]; then
+                        # Need to choose a specific VT
+                        console="ttyS1"
+                fi
+                # We don't have 'setsid -c' so we need to setsid, open
+                # the tty, and finally exec an interactive shell
+                REASON="$*" PS1='(initramfs) ' setsid ash -c "exec sh -i <>/dev/${console} 1>&0 2>&1"
+        else
+                REASON="$*" PS1='(initramfs) ' ash -i </dev/console >/dev/console 2>&1
+        fi
+
+}
+
+#######import_kernel
+# main
+#######
+
+[ -d /dev ] || mkdir -m 0755 /dev
+[ -d /root ] || mkdir -m 0700 /root
+[ -d /sys ] || mkdir -m 0555 /sys
+[ -d /proc ] || mkdir -m 0555 /proc
+[ -d /tmp ] || mkdir -m 1777 /tmp
+
+
+mkdir -p /var/lock /var/log
+
+#mount -t proc -o nodev,noexec,nosuid proc /proc
+mount -t proc proc /proc
+
+# creating the devices
+echo "Creating the devices ..."
+makedevs -d /etc/initrd-devices.conf /
+
+mkdir -p /dev/fd /dev/input
+
+ln -sf /proc/self/fd /dev/fd
+mknod /dev/tty c 5 0
+
+mknod /dev/ttyS0 c 4 64
+##mknod /dev/ttyS1 c 4 65
+
+ln -sf /dev/ram1 /dev/ram
+mknod /dev/random c 1 8
+mknod /dev/urandom c 1 9
+echo 0x0100 > /proc/sys/kernel/real-root-dev
+echo 6 > /proc/sys/kernel/printk
+
+##migrating to devtmpfs
+mount -t devtmpfs none /dev
+
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+
+touch /var/log/lastlog
+
+syslogd && klogd
+
+
+#if grep -q sysfs /proc/filesystems ; then
+#    mount -t sysfs none /sys
+#	##mount -t sysfs -o nodev,noexec,nosuid sysfs /sys
+#fi
+
+
+if grep -q sysfs /proc/filesystems; then
+	mount -t sysfs none /sys
+fi
+
+# need to run depmod 2 times as experienced
+#depmod -a
+depmod -a
+
+KERNEL_VERSION=`uname -r`
+
+#if [ ! -f /lib/modules/$KERNEL_VERSION/modules.pcimap ]; then
+#	# create the legacy maps
+#	echo " - /lib/modules/$KERNEL_VERSION/modules.pcimap missing. Trying to create it"
+#	depmod -a -m
+#	if [ -f /lib/modules/$KERNEL_VERSION/modules.pcimap ]; then
+#		echo " - /lib/modules/$KERNEL_VERSION/modules.pcimap created"
+#	else
+#		echo "WARNING: Could not create /lib/modules/$KERNEL_VERSION/modules.pcimap!"
+#		echo "WARNING: Automatic hardware-detection may fail!"
+#	fi
+#fi
+
+
+# load virtio drivers for KVM + Xen VMs
+for module in xen-netfront virtio virtio_rng virtio_pci virtio_ring virtio_net crc32c 8021q usbcore hid usbhid hid-generic; do
+	echo " -- loading $module"
+	modprobe "$module" 2>/mplog
+done
+rm -f /mplog
+
+
+#### start module loading
+MODALIAS=`find /sys/devices -iname modalias -exec cat {} \;`
+TMODALIAS=""
+
+while [ `echo "$MODALIAS"|wc -l` -gt `echo "$TMODALIAS"|wc -l` ]; do
+	for i in $MODALIAS; do
+		/sbin/modprobe "$i" 2>/dev/null
+	done
+
+	echo Loaded `echo "$MODALIAS" | wc -l` modaliases
+
+	#[ "$DRV_WAIT" -gt 0 ] && sleep $DRV_WAIT
+	TMODALIAS="$MODALIAS"
+	MODALIAS=`find /sys/devices -iname modalias -exec cat {} \;`
+
+done
+#### end module loading
+
+# start haveged early if existing
+# more entropy for nodes
+if which haveged 1>/dev/null; then
+	#echo "Starting haveged daemon"
+	haveged --Foreground --verbose=1 2>/dev/null &
+fi
+
+# start acpid early if existing
+if which acpid 1>/dev/null; then
+	#echo "Starting acpid daemon"
+	acpid
+fi
+
+
+#if [ -f /lib/modules/$KERNEL_VERSION/modules.pcimap ]; then
+#	echo "- (1) Starting hardware detection (network)"
+#	for module in `/sbin/pcimodules`; do
+#		echo " -- loading $module"
+#		modprobe -s "$module"
+#	done
+#else
+#	echo "- (2) Starting hardware detection (network)"
+#	echo "NOTICE: No modules.pcimap available. Probing all network devices"
+#	for module in `find /lib/modules/$KERNEL_VERSION/* -name "*.ko"`; do
+#		module=`basename $module | cut -d'.' -f1`
+#		echo " -- loading $module"
+#		modprobe -s "$module"
+#	done
+#fi
+
+eval `cat /proc/cmdline` 2>/dev/null
+
+#killall udevd 2>/mplog
+#rm -f /mplog
+
+
+# collecting some infos from /proc/cmdline
+export OPENQRM_RESOURCE_MAC_ADDRESS=`echo $BOOTIF | sed -e "s/-/:/g"  | sed -e "s/^01://g" | tr '[:lower:]' '[:upper:]'`
+
+export OPENQRM_RESOURCE_MANAGED_INTERFACE=`ifconfig -a | grep $OPENQRM_RESOURCE_MAC_ADDRESS | awk {' print $1 '} | head -n 1`
+
+if [ "$$OPENQRM_RESOURCE_MANAGED_INTERFACE" == "" ]; then
+	echo "Failed to load network module - loading ash shell"
+	/bin/ash
+fi
+
+export OPENQRM_RESOURCE_IP_ADDRESS=`echo $ip | cut -d':' -f1`
+export OPENQRM_SERVER_IP_ADDRESS=`echo $ip | cut -d':' -f2`
+export OPENQRM_RESOURCE_DEFAULT_GATEWAY=`echo $ip | cut -d':' -f3`
+export OPENQRM_RESOURCE_SUBNETMASK=`echo $ip | cut -d':' -f4`
+export OPENQRM_RESOURCE_BROADCAST=`ipcalc -b $OPENQRM_RESOURCE_IP_ADDRESS $OPENQRM_RESOURCE_SUBNETMASK | cut -d'=' -f2`
+export OPENQRM_RESOURCE_PARAMETER_FILE="/var/openqrm/openqrm-resource.conf"
+
+mkdir -p `dirname $OPENQRM_RESOURCE_PARAMETER_FILE`
+
+# adjust arp settings
+if [ -f /proc/sys/net/ipv4/conf/$OPENQRM_RESOURCE_MANAGED_INTERFACE/arp_filter ]; then
+	echo 1 > /proc/sys/net/ipv4/conf/$OPENQRM_RESOURCE_MANAGED_INTERFACE/arp_filter
+fi
+if [ -f /proc/sys/net/ipv4/conf/$OPENQRM_RESOURCE_MANAGED_INTERFACE/rp_filter ]; then
+	echo 1 > /proc/sys/net/ipv4/conf/$OPENQRM_RESOURCE_MANAGED_INTERFACE/rp_filter
+fi
+
+# get the net working
+echo "Bringing up $OPENQRM_RESOURCE_MANAGED_INTERFACE:oq"
+echo "-> mac-address		: $OPENQRM_RESOURCE_MAC_ADDRESS"
+echo "-> ip-address		: $OPENQRM_RESOURCE_IP_ADDRESS"
+echo "-> subnetmask		: $OPENQRM_RESOURCE_SUBNETMASK"
+echo "-> broadcast		: $OPENQRM_RESOURCE_BROADCAST"
+echo "-> default gw		: $OPENQRM_RESOURCE_DEFAULT_GATEWAY"
+echo "-> openQRM-server	: $OPENQRM_SERVER_IP_ADDRESS"
+
+#echo "loopback up"
+ifconfig lo 127.0.0.1 up
+
+##
+#echo "Interface: $OPENQRM_RESOURCE_MANAGED_INTERFACE down"
+ifconfig $OPENQRM_RESOURCE_MANAGED_INTERFACE down
+
+#echo "Interface: $OPENQRM_RESOURCE_MANAGED_INTERFACE up"
+ifconfig $OPENQRM_RESOURCE_MANAGED_INTERFACE 0.0.0.0 up
+
+#echo "Interface: $OPENQRM_RESOURCE_MANAGED_INTERFACE:oq $OPENQRM_RESOURCE_IP_ADDRESS up"
+ifconfig $OPENQRM_RESOURCE_MANAGED_INTERFACE:oq $OPENQRM_RESOURCE_IP_ADDRESS netmask $OPENQRM_RESOURCE_SUBNETMASK broadcast $OPENQRM_RESOURCE_BROADCAST up
+if [ "$OPENQRM_RESOURCE_DEFAULT_GATEWAY" != "0.0.0.0" ]; then
+	route add default gw $OPENQRM_RESOURCE_DEFAULT_GATEWAY
+fi
+##
+
+# force a small delay for the networkcard to initialize
+ping -c 3 -q "$OPENQRM_SERVER_IP_ADDRESS" > /dev/null
+
+# get resource parameter
+echo "Getting resource-parameters ..."
+if [ "$id" == "-1" ]; then
+	echo "New resource detected ! Adding to the openQRM-server at $OPENQRM_SERVER_IP_ADDRESS"
+fi
+
+# sending resource-id will add the resource if not existing (-1 = new resource)
+# loop get-parameters in case the network card is still not ready initialized
+NETWORKCARD_LOOP=0
+
+echo -n "Attempt to Download openQRM Resource File - "
+while (true); do
+
+	echo "Trying https... "
+	HTTPS_RESOURCE_URL="https://$OPENQRM_SERVER_IP_ADDRESS/openqrm/action/resource-monitor.php?resource_command=get_parameter&resource_id=$id&resource_mac=$OPENQRM_RESOURCE_MAC_ADDRESS&resource_ip=$OPENQRM_RESOURCE_IP_ADDRESS&resource_subnet=$OPENQRM_RESOURCE_SUBNETMASK"
+	#echo "Resource URL: $HTTPS_RESOURCE_URL"
+	if wget --no-check-certificate --random-file=/dev/urandom -q -O $OPENQRM_RESOURCE_PARAMETER_FILE "$HTTPS_RESOURCE_URL"; then
+		if ! grep "<html>" $OPENQRM_RESOURCE_PARAMETER_FILE >/out; then
+			echo "-> got parameters via https"
+			break
+		fi
+		rm -f /out
+	fi
+
+	echo "Trying http..."
+	HTTP_RESOURCE_URL="http://$OPENQRM_SERVER_IP_ADDRESS/openqrm/action/resource-monitor.php?resource_command=get_parameter&resource_id=$id&resource_mac=$OPENQRM_RESOURCE_MAC_ADDRESS&resource_ip=$OPENQRM_RESOURCE_IP_ADDRESS&resource_subnet=$OPENQRM_RESOURCE_SUBNETMASK"
+	#echo "Resource URL: $HTTP_RESOURCE_URL"
+	if wget -q -O "$OPENQRM_RESOURCE_PARAMETER_FILE" "$HTTP_RESOURCE_URL"; then
+		if ! grep "<html>" $OPENQRM_RESOURCE_PARAMETER_FILE >/out; then
+			echo " -> got parameter via http"
+			break
+		fi
+		rm -f /out
+	fi
+
+	# no chance ?
+	if [ "$NETWORKCARD_LOOP" == "5" ]; then
+		echo "ERROR: Could not reach the openQRM-Server at $OPENQRM_SERVER_IP_ADDRESS!"
+		# give a shell for the admin
+		/bin/ash
+	fi
+
+	NETWORKCARD_LOOP=$((NETWORKCARD_LOOP + 1))
+	echo "Sleeping for 5 whilst network wakes up"
+	sleep 5
+
+done
+
+
+echo "Setting resource-parameteres ..."
+# source parameters
+. $OPENQRM_RESOURCE_PARAMETER_FILE
+
+#echo "openQRM Param: $OPENQRM_RESOURCE_PARAMETER_FILE"
+#echo "openqrm URL: $OPENQRM_SERVER_IP_ADDRESS/openqrm/action/resource-monitor.php?resource_command=get_parameter&resource_id=$id&resource_mac=$OPENQRM_RESOURCE_MAC_ADDRESS&resource_ip=$OPENQRM_RESOURCE_IP_ADDRESS&resource_subnet=$OPENQRM_RESOURCE_SUBNETMASK"
+
+echo "Image Type: '$image_type' - Appliance Name: '$appliance_name'"
+
+# define wget
+if [ "$openqrm_web_protocol" == "https" ]; then
+	export WGET="/bin/wget --no-check-certificate --random-file=/dev/urandom"
+else
+	export WGET="/bin/wget"
+fi
+
+# get kernel + modules by tftp
+echo "Importing kernel files..."
+import_kernel
+
+# run default openqrm-client boot-service
+KERNEL_ARCH=`uname -m`
+if echo $KERNEL_ARCH | grep i.*86 1>/dev/null; then
+	# i386
+	OPENQRM_CLIENT_ARCH=i386
+else
+	OPENQRM_CLIENT_ARCH=x86_64
+fi
+
+cd /
+echo "Getting openqrm-client package(1)................"
+if ! $WGET -q -O openqrm-client.tgz "$openqrm_web_protocol://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/openqrm-client.tgz"; then
+	rm -f openqrm-client.tgz
+	echo "WARNING: Failed to get the openqrm-client package! Starting an emergency shell"
+	/bin/ash
+fi
+tar -xzf openqrm-client.tgz
+rm -f openqrm-client.tgz
+
+$resource_basedir/openqrm/etc/init.d/openqrm-client start
+
+if [ "$image_type" == "ram" ] || [ "$image_type" == "" ]; then
+
+	# send idle/available
+	echo "Sending idle/available to openQRM-server at $OPENQRM_SERVER_IP_ADDRESS"
+	$WGET -q -O /dev/null "$openqrm_web_protocol://$OPENQRM_SERVER_IP_ADDRESS/openqrm/action/resource-monitor.php?resource_command=update_status&resource_id=$resource_id&resource_state=active&resource_event=available"
+	hostname idle$resource_id
+
+	# rcs0 will be started here from init
+	# for initramfs initrds we start a shell here
+	if [ -x /init ]; then
+		echo "Resource IP: $OPENQRM_RESOURCE_IP_ADDRESS = Detected initrd as initramfs, starting a shell"
+		exec setsid /bin/ash -c 'exec /bin/ash </dev/tty1 >/dev/tty1 2>&1'
+	fi
+
+else
+
+
+	if [ "$image_type" == "lvm-deployment" ]; then
+		#lvm
+		prepare_lvm
+	fi
+
+
+	# if any deployment plugin is enabled, handle over the control
+	# -> deployment plugins will take care to mount the root fs
+	#    and do the pivot_root if needed
+
+
+	# pre-root-mount-hook for all boot services to setup everything which needs to be done before the root-mount
+	cd /
+	for boot_service in $openqrm_boot_services; do
+		if $WGET -q -O /pre-root-mount-hook.$boot_service "$openqrm_web_protocol://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/pre-root-mount-hook.$boot_service"; then
+			echo " - Running for pre-root-mount-hook of boot-service $boot_service"
+			chmod +x pre-root-mount-hook.$boot_service
+			. ./pre-root-mount-hook.$boot_service
+			pre_mount_rootfs
+		else
+			rm -f /pre-root-mount-hook.$boot_service
+		fi
+	done
+
+
+	# root-mount-hook
+	eval $image_deployment_parameter
+	cd /
+	$WGET -q "$openqrm_web_protocol://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/root-mount.$image_type"
+	chmod +x root-mount.$image_type
+
+
+	# source the deployment plugin command, it will provide
+	# the functions to mount/remount the rootfs at /mnt according
+	# to the deployment-type and the image_deployment_parameters
+	. ./root-mount.$image_type
+
+
+	# mount ro (provided by the deployment plugin)
+	###############################################################
+	# DEPLOYMENT PLUGIN HOOK ######################################
+	###############################################################
+	mount_rootfs
+
+
+	# here we have the rootfs mounted rw so we get the openQRM client according
+	# distro and arch
+	# find out the short distri name
+	if [ -f /mnt/etc/debian_version ]; then
+		# debian or ubuntu, try to find out without lsb-release which may not be installed
+		if grep -i ubuntu /mnt/etc/apt/sources.list 1>/dev/null; then
+			OPENQRM_SHORT_DISTRI_NAME="ubuntu"
+		else
+			OPENQRM_SHORT_DISTRI_NAME="debian"
+		fi
+	elif [ -f /mnt/etc/redhat-release ]; then
+		OPENQRM_SHORT_DISTRI_NAME="centos"
+	elif [ -f /mnt/etc/SuSE-release ]; then
+		OPENQRM_SHORT_DISTRI_NAME="suse"
+	else
+		OPENQRM_SHORT_DISTRI_NAME="custom"
+	fi
+
+
+	# get the openQRM client package fitting to distri + arch
+	rm -rf /mnt/$resource_basedir/openqrm
+	cd /
+	echo "Getting openqrm-client package(2)................"
+	if ! $WGET -q -O /mnt/openqrm-client.tgz "$openqrm_web_protocol://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/openqrm-client.tgz"; then
+		rm -f /mnt/openqrm-client.tgz
+		echo "WARNING: Failed to get the openqrm-client package!"
+		# copy openQRM client which is on the initrd
+		mkdir /mnt/$resource_basedir/openqrm/
+		cp -a /$resource_basedir/openqrm/* /mnt/$resource_basedir/openqrm/
+	else
+		# use the openQRM client which fits to the distri and arch
+		cd /mnt/
+		tar -xzf openqrm-client.tgz
+		rm -f openqrm-client.tgz
+		cd /
+	fi
+
+
+	rm -rf /mnt/boot/vmlinuz-$KERNEL_VERSION /mnt/boot/System.map-$KERNEL_VERSION /mnt/lib/modules/*
+	mkdir -p /mnt/boot
+	cp -af /boot/vmlinuz-$KERNEL_VERSION /mnt/boot/vmlinuz-$KERNEL_VERSION
+	cp -af /boot/System.map-$KERNEL_VERSION /mnt/boot/System.map-$KERNEL_VERSION
+	
+	#create modules dir incase it does not exist, stops errors
+	mkdir -p /mnt/lib/modules/"$KERNEL_VERSION"
+	cp -af /lib/modules/"$KERNEL_VERSION" /mnt/lib/modules/
+
+
+#	if [ "$image_type" != "tmpfs-deployment" ]; then
+#
+#		# fill /boot and /lib/modules on the fs-image
+#		echo "Filling /boot and /lib/modules"
+#
+#		cp -af /boot/vmlinuz-$KERNEL_VERSION /mnt/boot/vmlinuz-$KERNEL_VERSION
+#		cp -af /boot/System.map-$KERNEL_VERSION /mnt/boot/System.map-$KERNEL_VERSION
+#
+#	else
+#		##rm -rf /mnt/boot/vmlinuz-$KERNEL_VERSION /mnt/boot/System.map-$KERNEL_VERSION /mnt/lib/modules/$KERNEL_VERSION/*
+#		#rm -rf /mnt/boot/vmlinuz-$KERNEL_VERSION /mnt/boot/System.map-$KERNEL_VERSION /mnt/lib/modules/*
+#		#create modules dir incase it does not exist, stops errors
+#		#if [ ! -d /mnt/lib/modules/"$KERNEL_VERSION" ]; then
+#			mkdir -p /mnt/lib/modules/$KERNEL_VERSION
+#		#fi
+#	fi
+#
+#	cp -af /lib/modules/$KERNEL_VERSION /mnt/lib/modules/
+
+
+
+
+	# create custom fstab / needed for the remount rw during the system init
+	# (custom entry provided by the deployment plugin)
+	###############################################################
+	# DEPLOYMENT PLUGIN HOOK ######################################
+	###############################################################
+	create_fstab
+
+
+	# (custom fstab entries provided by a local function)
+	create_fstab_customs
+
+
+	#this is where swap was executing
+	if [ "$image_type" == "lvm-deployment" ]; then
+		prepare_swap
+	fi
+
+
+	# transfer resource basedir
+	echo "Preparing resource openQRM client"
+
+	# copy resource parameter
+	mkdir -p /mnt/`dirname $OPENQRM_RESOURCE_PARAMETER_FILE`
+	cp -af $OPENQRM_RESOURCE_PARAMETER_FILE /mnt/$OPENQRM_RESOURCE_PARAMETER_FILE
+
+	# prepare init according plugin services
+	echo "Preparing system init"
+	prepare_udev
+	prepare_var
+	prepare_services
+	prepare_net_init $NETWORK_SERVICES_TO_ADJUST
+
+	# managed shared image
+	if [ "$image_isshared" != "" ]; then
+		echo "Prepare image as shared"
+	fi
+	
+	# set root password
+	set_root_password $image_id
+
+	#echo "pre mount root"
+
+	# remount rw (provided by the deployment plugin)
+	###############################################################
+	# DEPLOYMENT PLUGIN HOOK ######################################
+	###############################################################
+	remount_rootfs
+
+	#echo "post mount root"
+
+	# chroot + init
+	killall syslogd klogd 1>/dev/null 2>&1
+	killall udevd 1>/dev/null 2>&1
+	killall acpid 1>/dev/null 2>&1
+	killall haveged 1>/dev/null 2>&1
+
+	killall dropbear 1>/dev/null 2>&1
+
+	if grep sysfs /proc/filesystems 1>/dev/null; then
+		umount /sys
+	fi
+	#umount /sys
+
+	umount /dev/pts
+	umount /dev
+
+	umount /proc
+	umount /boot
+
+	umount /lib/modules
+
+	#echo "Last bash before switching root"
+	#/bin/bash
+
+	#mkdir -p /mnt/custom
+
+	exec switch_root /mnt /sbin/init
+	# here the system will do a normal init
+	# from the mounted rootfs image
+	
+fi
+

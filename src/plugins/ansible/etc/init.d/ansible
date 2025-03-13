@@ -1,0 +1,127 @@
+#!/bin/bash
+# this is the boot-service init script for the ansible resources
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+# for including the package functions
+export OPENQRM_SOURCE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/"
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/include/openqrm-plugin-ansible-functions
+. $OPENQRM_RESOURCE_PARAMETER_FILE
+OPENQRM_SERVER_IP=$resource_openqrmserver
+
+# define wget to use with https
+if [ "$openqrm_web_protocol" == "https" ]; then
+	WGET="wget -q --no-check-certificate"
+else
+	WGET="wget -q"
+fi
+
+# do not run on idle resources
+if [ "$resource_image" == "idle" ]; then
+	exit 0
+fi
+
+# also do not run before the real init of the rootfs
+# if we have this file /etc/initrd-devices.conf we are still in the initrd
+if [ -f /etc/initrd-devices.conf ]; then
+	exit 0
+fi
+
+
+function ansible_start() {
+	echo "Starting the openQRM ansible-plugin"
+	ansible_stop 1>/dev/null 2>&1
+
+	# get the public ssh key from openQRM
+	SSHKEY_TMP_FILE=`mktemp /tmp/ansible.XXXXXX` || exit 1
+
+	if ! $WGET -O $SSHKEY_TMP_FILE $openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/openqrm-server-public-ssh-key; then
+		echo "ERROR: Could not get the public ssh-key from opernQRM at $resource_openqrmserver!"
+		return 1
+	fi
+	# add to authorized_keys
+	OPENQRM_PUBLIC_SSHKEY=`cat $SSHKEY_TMP_FILE`
+	if ! grep "$OPENQRM_PUBLIC_SSHKEY" /root/.ssh/authorized_keys 1>/dev/null 2>/dev/null; then
+		if [ ! -d /root/.ssh ]; then
+			mkdir -p /root/.ssh
+			chmod 700 /root/.ssh
+		fi
+		echo >> /root/.ssh/authorized_keys
+		cat $SSHKEY_TMP_FILE >> /root/.ssh/authorized_keys
+		echo >> /root/.ssh/authorized_keys
+	fi
+	if ! ps -C sshd 1>/dev/null; then
+		echo "...trying to start ssh/sshd"
+		if [ -x "/etc/init.d/ssh" ]; then
+			/etc/init.d/ssh start
+		elif [ -x "/etc/init.d/sshd" ]; then
+			/etc/init.d/sshd start
+		else
+			echo "WARNING: Could not start ssh/sshd! Init script not found"
+		fi
+	fi
+
+	# trigger openQRM to apply the playbooks
+	if ! $WGET -O /dev/null "$openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/openqrm-ansible-apply.php?ansible_command=apply&ansible_id=$appliance_id&ansible_name=$appliance_name&ansible_mac=$resource_mac&ansible_ip=$resource_ip"; then
+		echo "ERROR: Could not apply Ansible Playbooks!"
+		return 1
+	else
+		return 0
+	fi
+}
+
+
+function ansible_stop() {
+	echo "Stopping the openQRM ansible-plugin"
+}
+
+
+
+
+
+case "$1" in
+	start)
+		ansible_start
+		;;
+	stop)
+		ansible_stop
+		;;
+	restart)
+		ansible_stop
+		sleep 1
+		ansible_start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+
+esac
+exit $?
+
+
+
+
+
+
+
+
+
+
+
+
+

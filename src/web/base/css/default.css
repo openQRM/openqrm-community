@@ -1,0 +1,409 @@
+html {
+
+}
+body {
+	overflow-y:scroll;
+}
+
+/* Page */
+#page {
+	margin: 0 0 30px 0;
+	width: 1198px;
+	background: #fff url(../img/menu-background.png) repeat-y -85px 0;
+	margin: 0 auto 0 auto;
+	border-left: 1px solid #aaaaaa;
+	border-right: 1px solid #aaaaaa;
+	border-bottom: 1px solid #aaaaaa;
+	position: relative;
+}
+#page #wrapper{
+	background: url(../img/html-tabs-fix.png) repeat-x 0px 76px;
+}
+
+option.imagebacked {
+	padding: 2px 10px 2px 20px;
+	background-repeat: no-repeat;
+	background-position: 0px 0px;
+	vertical-align: middle;
+}
+
+/* Middle Head */
+#page #head {
+	display: block;
+	margin: 0px; 
+	padding: 0px;
+	color: #353535;
+	position: relative;
+	border-bottom: 5px solid #39aacb;
+	height: 71px;
+}
+#page #head .logo {
+	background-repeat: no-repeat;
+	position: absolute;
+	overflow: hidden;
+	left: 0;
+	top: 8px;
+	width: 170px;
+	height: 47px;
+	padding: 0 0 0 25px;
+	font-size: 80%;
+	cursor: pointer;
+}
+
+#page #head .logo .openqrmVersion {
+	position: absolute;
+	top: 53px;
+	left: 133px;
+}
+#page #head .main {
+	position: relative;
+	background: #2693b8;
+	margin: 20px 0 0 0;
+	height: 42px;
+	padding: 0 0 0 15px;
+	color: #ffffff;
+}
+#page #head .main #edition_label {
+	font-size: 25px;
+	line-height:37px;
+	opacity: 0.7;
+	text-transform: uppercase;
+/*	letter-spacing: -1; */
+	float: left;
+	margin: 5px 0 0 14px;
+	color: #ffffff;
+
+}
+
+
+#page #head .top {
+	margin: 0 0 0 450px;
+	text-align: right;
+	padding: 0 20px 0 0;
+	color: #fff;
+}
+#page #head .bottom-line {
+	position:absolute;
+	bottom:0;
+	clear:both;
+	line-height:0px;
+	width:100%;
+}
+#page #head #Event_box {
+	display:none;
+	float:left;
+	margin: 5px 0 5px 30px;
+	padding: 0 0 0 20px;
+	line-height:16px;
+	text-decoration:none;
+	color:red;
+}
+#page #head #Event_active_box {
+	display:none;
+	float:left;
+	margin: 5px 0 5px 30px;
+	padding: 0 0 0 20px;
+	line-height:16px;
+	text-decoration:none;
+	color:orange;
+}
+.top form{
+	margin: 0;
+}
+#Watch, #Login_box, #Docu_box, #Info_box, #Support_box, #Language_box {
+	display:block;
+	margin: 25px 0 14px 20px;
+	padding: 0 0 0 20px;
+	float:right;
+	color: #353535;
+	line-height:18px;
+	text-decoration: none;
+	text-transform: uppercase;
+}
+#Language_box .right {
+	float: left;
+}
+#Language_box .left label {
+	margin-bottom: 0px;
+	font-size: inherit;
+}
+#Language_box .left {
+	float: left;
+	width: auto;
+	text-align: left;
+	padding: 0 8px 0 0;
+}
+#Language_select {
+	width: auto;
+	height: auto;
+	margin: 0;
+	padding: 1px;
+}
+
+#page #head #Resource_box,
+#page #head #Server_box {
+	margin: 15px 0 0 0;
+	padding: 0 10px 0 0px;
+	float: right;
+}
+#page #head #Resource_box {
+	margin-right: 30px;
+}
+
+#page #head .appliances,
+#page #head .resources {
+	float:left;
+	margin: 0 10px 0 0;
+	padding: 0 0 0 10px;
+	border-left: 1px solid #fff;
+}
+
+#page #head .appliances.headline,
+#page #head .resources.headline {
+	font-weight:bold;
+	text-transform: uppercase;
+	border: 0;
+}
+#page #head .appliances.first,
+#page #head .resources.first {
+ border: 0;
+}
+
+/* Middle Content */
+#page #content {
+	height: auto;
+	padding-bottom: 50px;
+	margin: 0px;
+}
+/* Middle Content Menu */
+#page .menu {
+	width: 214px;
+	padding: 0 0 60px 0;
+}
+
+#page #content .menu table {
+	border: 0px none;
+}
+
+
+/* Middle Content Content */
+#page .container .middle {
+	min-height: 530px;
+}
+
+
+/* Footer */
+#page #footer {
+	position: absolute;
+	bottom: 0;
+	left: 0;
+	display: block;
+	width: 1198px;
+	margin: 0;
+	padding: 10px 0 10px 0;
+	background: #fff;
+	border-top: solid 1px #aaaaaa;
+	font-size: 11px;
+	margin: 0 auto 0 auto;
+}
+
+#openqrm_enterprise_footer {
+	margin: 5px 20px 0 0;
+}
+
+#performance-stats {
+	margin-left: 14px;
+}
+
+#page #footer,
+#page #footer a {
+	color: #888888;
+	text-decoration:none;
+}
+
+
+/* Misc */
+.noscript {
+	border: 2px solid red;
+	color: red;
+	font-weight: bold;
+	font-size: 12px;
+	padding: 15px;
+	margin: 20px;
+}
+.floatbreaker {
+	clear:both;
+	height:0px !important;
+	position:relative;
+	line-height:0px;
+	font-size:0px;
+	border:0px none;
+	margin:0;
+	padding:0;
+	overflow:hidden;
+	width:0px;
+}
+input[type="button"].namegenButton,
+input[type="button"].browseButton {
+	margin: 3px 0 0 15px;
+	vertical-align: top;
+}
+
+/* DEPRECATED: Info box, should be replaced by universal modal dialog */
+#infoScrollArea {
+	position:relative;
+	border:1px solid #cecece;
+	overflow: scroll;
+	height: 300px;
+}
+
+#infoArea {
+	margin: 5px 0 5px 5px;
+	padding: 0 0 0 5px;
+}
+
+#backgroundPopup{
+	display:none;
+	position:fixed;
+	_position:absolute;
+	height:100%;
+	width:100%;
+	top:0;
+	left:0;
+	background:#000000;
+	z-index:1;
+}
+#popupInfo{
+	display:none;
+	position:fixed;
+	_position:absolute;
+	width:650px;
+	background:#ffffff;
+	-moz-border-radius: 8px;
+	-webkit-border-radius: 8px;
+	border-radius: 8px;
+	-moz-box-shadow: 0 0 30px #555;
+	-webkit-box-shadow: 0 0 30px #555;
+	box-shadow: 0 0 30px #555;
+	padding: 20px 30px;
+	font-size:13px;
+    z-index: 2000;
+}
+
+#popupInfoClose{
+	-moz-box-shadow: 0 0 12px #555;
+	-webkit-box-shadow: 0 0 12px #555;
+	box-shadow: 0 0 12px #555;
+	border: 2px solid #fff;
+	-moz-border-radius: 16px;
+	-webkit-border-radius: 16px;
+	border-radius: 16px;
+	font-size: 12px;
+	line-height: 14px;
+	right: -10px;
+	top: -10px;
+	position: absolute;
+	color: #fff;
+	font-weight: 700;
+	display: block;
+	background: #555;
+	width: 15px;
+	text-align: center;
+	padding: 3px;
+	cursor: pointer;
+}
+
+
+
+/* DEPRECATED: 2 column element */
+.clear_col {
+	clear: both;
+}
+.col_2_left, .col_2_right {
+	float: left;
+	padding: 15px 0 0;
+	width: 48%;
+}
+.col_wrap_2 .col_inner_left {
+	padding: 0 15px 0 0;
+}
+.col_wrap_2 .col_inner_right {
+	padding: 0 0 0 15px;
+}
+
+
+/* FILEPICKER */
+.functionbox-capation-box {
+	text-align: right;
+	padding: 5px;
+	background: #494949;
+	border-bottom: 5px solid #39AACB;
+}
+.functionbox-capation {
+	text-align: left;
+	color: white;
+	cursor: crosshair;
+	font-size: inherit;
+	line-height: 15px;
+	padding: 5px !important;
+}
+#filepicker {
+	z-index: 10;
+	position: absolute;
+	left: 0;
+	top: 0;
+	width:280px;
+	background: white;
+	border: 0px none;
+	border-left: 1px solid #ddd;
+	border-bottom: 1px solid #ddd;
+	box-shadow: 3px 3px 8px rgba(0, 0, 0, 0.30);
+	-moz-box-shadow: 3px 3px 8px rgba(0, 0, 0, 0.30);
+	-webkit-box-shadow: 3px 3px 8px rgba(0, 0, 0, 0.30);
+}
+#filepicker .functionbox-capation input {
+	position: absolute;
+	right: 5px;
+	top: 7px;
+	width:18px;
+	height:18px;
+	font-size: 10px;
+	color: black;
+	border: 1px solid;
+	background: #fff;
+	text-align: center;
+	line-height: 18px;
+	padding: 0;
+}
+#filepicker #canvas {
+	vertical-align:middle;
+	text-align:center;
+	height:340px;
+	overflow: auto;
+	overflow-y: scroll;
+}
+#filepicker table {
+	width: 100%;
+	border: 0px none;
+	margin: 0;
+}
+#filepicker table td {
+	border-bottom: 1px solid #ccc;
+}
+#filepicker table a {
+	display: block;
+	line-height: 20px;
+	padding: 0 0 0 35px;
+	text-align: left;
+	text-decoration: none;
+	font-size: 11px;
+}
+#filepicker table a.folder {
+	background: url("../img/filepicker_icons.gif") no-repeat scroll 0 -20px transparent;
+}
+#filepicker table a.file {
+    background: url("../img/filepicker_icons.gif") no-repeat scroll 0 0 transparent;
+	color: black;
+}
+
+

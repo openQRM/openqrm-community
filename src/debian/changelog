@@ -1,0 +1,215 @@
+openqrm (5.3.2-ubuntu1) xenial; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New Community release 5.3.2
+  * Enhanced package dependencies for latest Ubuntu, Debian and CentOS
+  * removed rpmforge repository dependencies
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Wed, 18 Jan 2017 15:00:00 +0200
+
+openqrm (5.3.1-ubuntu1) xenial; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New Community release 5.3
+  * Important security update
+  * Many bugfixes and lots of enhancements especially for KVM and Cloud plugin
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Wed, 18 Oct 2016 15:00:00 +0200
+
+openqrm (5.2.15-ubuntu1) xenial; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New Amazon features in 5.2.15
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Wed, 9 Jun 2016 15:00:00 +0200
+
+openqrm (5.2.14-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New Amazon plugin in 5.2.14
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Mon, 18 Apr 2016 15:00:00 +0200
+
+openqrm (5.2.13-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * VMware vSphere integration 5.2.13
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Mon, 25 Jan 2016 15:00:00 +0200
+
+openqrm (5.2.12-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New VMware vSphere integration 5.2.12 beta1
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Tue, 05 Jan 2016 15:00:00 +0200
+
+openqrm (5.2.11-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New VMware vSphere integration 5.2.11
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Tue, 29 Dec 2015 15:00:00 +0200
+
+openqrm (5.2.10-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.2.10
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Thu, 30 Aug 2015 15:00:00 +0200
+
+openqrm (5.2.9-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.2.9
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Thu, 16 Jul 2015 15:00:00 +0200
+
+openqrm (5.2.8-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.2.8
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Tue, 6 Jul 2015 15:00:00 +0200
+
+openqrm (5.2.7-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.2.7
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Tue, 25 Jun 2015 15:00:00 +0200
+
+openqrm (5.2.6-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.2.6
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Tue, 22 Jun 2015 15:00:00 +0200
+
+openqrm (5.2.5-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.2.5
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Tue, 19 Jun 2015 15:00:00 +0200
+
+openqrm (5.2.4-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.2.4
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Tue, 12 Jun 2015 15:00:00 +0200
+
+openqrm (5.2.3-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.2.3-beta
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Tue, 18 May 2015 15:00:00 +0200
+
+openqrm (5.2.1-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.2.1
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Tue, 31 Jan 2015 15:00:00 +0200
+
+openqrm (5.1.4-ubuntu1) trusty; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.1.4
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Tue, 22 Jul 2014 15:00:00 +0200
+
+openqrm (5.1.3-ubuntu1) precise; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.1.3
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Wed, 30 Apr 2014 15:00:00 +0200
+
+openqrm (5.1.2-ubuntu1) precise; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.1.2
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Wed, 12 Mar 2014 15:00:00 +0200
+
+openqrm (5.1.1-ubuntu1) precise; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New hardened release 5.1.1
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Fr, 6 Dec 2013 15:00:00 +0200
+
+openqrm (5.1.0-ubuntu1) precise; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New stable release 5.1.0
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Sat, 31 Aug 2013 15:00:00 +0200
+
+openqrm (5.1-beta.0-ubuntu1) precise; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New beta release 5.1-beta.0
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Wed, 31 Jul 2013 15:00:00 +0200
+
+openqrm (5.0.3-ubuntu1) precise; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New minor release 5.0.3
+  * fixed nasty bug preventing dhcpd/dns to start on Ubuntu
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Thur, 7 Mar 2013 15:00:00 +0200
+
+openqrm (5.0.2-ubuntu1) precise; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New minor release 5.0.2
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Thur, 24 Jan 2013 15:00:00 +0200
+
+openqrm (5.0.1-ubuntu1) precise; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New minor release 5.0.1
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Sat, 31 May 2012 15:00:00 +0200
+
+openqrm (5.0-ubuntu1) precise; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New stable release 5.0
+
+ -- OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>  Sat, 31 May 2012 15:00:00 +0200
+
+openqrm (4.9-ubuntu1) lucid; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New stable release 4.9
+
+ -- Matthias Rechenburg <matt@openqrm.com>  Sat, 31 Oct 2011 15:00:00 +0200
+
+openqrm (4.8-ubuntu1) maverick; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New stable release 4.8
+
+ -- Matthias Rechenburg <matt@openqrm.com>  Sat, 31 Mar 2011 15:00:00 +0200
+
+openqrm (4.7-ubuntu1) maverick; urgency=low
+
+  [ Matthias Rechenburg ]
+  * New stable release 4.7
+
+ -- Matthias Rechenburg <matt@openqrm.com>  Sat, 30 Oct 2010 16:43:35 +0200
+
+openqrm (4.6-ubuntu1) karmic; urgency=low
+
+  [ Matthias Rechenburg ]
+  * Initial release
+
+ -- Matthias Rechenburg <matt@openqrm.com>  Sat, 05 Sep 2009 21:14:45 +0200
+

@@ -1,0 +1,148 @@
+#!/bin/sh
+
+### BEGIN INIT INFO
+# Provides:          custom firewall
+# Required-Start:    $remote_fs $syslog $network
+# Required-Stop:     $remote_fs $syslog $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: firewall initscript
+# Description:       Custom Firewall
+### END INIT INFO
+
+#. /etc/init.d/functions
+
+# the IP block allocated to this server
+SEGMENT1="203.34.167.0/24"
+
+# the IP used by the hosting server itself
+THISHOST="203.34.167.5"
+
+# services that should be allowed to the HN;
+# services for containers are configured in /etc/firewall.d/*
+OKPORTS=""
+#OKPORTS="53 515"
+
+# hosts allowed full access through the firewall,
+# to all containers and to this server
+	#sydney.net1	  syndney.net2		nms		atu		atu		abstain		w.pk.telstra	w.pk.aapt.adsl	rm.home		w.pk.telstra.dsl	
+#DMZS="10.1.0.0/24 203.62.147.222/32 203.62.147.0/24 203.56.251.0/24 203.33.109.250/32 203.20.110.105/32 202.1.116.0/24 203.10.124.0/24 203.20.110.1/32 120.146.137.254/32 202.1.119.75/32 203.22.186.225/32 203.32.47.250/32"
+DMZS="115.64.229.34/32 203.34.167.241/32 10.1.0.0/24 203.34.167.0/24 203.62.147.0/24 203.56.251.0/24 203.33.109.250/32 203.20.110.105/32 202.1.116.0/24 203.10.124.0/24 203.20.110.1/32 202.1.119.75/32 203.22.186.225/32 203.32.47.250/32 144.139.159.55/32 203.16.232.173/32 10.0.0.0/8 101.178.221.85/32"
+##DMZS="101.175.139.224/32 202.1.116.35/32 203.10.124.35/32 203.10.124.37/32 203.20.110.27/32 143.238.122.182/32 121.217.193.19/32 203.10.124.2/32 203.10.124.8/32 120.146.143.121/32 203.20.110.105/32 124.184.176.219/32 58.168.99.5/32 120.146.137.254/32 203.22.186.251/32 203.10.124.1/32 202.1.116.254/32 203.10.124.36/32 192.168.0.160/32 192.168.1.26/32 203.22.186.228/32 202.1.119.75/32 202.1.119.80/32 203.26.40.33/32 202.1.116.43/32 203.32.47.250/32 202.1.116.35/32 203.20.110.1/32 203.22.186.225/32 203.10.124.45/32 203.10.124.9/32 203.10.124.44/32 203.10.124.43/32 203.10.124.12/32 192.168.1.25/32 202.1.116.44/32"
+
+#DMZS="120.146.137.254/32 203.10.124.9/32 202.1.116.254/32 202.1.116.18/32 203.20.110.105/32 203.22.186.228/32 202.1.119.75/32 202.1.119.80/32 203.26.40.33/32 202.1.116.43/32 203.32.47.250/32 202.1.116.35/32 203.20.110.1/32 203.22.186.225/32 203.10.124.45/32 203.10.124.44/32 203.10.124.43/32 203.10.124.12/32 203.10.124.0/24 203.56.251.0/24 202.1.116.44/32"
+##DMZS="202.1.119.75/32 202.1.119.80/32 203.26.40.32/29 202.1.116.43/32 203.32.47.250/32 202.1.116.35/32 203.22.186.224/27 203.10.124.45/32 203.10.124.44/32 172.18.0.0/27"
+
+HN_BANNED="" #37.8.0.0/16 180.242.0.0/16 85.25.0.0/16 36.69.126.0/24 95.211.178.0/24 85.25.20.0/24 216.144.240.0/24 202.103.224.0/24 202.103.225.0/24 208.115.111.0/24"
+
+ # /etc/init.d/functions
+ 
+ success() {
+   echo -n "...success"
+ } 
+ failure() {
+   echo -n "...failure"
+ }
+
+
+purge() {
+  echo -n "Firewall: Purging and allowing all traffic"
+  iptables -P OUTPUT ACCEPT
+  iptables -P FORWARD ACCEPT
+  iptables -P INPUT ACCEPT
+  iptables -F
+  iptables -F FORWARD
+  success ; echo
+}
+
+setup() {
+  echo -n "Firewall: Setting default policies to DROP"
+  iptables -P INPUT DROP
+  iptables -P FORWARD ACCEPT
+  iptables -I INPUT   -j ACCEPT -m state --state ESTABLISHED,RELATED
+#  iptables -I FORWARD -j ACCEPT -m state --state ESTABLISHED,RELATED
+  iptables -I INPUT -j ACCEPT -i lo
+#  iptables -I OUTPUT -j ACCEPT 
+
+#  iptables -I FORWARD -j ACCEPT --source $SEGMENT
+#  iptables -I FORWARD -j ACCEPT --source $SEGMENT1
+
+  success ; echo
+
+  #iptables -I INPUT -j REJECT -s 0.0.0.0/0 -d 172.18.0.0/24 -i vmbr2
+
+#  iptables -I INPUT -j DROP -d 172.18.0.0/24 -i venet0
+#  iptables -I INPUT -j DROP -d 172.18.0.0/24 -i vmbr0
+#  iptables -I INPUT -j DROP -d 172.18.0.0/24 -i vmbr1
+#  iptables -I INPUT -j DROP -d 172.18.0.0/24 -i vmbr3
+
+  iptables -I INPUT -j ACCEPT -s 172.18.0.0/24 -i vmbr4
+#  iptables -I INPUT -j ACCEPT -s 172.18.0.0/24 -i eth0
+
+#  iptables -I INPUT -j REJECT -s 0.0.0.0/0 -d 172.18.0.0/24 -i vmbr2
+#  iptables -I INPUT -j REJECT -s 203.34.167.0/24 -d 172.18.0.0/24 -i vmbr2
+#  iptables -I INPUT -j REJECT -s 203.34.167.0/24 -d 172.18.0.0/24 -i eth1
+
+
+  for ip in $DMZS ; do
+    echo -n "          DMZ $ip"
+#    iptables -I INPUT   -i ! lo -j ACCEPT -s $ip	
+#    iptables -I FORWARD -i ! lo -j ACCEPT -s $ip
+    iptables -I INPUT -j ACCEPT -s $ip	
+    iptables -I FORWARD -j ACCEPT -s $ip
+    
+    success ; echo
+  done
+
+
+#
+  echo "Firewall: Allowing access to HN"
+  for port in $OKPORTS ; do
+    echo -n "          port $port"
+#    iptables -I INPUT -j ACCEPT -s $SEGMENT -d $THISHOST --protocol tcp --destination-port $port
+#    iptables -I INPUT -j ACCEPT -s $SEGMENT -d $THISHOST --protocol tcp --destination-port $port
+#    iptables -I INPUT -j ACCEPT --source 0.0.0.0/0 --destination $THISHOST --protocol udp --destination-port $port
+   
+  	
+	iptables -A INPUT -j ACCEPT -s 0.0.0.0/0 -p udp --dport $port
+    	iptables -A INPUT -j ACCEPT -s 0.0.0.0/0 -p tcp --dport $port
+
+    success ; echo
+    
+  done
+
+   
+  echo "Firewall: BANNING access to HN"
+  for in_source in $HN_BANNED ; do
+    echo "          source $in_source"
+
+        iptables -I FORWARD -j DROP --source $in_source ;
+        iptables -I INPUT -j DROP --source $in_source ;
+  done
+   
+                                      
+
+  
+}
+
+case "$1" in
+  start)
+    echo "Starting firewall..."
+    purge
+    setup
+    ;;
+  stop)
+    echo "Stopping firewall..."
+    purge
+    ;;
+  restart)
+    $0 stop
+    $0 start
+    ;;
+  status)
+    iptables -n -L
+    ;;
+  *)
+    echo "Usage: $0 <start|stop|restart|status>"
+    ;;
+esac

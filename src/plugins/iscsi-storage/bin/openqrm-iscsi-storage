@@ -1,0 +1,543 @@
+#!/bin/bash
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+# this script automatically manages iscsi
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+# unblock starting command queue early for non-blocking + ui commands
+ISCSI_COMMAND=$1
+if [ "$ISCSI_COMMAND" == "post_luns" ] || [ "$ISCSI_COMMAND" == "post_identifier" ] || [ "$ISCSI_COMMAND" == "list" ] || [ "$ISCSI_COMMAND" == "auth" ] || [ "$ISCSI_COMMAND" == "post_sync_progress" ] || [ "$ISCSI_COMMAND" == "post_sync_finished" ]; then
+	openqrm_unblock_starting_queue $@
+	NON_BLOCKING=true
+fi
+export OPENQRM_SOURCE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/"
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/iscsi-storage/include/openqrm-plugin-iscsi-storage-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/iscsi-storage/etc/openqrm-plugin-iscsi-storage.conf
+OPENQRM_POSTENCODE="$OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-postencode"
+if [ -f $OPENQRM_RESOURCE_PARAMETER_FILE ]; then
+	. $OPENQRM_RESOURCE_PARAMETER_FILE
+	OPENQRM_SERVER_IP=$resource_openqrmserver
+	OPENQRM_EXEC_PORT=$resource_execdport
+elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+	openqrm_server_get_config
+	OPENQRM_SERVER_IP=$OPENQRM_SERVER_IP_ADDRESS
+	resource_id=0
+	resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+	openqrm_web_protocol=$OPENQRM_WEB_PROTOCOL
+fi
+export LANG=C
+# how long to wait for the volume authentication, each loop is 5 secs
+MAX_VOLUME_AUTHENTICATION_LOOP=30
+export MAX_VOLUME_AUTHENTICATION_LOOP
+
+# define wget to use with https
+if [ "$openqrm_web_protocol" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate"
+fi
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+if [ ! -d "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY" ]; then
+	mkdir -p $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY
+fi
+
+# make sure required deps are installed
+if ! check_iscsi_storage_deps; then
+	if [ "$NON_BLOCKING" != "true" ]; then
+		openqrm_unblock_starting_queue $@
+	fi
+	exit 1
+fi
+
+function iscsi_storage_usage() {
+	echo "Usage : $0 add/remove/clone|snap/list <-n image-name> <-i image-password>"
+	echo "             [-m size in MB]"
+	echo "             [-s image-snapshot-name]"
+	echo "        $0 auth <-r image-rootdevice> <-i image-password>"
+	echo "        $0 adapt <-n image-name> <-u username> <-p password> [-i image-password]"
+	echo "        $0 post_luns <-u username> <-p password>"
+	echo "        $0 post_identifier <-u username> <-p password>"
+	echo "        $0 post_sync_progress <-n image-name> <-s image-snapshot-name> <-u username> <-p password>"
+	echo "        $0 post_sync_finished <-n image-name> <-u username> <-p password>"
+	echo ""
+	echo "Optional parameters:"
+	echo "             [--openqrm-ui-user <username>]"
+	echo "             [--openqrm-internal-cmd <true/false>]"
+	echo "             [--openqrm-cmd-mode <regular/background/fork>]"
+	exit 1
+}
+
+
+FULL_COMMANDLINE="$0 $@"
+ISCSI_COMMAND=$1
+shift
+
+while [ $# -ne 0 ]; do
+	case "$1" in
+		-n)
+			ISCSI_IMAGE_NAME=$2
+			shift
+			;;
+		-s)
+			ISCSI_IMAGE_SNAPSHOT_NAME=$2
+			shift
+			;;
+		-m)
+			ISCSI_IMAGE_SIZE=$2
+			shift
+			;;
+		-i)
+			ISCSI_IMAGE_PASSWORD=$2
+			shift
+			;;
+		-r)
+			ISCSI_IMAGE_ROOTDEVICE=$2
+			shift
+			;;
+		-u)
+			ISCSI_OPENQRM_USERNAME=$2
+			shift
+			;;
+		-p)
+			ISCSI_OPENQRM_PASSWORD=$2
+			shift
+			;;
+		--openqrm-ui-user)
+			OPENQRM_UI_USER=$2
+			shift
+			;;
+		--openqrm-internal-cmd)
+			OPENQRM_INTERNAL_CMD=$2
+			shift
+			;;
+		--openqrm-cmd-mode)
+			OPENQRM_CMD_MODE=$2
+			shift
+			;;
+
+		*)
+			if [ "$NON_BLOCKING" != "true" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			fi
+			echo "ERROR: Free commandline arguments are not allowed"
+			iscsi_storage_usage
+			exit 6
+			;;
+	esac
+	shift
+done
+
+
+
+
+# main
+if [ "$ISCSI_COMMAND" == "" ]; then
+	openqrm_unblock_starting_queue $FULL_COMMANDLINE
+	iscsi_storage_usage
+fi
+
+if [ "$ISCSI_COMMAND" == "post_luns" ] || [ "$ISCSI_COMMAND" == "post_identifier" ]; then
+	if [ "$ISCSI_OPENQRM_USERNAME" == "" ]; then
+		iscsi_storage_usage
+	fi
+	if [ "$ISCSI_OPENQRM_PASSWORD" == "" ]; then
+		iscsi_storage_usage
+	fi
+else
+	if [ "$ISCSI_COMMAND" != "list" ] && [ "$ISCSI_COMMAND" != "auth" ]; then
+		if [ "$ISCSI_IMAGE_NAME" == "" ]; then
+			if [ "$NON_BLOCKING" != "true" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			fi
+			iscsi_storage_usage
+		fi
+	fi
+fi
+
+case "$ISCSI_COMMAND" in 
+
+	add)
+		if [ "$ISCSI_IMAGE_SIZE" == "" ]; then
+			ISCSI_IMAGE_SIZE=$DEFAULT_IMAGE_SIZE
+		fi
+
+		if [ -f "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME" ]; then
+			openqrm_post_event 0 "add" 3 "iscsi-storage" "Volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME already exist."
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			exit 1
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire iscsi-storage`
+		trap "openqrm_lock_queue release iscsi-storage $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# add as target
+		export ISCSI_IMAGE_SIZE
+		echo -n "Creating ISCSI Lun for image $ISCSI_IMAGE_NAME"
+		manage_iscsi add regular $ISCSI_IMAGE_PASSWORD
+
+		openqrm_lock_queue release iscsi-storage $LOCK_TIME
+		trap '' EXIT
+
+		# in case we have a username + password post the updated list to the openQRM-server
+		if [ "$ISCSI_OPENQRM_USERNAME" != "" ] && [ "$ISCSI_OPENQRM_PASSWORD" != "" ]; then
+			$0 post_luns -u $ISCSI_OPENQRM_USERNAME -p $ISCSI_OPENQRM_PASSWORD --openqrm-internal-cmd true
+		fi
+		;;
+
+	remove)
+		# check that source fs-images exist
+		if [ ! -f "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME" ]; then
+			openqrm_post_event 0 "remove" 3 "iscsi-storage" "Volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME does not exists!"
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			exit 1
+		fi
+		# check that it is not in use by a syncing action
+		if ls $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME.sync_in_progress.* 1>/dev/null 2>&1; then
+			openqrm_post_event 0 "remove" 3 "iscsi-storage" "Volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME is currently in use by a sync action!"
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			exit 1
+		fi
+		if [ -f "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME.clone_in_progress" ]; then
+			openqrm_post_event 0 "remove" 3 "iscsi-storage" "Volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME is currently in use by a clone action!"
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			exit 1
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire iscsi-storage`
+		trap "openqrm_lock_queue release iscsi-storage $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		echo -n "Removing ISCSI export for image $ISCSI_IMAGE_NAME"
+		manage_iscsi remove
+		# physical remove
+		rm -f $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME.*
+
+		openqrm_lock_queue release iscsi-storage $LOCK_TIME
+		trap '' EXIT
+
+		# in case we have a username + password post the updated list to the openQRM-server
+		if [ "$ISCSI_OPENQRM_USERNAME" != "" ] && [ "$ISCSI_OPENQRM_PASSWORD" != "" ]; then
+			$0 post_luns -u $ISCSI_OPENQRM_USERNAME -p $ISCSI_OPENQRM_PASSWORD --openqrm-internal-cmd true
+		fi
+		;;
+
+	clone|snap)
+		if [ "$ISCSI_IMAGE_SNAPSHOT_NAME" == "" ]; then
+			openqrm_post_event 0 "snap" 3 "iscsi-storage" "No snapshot name given. Please use the -s cmdline parameter."
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			iscsi_storage_usage
+		fi
+
+		# check that source fs-images exist
+		if [ ! -f $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME ]; then
+			openqrm_post_event 0 "snap" 3 "iscsi-storage" "Could not find source volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			exit 1
+		fi
+		if [ -f "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_SNAPSHOT_NAME.clone_in_progress" ]; then
+			openqrm_post_event 0 "clone" 3 "iscsi-storage" "There is already an active cloning action running for Volume $ISCSI_IMAGE_SNAPSHOT_NAME!"
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			exit 1
+		fi
+		if [ -f "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_SNAPSHOT_NAME" ]; then
+			openqrm_post_event 0 "clone" 3 "iscsi-storage" "Snapshot $ISCSI_IMAGE_SNAPSHOT_NAME already exists!"
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			exit 1
+		fi
+		if [ ! -f $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME.conf ]; then
+			openqrm_post_event 0 "clone" 3 "iscsi-storage" "Could not find source volume config $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME.conf."
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			exit 1
+		else
+			. $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME.conf
+			ISCSI_ORIGINAL_IMAGE_SIZE=$LUN_SIZE
+			if [ "$ISCSI_ORIGINAL_IMAGE_SIZE" == "" ]; then
+				openqrm_post_event 0 "snap" 3 "iscsi-storage" "Could not find out original image size of $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+				exit 1
+			fi
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire iscsi-storage`
+		trap "openqrm_lock_queue release iscsi-storage $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		echo -n "Creating snapshot from image $ISCSI_IMAGE_NAME -> $ISCSI_IMAGE_SNAPSHOT_NAME size $ISCSI_ORIGINAL_IMAGE_SIZE"
+
+		# create lock in the origin for clone so remove is not able to remove the origin while syncing
+		touch "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME.sync_in_progress.$ISCSI_IMAGE_SNAPSHOT_NAME"
+		# create long-term-action start event
+		openqrm_post_event 0 "$ISCSI_IMAGE_SNAPSHOT_NAME" 9 "iscsi-storage" "Started to clone $ISCSI_IMAGE_SNAPSHOT_NAME from $ISCSI_IMAGE_NAME"
+		export ORG_IMAGE_NAME=$ISCSI_IMAGE_NAME
+		export ISCSI_IMAGE_NAME=$ISCSI_IMAGE_SNAPSHOT_NAME
+		export ISCSI_IMAGE_SIZE=$ISCSI_ORIGINAL_IMAGE_SIZE
+		# create a lock in the new created dir for post_exports + identifier
+		touch "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+		# create an empty small file to be added as volume to iscsi first, we later overwrite this while syncing
+		touch $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_SNAPSHOT_NAME
+		manage_iscsi add snap $ISCSI_IMAGE_PASSWORD
+		# touch the snapshot as a file for post_luns
+		touch "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_SNAPSHOT_NAME"
+
+		openqrm_lock_queue release iscsi-storage $LOCK_TIME
+		trap '' EXIT
+
+		# in case we have a username + password post the updated list to the openQRM-server
+		# if we have a user + password we start sync-progress monitor
+		if [ "$ISCSI_OPENQRM_USERNAME" != "" ] && [ "$ISCSI_OPENQRM_PASSWORD" != "" ]; then
+			$0 post_sync_progress -n $ORG_IMAGE_NAME -s $ISCSI_IMAGE_SNAPSHOT_NAME -u $ISCSI_OPENQRM_USERNAME -p $ISCSI_OPENQRM_PASSWORD --openqrm-internal-cmd true &
+		fi
+		sleep 10
+		# start to sync
+		if ! nice --20 cp -af $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ORG_IMAGE_NAME $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_SNAPSHOT_NAME; then
+			openqrm_post_event 0 "snap" 3 "iscsi-storage" "Error during cloning $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ORG_IMAGE_NAME to $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_SNAPSHOT_NAME."
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire iscsi-storage`
+		trap "openqrm_lock_queue release iscsi-storage $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# we now remove + re-add the volume to the iscsi-target
+		manage_iscsi remove
+		manage_iscsi add snap $ISCSI_IMAGE_PASSWORD
+
+		# remove lock from the origin + snapshot
+		rm -f "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ORG_IMAGE_NAME.sync_in_progress.$ISCSI_IMAGE_SNAPSHOT_NAME"
+		rm -f "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+
+		openqrm_lock_queue release iscsi-storage $LOCK_TIME
+		trap '' EXIT
+
+		# stop sync-progress monitor and send sync-finished to openQRM
+		$0 post_sync_finished -n $ISCSI_IMAGE_SNAPSHOT_NAME -u $ISCSI_OPENQRM_USERNAME -p $ISCSI_OPENQRM_PASSWORD --openqrm-internal-cmd true
+		# create long-term-action finished event
+		openqrm_post_event 0 "$ISCSI_IMAGE_SNAPSHOT_NAME" 10 "iscsi-storage" "Finished to clone $ISCSI_IMAGE_SNAPSHOT_NAME"
+		;;
+
+	auth)
+		if [ "$ISCSI_IMAGE_ROOTDEVICE" == "" ]; then
+			ISCSI_IMAGE_ROOTDEVICE="$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME"
+		fi
+		if [ "$ISCSI_IMAGE_NAME" == "" ]; then
+			ISCSI_IMAGE_NAME=`basename $ISCSI_IMAGE_ROOTDEVICE`
+		fi
+		echo -n "Authenticating ISCSI Lun for image rootdevice $ISCSI_IMAGE_ROOTDEVICE"
+		# this is just for starting auth, make sure the device is there, otherwise wait
+		if [ "$ISCSI_OPENQRM_USERNAME" != "" ] && [ "$ISCSI_OPENQRM_PASSWORD" != "" ] && [ "$ISCSI_IMAGE_NAME" != "" ]; then
+			MAX_AUTH_LOOP=0
+			while (true); do
+				if [ -f "$ISCSI_IMAGE_ROOTDEVICE" ] && [ ! -f "$ISCSI_IMAGE_ROOTDEVICE.clone_in_progress" ]; then
+					break
+				fi
+				sleep 5
+				if [ "$MAX_AUTH_LOOP" == "$MAX_VOLUME_AUTHENTICATION_LOOP" ]; then
+					openqrm_post_event 0 "auth" 3 "iscsi-storage" "Volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME does not exist. Cannot auth."
+					exit 1
+				fi
+				MAX_AUTH_LOOP=$(( MAX_AUTH_LOOP + 1 ))
+			done
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire iscsi-storage`
+		trap "openqrm_lock_queue release iscsi-storage $LOCK_TIME" EXIT
+
+		manage_iscsi auth $ISCSI_IMAGE_PASSWORD
+
+		openqrm_lock_queue release iscsi-storage $LOCK_TIME
+		trap '' EXIT
+
+		# in case we have a username + password post the updated list to the openQRM-server
+		if [ "$ISCSI_OPENQRM_USERNAME" != "" ] && [ "$ISCSI_OPENQRM_PASSWORD" != "" ] && [ "$ISCSI_IMAGE_NAME" != "" ]; then
+			if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$ISCSI_OPENQRM_USERNAME --http-password=$ISCSI_OPENQRM_PASSWORD "$openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/iscsi-storage/iscsi-storage-action.php?iscsi_storage_command=auth_finished&iscsi_image_name=$ISCSI_IMAGE_NAME"; then
+				openqrm_post_event 0 "auth" 3 "iscsi-storage" "Could not remove the storage-auth-blocker for volume Volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+			fi
+			$0 post_luns -u $ISCSI_OPENQRM_USERNAME -p $ISCSI_OPENQRM_PASSWORD --openqrm-internal-cmd true
+		fi
+		;;
+
+	adapt)
+		# adapts an existing blockfile volume to iscsi-deployment
+		if [ ! -f "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME" ]; then
+			openqrm_post_event 0 "adapt" 3 "iscsi-storage" "iSCSI volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME does not exists."
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			exit 1
+		fi
+		# make sure it is not still used by another storage type
+		# check for aoe
+		if [ "$VBLADECONF" != "" ]; then
+			if grep -w "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME" $VBLADECONF | grep -v '^#'; then
+				if `which vblade 1>/dev/null`; then
+					for VBLADE_PID in `ps ax | grep vblade | grep -w $ISCSI_IMAGE_NAME | awk {' print $1 '}`; do
+						kill $VBLADE_PID
+					done
+					sync
+					grep -w -v "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME" $VBLADECONF > $VBLADECONF.new
+					mv -f $VBLADECONF.new $VBLADECONF
+					sed -i '/^$/d' $VBLADECONF
+				fi
+			fi
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire iscsi-storage`
+		trap "openqrm_lock_queue release iscsi-storage $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# add to ietd
+		manage_iscsi adapt $ISCSI_IMAGE_PASSWORD
+
+		openqrm_lock_queue release iscsi-storage $LOCK_TIME
+		trap '' EXIT
+
+		# posting volume and storage infos to openQRM
+		STORAGE_STATUS_TMP=$resource_id.iscsi.$ISCSI_IMAGE_NAME.adapt
+		> $STORAGE_STATUS_TMP
+		echo "$ISCSI_IMAGE_NAME,/dev/$ISCSI_IMAGE_NAME/$IMAGE_LUN" >> $STORAGE_STATUS_TMP
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$ISCSI_OPENQRM_USERNAME --http-password=$ISCSI_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/iscsi-storage/iscsi-storage-action.php?iscsi_storage_command=get_ident; then
+			openqrm_post_event 0 "adapt" 3 "iscsi-storage" "Could not post the iscsi target identifier to openQRM at $OPENQRM_SERVER_IP."
+		fi
+		rm -f $STORAGE_STATUS_TMP
+		rm -f $STORAGE_STATUS_TMP.post
+		;;
+
+	list)
+		ls $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY
+		;;
+	post_luns)
+		echo "Posting current iscsi-luns to the openQRM-server"
+		# get avail + used space
+		BACKEND_DIR_AVAIL_SPACE=`df --block-size MB $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY | grep -v Used | awk '{ print $2 }' | sed -e "s/MB//g"`
+		BACKEND_DIR_FREE_SPACE=`df --block-size MB $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY | grep -v Used | awk '{ print $4 }' | sed -e "s/MB//g"`
+		STORAGE_STATUS_TMP=$resource_id.iscsi.stat
+		echo "$BACKEND_DIR_AVAIL_SPACE""@""$BACKEND_DIR_FREE_SPACE""@""$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY" > $STORAGE_STATUS_TMP
+		for VOLUME in `ls  $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY | grep -v sync_in_progress | grep -v clone_in_progress | grep -v ".conf"`; do
+			if grep -w $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$VOLUME $IETDCONF | grep -v '^#' | grep Lun 1>/dev/null; then
+				LUN_STR=`grep -w $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$VOLUME $IETDCONF | grep -v '^#' | grep Lun`
+				# get the size from the config file
+				if [ -f $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$VOLUME.conf ]; then
+					. $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$VOLUME.conf
+					IMAGE_SIZE=$LUN_SIZE
+				fi
+				if [ "$IMAGE_SIZE" == "" ]; then
+					IMAGE_SIZE=`ls --block-size=M -l $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$VOLUME | awk '{ print $5 }' | sed -e "s/M//g"`
+				fi
+				# get password
+				IMAGE_USERNAME=$VOLUME
+				IMAGE_PASSWORD=`grep -A1 ^"Target $VOLUME$" $IETDCONF | grep IncomingUser | awk '{ print $3 }'`
+				# check for clone-in-progress
+				if [ -f "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$VOLUME.clone_in_progress" ]; then
+					V_ALLOWED_MAC="-"
+					IMAGE_SIZE="clone_in_progress"
+				fi
+				echo "iscsi-deployment""@""$LUN""@""$VOLUME""@""$IMAGE_USERNAME""@""$IMAGE_PASSWORD""@""$IMAGE_SIZE" >> $STORAGE_STATUS_TMP
+			else
+				echo "@@""$VOLUME""@@@" >> $STORAGE_STATUS_TMP
+			fi
+		done
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$ISCSI_OPENQRM_USERNAME --http-password=$ISCSI_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/iscsi-storage/iscsi-storage-action.php?iscsi_storage_command=get_storage; then
+			openqrm_post_event 0 "post_luns" 3 "iscsi-storage" "Could not post the iscsi target status to openQRM at $OPENQRM_SERVER_IP."
+		fi
+		rm -f $STORAGE_STATUS_TMP
+		rm -f $STORAGE_STATUS_TMP.post
+		;;
+
+	post_identifier)
+		echo "Posting current iscsi-identifier to the openQRM-server"
+		STORAGE_STATUS_TMP=$resource_id.iscsi.ident
+		> $STORAGE_STATUS_TMP
+		OLD_IFS=$IFS
+IFS='
+'
+		for LUN_STR in `cat $IETDCONF | grep -v "#" | grep Lun | grep $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY`; do
+			LUN=`echo $LUN_STR | awk {'print $2 '}`
+			IMAGE_NAME=`echo $LUN_STR | awk {'print $3 '}`
+			IMAGE_NAME=`basename $IMAGE_NAME | cut -d',' -f1`
+			echo "$IMAGE_NAME,/dev/$IMAGE_NAME/$LUN"
+			echo "$IMAGE_NAME,/dev/$IMAGE_NAME/$LUN" >> $STORAGE_STATUS_TMP
+		done
+		IFS=$OLD_IFS
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$ISCSI_OPENQRM_USERNAME --http-password=$ISCSI_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/iscsi-storage/iscsi-storage-action.php?iscsi_storage_command=get_ident; then
+			openqrm_post_event 0 "post_identifier" 3 "iscsi-storage" "Could not post the iscsi target identifier to openQRM at $OPENQRM_SERVER_IP."
+		fi
+		rm -f $STORAGE_STATUS_TMP
+		rm -f $STORAGE_STATUS_TMP.post
+		;;
+
+	post_sync_progress)
+		echo "Posting progress of the sync action for volume $ISCSI_IMAGE_SNAPSHOT_NAME syncing from $ISCSI_IMAGE_NAME to the openQRM-server"
+		STORAGE_STATUS_TMP=$resource_id.iscsi.$ISCSI_IMAGE_SNAPSHOT_NAME.sync_progress
+
+		while (true); do
+			# if this is a snapshot volume we have to wait until the sync is ready
+			if [ -f "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_SNAPSHOT_NAME" ] && [ ! -f "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_SNAPSHOT_NAME.clone_in_progress" ]; then
+				# sync is ready
+				break
+			else
+				if [ ! -f "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_SNAPSHOT_NAME" ]; then
+				    # cloning not started yet, waiting for the snapshot to appear
+				    echo "0" > $STORAGE_STATUS_TMP
+				else
+				    SOURCE_VOLUME_SIZE=`ls -l --block-size=M $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME | awk '{ print $5 }' | cut -d'M' -f1`
+				    DESTINATION_VOLUME_SIZE=`ls -l --block-size=M $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_SNAPSHOT_NAME | awk '{ print $5 }' | cut -d'M' -f1`
+				    if [ "$DESTINATION_VOLUME_SIZE" == 0 ]; then
+					    DESTINATION_VOLUME_SIZE=1
+				    fi
+				    CURRENT_SYNC_PROGRESS_IN_PERCENT=$(( SOURCE_VOLUME_SIZE / DESTINATION_VOLUME_SIZE ))
+				    CURRENT_SYNC_PROGRESS_IN_PERCENT=$(( 100 / CURRENT_SYNC_PROGRESS_IN_PERCENT ))
+				    # make sure to not send 100%, this is send by clone finished
+				    CURRENT_SYNC_PROGRESS_IN_PERCENT=$(( CURRENT_SYNC_PROGRESS_IN_PERCENT - 1 ))
+					if (( $CURRENT_SYNC_PROGRESS_IN_PERCENT < 0 )); then
+						CURRENT_SYNC_PROGRESS_IN_PERCENT=0
+					fi
+				    echo "$CURRENT_SYNC_PROGRESS_IN_PERCENT" > $STORAGE_STATUS_TMP
+				fi
+				if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$ISCSI_OPENQRM_USERNAME --http-password=$ISCSI_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/iscsi-storage/iscsi-storage-action.php?iscsi_storage_command=get_sync_progress; then
+					iscsi_storage_log "post_sync_progress" "Could not post the sync progress for volume $ISCSI_IMAGE_SNAPSHOT_NAME to openQRM at $OPENQRM_SERVER_IP."
+				fi
+				rm -f $STORAGE_STATUS_TMP $STORAGE_STATUS_TMP.post
+			fi
+			sleep 2
+		done
+		;;
+
+
+	post_sync_finished)
+		echo "Posting finished for volume $ISCSI_IMAGE_NAME to the openQRM-server"
+		STORAGE_STATUS_TMP=$resource_id.iscsi.$ISCSI_IMAGE_NAME.sync_progress
+		echo "100" > $STORAGE_STATUS_TMP
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$ISCSI_OPENQRM_USERNAME --http-password=$ISCSI_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/iscsi-storage/iscsi-storage-action.php?iscsi_storage_command=get_sync_finished; then
+			iscsi_storage_log "post_sync_finished" "Could not post the sync progress for volume $ISCSI_IMAGE_NAME to openQRM at $OPENQRM_SERVER_IP."
+		fi
+		rm -f $STORAGE_STATUS_TMP $STORAGE_STATUS_TMP.post
+		;;
+
+
+	*)
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		iscsi_storage_usage
+		;;
+
+
+esac
+

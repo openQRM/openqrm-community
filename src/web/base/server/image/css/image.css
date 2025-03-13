@@ -1,0 +1,58 @@
+.htmlobject_td.image_icon {
+	text-align:center;
+	width:25px;
+	vertical-align:top;
+}
+.htmlobject_td.image_id {
+	text-align:center;
+	width:25px;
+	vertical-align:top;
+}
+.htmlobject_td.image_name {
+	text-align:left;
+	width:200px;
+	vertical-align:top;
+}
+.htmlobject_td.image_isactive {
+	text-align:center;
+	width:40px;
+	vertical-align:top;
+}
+.htmlobject_td.image_edit {
+	text-align:center;
+	width:100px;
+	vertical-align:top;
+}
+.htmlobject_box textarea {
+	width: 600px;
+	height: 50px;
+}
+
+.htmlobject_td.image_data {
+	width: 320px;
+}
+.htmlobject_td.image_data .data{
+	height: 107px;
+}
+.htmlobject_td.image_data a{
+	text-decoration: none;
+}
+
+.htmlobject_table .htmlobject_td.image_edit a{
+	display: block;
+	text-align: left;
+}
+
+#image_add .infotext {
+	width: 350px;
+}
+#image_add a {
+	line-height: 32px;
+}
+#image_add a img {
+	float: left;
+	margin: 0 5px 0 0;
+}
+
+
+

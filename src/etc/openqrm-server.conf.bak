@@ -1,0 +1,149 @@
+# this is the main openQRM-server config file
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+############## start of user setup     ##############
+
+# OPENQRM_SERVER_BASE_DIR sets the installation for the openQRM-server. 
+# Please adjust to your needs before running "make install"
+# (default is "/usr/share")
+OPENQRM_SERVER_BASE_DIR=/usr/share
+
+# OPENQRM_SERVER_INTERFACE configures on which network interface
+# the openQRM-server should run on
+# Please adjust to your needs before running "make install"
+# (default is "eth0")
+OPENQRM_SERVER_INTERFACE="ens18"
+
+############## start of database setup ##############
+# default LAMP setup
+OPENQRM_DATABASE_TYPE="mysql"
+OPENQRM_DATABASE_SERVER="localhost"
+OPENQRM_DATABASE_NAME="openqrm"
+OPENQRM_DATABASE_USER="root"
+OPENQRM_DATABASE_PASSWORD=""
+
+# please find configuration templates for 
+# the different supported database types below :
+
+# configuration for using a db2 database
+#OPENQRM_DATABASE_TYPE="db2"
+#OPENQRM_DATABASE_SERVER="localhost"
+#OPENQRM_DATABASE_NAME="openqrm"
+#OPENQRM_DATABASE_USER="db2inst1"
+#OPENQRM_DATABASE_PASSWORD="db2"
+
+# configuration for using a oracle database
+#OPENQRM_DATABASE_TYPE="oracle"
+#OPENQRM_DATABASE_SERVER="localhost"
+#OPENQRM_DATABASE_NAME="orcl"
+#OPENQRM_DATABASE_USER="scott"
+#OPENQRM_DATABASE_PASSWORD="tiger"
+#OPENQRM_LD_LIBRARY_PATH="/u01/app/oracle/product/11.1.0/db_1/lib"
+#OPENQRM_ORACLE_HOME="/u01/app/oracle/product/11.1.0/db_1"
+#OPENQRM_TNS_ADMIN="/u01/app/oracle/product/11.1.0/db_1"
+
+# configuration for using a postgres database
+#OPENQRM_DATABASE_TYPE="postgres"
+#OPENQRM_DATABASE_SERVER="localhost"
+#OPENQRM_DATABASE_NAME="openqrm"
+#OPENQRM_DATABASE_USER="postgres"
+#OPENQRM_DATABASE_PASSWORD=""
+
+############## end of database setup ##############
+
+############## end of user setup     ##############
+
+###################################################
+# do not change anything below except you are knowing what you are doing ;)
+OPENQRM_SERVER_VERSION="5.3"
+OPENQRM_MINOR_RELEASE_VERSION="56"
+
+# OPENQRM_EXEC_PORT defines the network port for running administrative
+# commands on the openQRM-server and its managed resources
+OPENQRM_EXEC_PORT=1667
+
+# OPENQRM_RESOURCE_BASE_DIR defines the basedir to use for
+# openQRM related stuff on the managed resources
+# by default it is set to the same as openQRM-server base-directory (/usr/share)
+OPENQRM_RESOURCE_BASE_DIR=/usr/share
+
+# these are the main openQRM-server dependencies
+# which configure the package-dependencies for the
+# different supported linux distributions
+
+# OPENQRM_SERVER_DEPENDENCIES defines the package dependencies of
+# the main openQRM-server
+
+# OPENQRM_WEBSERVER_DOCUMENT_ROOT defines the web-servers document-root
+# The openQRM-server web-application will be sym-linked to this
+# directory during installation
+# for debian/ubuntu based systems the default doc root is at /var/www
+# for redhat-based systems docroot is at /var/www/html
+# for suse-based systems docroot is at /srv/www/htdocs/
+
+if [ -f /etc/debian_version ]; then
+	OPENQRM_SERVER_DEPENDENCIES="bridge-utils, apache2, php, php-soap, php-mysql, php-xml, libphp-adodb, mariadb-client, mariadb-server, pxelinux, screen, procmail, openssl, dropbear, libapache2-mod-php, net-tools"
+	OPENQRM_SERVER_BUILD_REQUIREMENTS="make, wget, tar, bzip2, unzip"
+	OPENQRM_WEBSERVER_DOCUMENT_ROOT=/var/www
+	OPENQRM_WEBSERVER_CONFIG=/etc/apache2/sites-available/default
+elif [ -f /etc/redhat-release ]; then
+	if [ -f /etc/centos-release ]; then
+		OPENQRM_SERVER_DEPENDENCIES="bridge-utils, httpd, php, php-soap, php-mysql, php-soap, mod_ssl, mariadb, mariadb-server, syslinux, screen, procmail, openssl, dropbear, crontabs, cronie"
+	else
+		OPENQRM_SERVER_DEPENDENCIES="httpd, php, php-soap, php-mysql, php-soap, mod_ssl, mariadb, mariadb-server, syslinux, screen, procmail, openssl, dropbear, crontabs, cronie"
+	fi
+	OPENQRM_SERVER_BUILD_REQUIREMENTS="make, wget, tar, bzip2, unzip"
+	OPENQRM_WEBSERVER_DOCUMENT_ROOT=/var/www/html
+	OPENQRM_WEBSERVER_CONFIG=/etc/httpd/conf/httpd.conf
+elif [ -f /etc/SuSE-release ]; then
+	#add maridb repo
+	rpm --import https://yum.mariadb.org/RPM-GPG-KEY-MariaDB
+	zypper addrepo --gpgcheck --refresh https://yum.mariadb.org/10.5/opensuse/15/x86_64 mariadb
+	
+	OPENQRM_SERVER_DEPENDENCIES="bridge-utils, apache2, apache2-mod_php7, php7, php7-mysql, MariaDB-server MariaDB-client, syslinux, screen, procmail, openssl, dropbear"
+	OPENQRM_SERVER_BUILD_REQUIREMENTS="make, wget, tar, bzip2, unzip"
+	OPENQRM_WEBSERVER_DOCUMENT_ROOT=/srv/www/htdocs
+	OPENQRM_WEBSERVER_CONFIG=/etc/apache2/httpd.conf
+fi
+
+# which web protocol to use for the openQRM apache webserver
+# supported are http and https, default is https
+OPENQRM_WEB_PROTOCOL="https"
+
+# OPENQRM_EXECUTION_LAYER defines the subsystem used for executing commands 
+# on the openQRM server and on the managed servers
+# Supported values are :
+# - dropbear		(ssl authentication based on key-pair, default)
+# - rabbitmq		(Message queuing via a RabbitMQ server, enterprise)
+OPENQRM_EXECUTION_LAYER="dropbear"
+
+# OPENQRM_TEMP_DIR defines the tmp location for openQRM-server
+OPENQRM_TEMP_DIR=/tmp
+
+# OPENQRM_PACKAGE_TMP_DIR defines the location for package creation (deb + rpm)
+OPENQRM_PACKAGE_TMP_DIR=/tmp
+
+# OPENQRM_BUILD_TMP_DIR defines the location for compiling third-party components
+OPENQRM_BUILD_TMP_DIR=${OPENQRM_SOURCE_DIR}/../buildtmp
+
+# OPENQRM_DEFAULT_CMD_TIMEOUT defines how long commands are allowed to run
+OPENQRM_DEFAULT_CMD_TIMEOUT=120
+
+# OPENQRM_CMD_QUEUE_RETRY defines if commands should be re-run if failed
+OPENQRM_CMD_QUEUE_RETRY=false
+
+# OPENQRM_RABBITMQ_PASSWORD defines the password to connect to RabbitMQ 
+# requires that OPENQRM_EXECUTION_LAYER is to "rabbitmq"
+OPENQRM_RABBITMQ_PASSWORD=""

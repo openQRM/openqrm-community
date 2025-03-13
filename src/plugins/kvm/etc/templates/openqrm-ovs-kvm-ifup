@@ -1,0 +1,79 @@
+#!/bin/bash
+# this is the boot-service init script for the Kvm-server hosts
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+export OPENQRM_SERVER_BASE_DIR=@@OPENQRM_SERVER_BASE_DIR@@
+export OPENVSWITCH=@@OPENQRM_PLUGIN_KVM_BRIDGE@@
+export APP_NIC=@@OPENQRM_APP_NIC@@
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+export OPENQRM_SOURCE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/"
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/include/openqrm-plugin-kvm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/openqrm-plugin-kvm.conf
+if [ -f $OPENQRM_RESOURCE_PARAMETER_FILE ]; then
+	. $OPENQRM_RESOURCE_PARAMETER_FILE
+elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+	resource_id=0
+	openqrm_server_get_config
+	resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+	openqrm_web_protocol=$OPENQRM_WEB_PROTOCOL
+fi
+# define wget to use with https
+if [ "$openqrm_web_protocol" == "https" ]; then
+	WGET="wget -q --no-check-certificate"
+else
+	WGET="wget -q"
+fi
+
+# find out the name
+VM_BASE_DIR=$(pushd $(dirname $0) > /dev/null; echo $PWD; popd > /dev/null)
+VM_NAME=`basename $VM_BASE_DIR`
+# get the net config of the vm
+. $VM_BASE_DIR/net1
+
+# get vms resource parameters
+if ! $WGET -q -t 1 -T 4 -O $VM_BASE_DIR/openqrm-resource.conf "$openqrm_web_protocol://${resource_openqrmserver}/openqrm/action/resource-monitor.php?resource_command=get_parameter&resource_mac=$KVM_VM_MAC_1"; then
+	echo "ERROR: Could not refresh VMs resource-parameters!" | logger
+else
+	. $VM_BASE_DIR/openqrm-resource.conf
+fi
+# get ip config
+eval $appliance_capabilities
+if [ "$IPT" != "" ]; then
+	IP_TOKEN=`echo $IPT | cut -d'=' -f1`
+	echo "- getting network configuration for token $IP_TOKEN nic $APP_NIC" | logger
+	if ! $WGET -O $VM_BASE_DIR/openqrm-network.$APP_NIC.conf "$openqrm_web_protocol://${resource_openqrmserver}/openqrm/boot-service/ip-mgmt-appliance-config.php?ip_mgmt_command=get_config&appliance_id=$appliance_id&ip_mgmt_nic_id=$APP_NIC&ip_mgmt_token=$IP_TOKEN"; then
+		echo "ERROR: Could not get ip-configuration from openQRM-server at ${resource_openqrmserver}!"
+		exit -1
+	fi
+	. $VM_BASE_DIR/openqrm-network.$APP_NIC.conf
+else
+	echo "NOTICE: No ip-configuration for VM available. Continuing..." | logger
+fi
+
+# now attach the tap device to the bridge
+ifconfig $1 0.0.0.0 up
+if [ "$VLAN_ID" != "" ]; then
+	VLAN_TAG_PARAMETER="tag=$VLAN_ID"
+fi
+# make sure it is not setup already
+ovs-vsctl del-port ${OPENVSWITCH} $1 2>/dev/null
+# attach tap
+ovs-vsctl add-port ${OPENVSWITCH} $1 $VLAN_TAG_PARAMETER
+

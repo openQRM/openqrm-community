@@ -1,0 +1,123 @@
+#!/bin/bash
+# this script automatically manages puppet
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/puppet/include/openqrm-plugin-puppet-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/puppet/etc/openqrm-plugin-puppet.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+openqrm_server_get_config
+export resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+export LANG=C
+
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+# the puppet plugin depends on dns working so it needs the dns plugin available+enabled
+# puppet autosigning needs a domain name. This we get from the dns-plugin config
+if [ ! -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/openqrm-plugin-dns.conf ]; then
+	openqrm_unblock_starting_queue $@
+	echo "ERROR: The openQRM puppet-plugin depends on the dns-plugin. Please enable the dns-plugin first!"
+	openqrm_post_event 0 "puppet-plugin" 3 "puppet-plugin" "The openQRM puppet-plugin depends on the dns-plugin. Please enable the dns-plugin first!"
+	exit 1
+fi
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/openqrm-plugin-dns.conf
+
+function puppet_manager_usage() {
+	echo "Usage : $0"
+	exit 1
+}
+
+PUPPETCA=`which puppetca`
+if [ "$PUPPETCA" == "" ]; then
+	PUPPETCA_CLEAN_CMD="puppet cert clean"
+else
+	PUPPETCA_CLEAN_CMD="$PUPPETCA --clean"
+fi
+
+
+FULL_COMMANDLINE="$0 $@"
+PUPPET_MANAGER_COMMAND=$1
+# main
+case "$PUPPET_MANAGER_COMMAND" in 
+	start)
+		APPLIANCE_ID=$2
+		APPLIANCE_NAME=$3
+		APPLIANCE_IP=$4
+		openqrm_post_event 0 "start" 5 "openqrm-puppet-manager" "Appliance $APPLIANCE_NAME id $APPLIANCE_ID starting with ip-address $APPLIANCE_IP."
+
+		LOCK_TIME=`openqrm_lock_queue aquire puppet`
+		trap "openqrm_lock_queue release puppet $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		$PUPPETCA_CLEAN_CMD $APPLIANCE_NAME.$OPENQRM_SERVER_DOMAIN 2>&1 | logger
+
+		openqrm_lock_queue release puppet $LOCK_TIME
+		trap '' EXIT
+		;;
+	stop)
+		APPLIANCE_ID=$2
+		APPLIANCE_NAME=$3
+		APPLIANCE_IP=$4
+		openqrm_post_event 0 "stop" 5 "openqrm-puppet-manager" "Appliance $APPLIANCE_NAME id $APPLIANCE_ID stopping with ip-address $APPLIANCE_IP."
+
+		LOCK_TIME=`openqrm_lock_queue aquire puppet`
+		trap "openqrm_lock_queue release puppet $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		$PUPPETCA_CLEAN_CMD $APPLIANCE_NAME.$OPENQRM_SERVER_DOMAIN 2>&1 | logger
+
+		openqrm_lock_queue release puppet $LOCK_TIME
+		trap '' EXIT
+		;;
+	auto_sign_false)
+		openqrm_post_event 0 "auto_sign_false" 5 "openqrm-puppet-manager" "Stopping automatic signing of puppet-ca's."
+
+		LOCK_TIME=`openqrm_lock_queue aquire puppet`
+		trap "openqrm_lock_queue release puppet $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		rm -f /etc/puppet/autosign.conf
+
+		openqrm_lock_queue release puppet $LOCK_TIME
+		trap '' EXIT
+		;;
+	auto_sign_true)
+		openqrm_post_event 0 "auto_sign_false" 5 "openqrm-puppet-manager" "Started automatic signing of puppet-ca's."
+
+		LOCK_TIME=`openqrm_lock_queue aquire puppet`
+		trap "openqrm_lock_queue release puppet $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		echo "*.$OPENQRM_SERVER_DOMAIN" > /etc/puppet/autosign.conf
+
+		openqrm_lock_queue release puppet $LOCK_TIME
+		trap '' EXIT
+		;;
+	*)
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		echo "ERROR: Free commandline arguments are not allowed!"
+		puppet_manager_usage
+		exit 6
+		;;
+esac
+

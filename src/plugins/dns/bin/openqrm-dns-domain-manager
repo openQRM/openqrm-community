@@ -1,0 +1,246 @@
+#!/bin/bash
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/include/openqrm-plugin-dns-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/openqrm-plugin-dns.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+openqrm_server_get_config
+
+export LANG=C
+BIND_BACKUP_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/bind/backup"
+
+
+function dns_domain_usage() {
+	echo "Usage: $0 add_domain/remove_domain -n [dns-domain-name] -i [dns-name-server_ip] -u [admin-user] -p [admin-password]"
+	echo "       $0 add_host/remove_host -n [dns-domain-name] -i [dns-ip] -q [dns-hostname] -u [admin-user] -p [admin-password]"
+	exit 1
+}
+
+FULL_COMMANDLINE="$0 $@"
+DNS_CMD=$1
+shift
+
+while [ $# -ne 0 ]; do
+	case "$1" in
+		-n)
+			DNS_DOMAIN_NAME=$2
+			shift
+			;;
+		-i)
+			DNS_HOST_IP=$2
+			shift
+			;;
+		-q)
+			DNS_HOST_NAME=$2
+			shift
+			;;
+		-u)
+			OPENQRM_USERNAME=$2
+			shift
+			;;
+		-p)
+			OPENQRM_PASSWORD=$2
+			shift
+			;;
+		--openqrm-ui-user)
+			OPENQRM_UI_USER=$2
+			shift
+			;;
+		--openqrm-internal-cmd)
+			OPENQRM_INTERNAL_CMD=$2
+			shift
+			;;
+		--openqrm-cmd-mode)
+			OPENQRM_CMD_MODE=$2
+			shift
+			;;
+		*)
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			echo "ERROR: Free commandline arguments are not allowed"
+			dns_domain_usage
+			exit 6
+			;;
+	esac
+	shift
+done
+
+# checks
+if [ "$DNS_CMD" == "" ]; then
+	openqrm_unblock_starting_queue $FULL_COMMANDLINE
+	dns_domain_usage
+fi
+
+
+
+
+
+
+case "$DNS_CMD" in
+
+	add_domain)
+		if [ "$DNS_DOMAIN_NAME" == "" ] || [ "$DNS_HOST_IP" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			dns_domain_usage
+			exit 1
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire dns`
+		trap "openqrm_lock_queue release dns $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		LAST_GOOD_ZONES_BACKUP=`dns_zone_backup`
+
+		dns_create_domain $DNS_DOMAIN_NAME $DNS_HOST_IP
+
+		if ! dns_reload $LAST_GOOD_ZONES_BACKUP; then
+			openqrm_post_event 0 "add_domain" 3 "openqrm-dns-domain-manager" "Failed adding custom domain $DNS_DOMAIN_NAME. Trying to revert custom zones"
+
+			openqrm_lock_queue release dns $LOCK_TIME
+			trap '' EXIT
+
+			exit 0
+		fi
+
+		dns_remove_zone_backup $LAST_GOOD_ZONES_BACKUP
+		openqrm_post_event 0 "add_domain" 5 "openqrm-dns-domain-manager" "Added custom domain $DNS_DOMAIN_NAME"
+
+		openqrm_lock_queue release dns $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+	remove_domain)
+		if [ "$DNS_DOMAIN_NAME" == "" ] || [ "$DNS_HOST_IP" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			dns_domain_usage
+			exit 1
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire dns`
+		trap "openqrm_lock_queue release dns $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		LAST_GOOD_ZONES_BACKUP=`dns_zone_backup`
+
+		dns_remove_domain $DNS_DOMAIN_NAME $DNS_HOST_IP
+
+		if ! dns_reload $LAST_GOOD_ZONES_BACKUP; then
+			openqrm_post_event 0 "add_domain" 3 "openqrm-dns-domain-manager" "Failed removing custom domain $DNS_DOMAIN_NAME. Trying to revert custom zones"
+
+			openqrm_lock_queue release dns $LOCK_TIME
+			trap '' EXIT
+
+			exit 0
+		fi
+
+		dns_remove_zone_backup $LAST_GOOD_ZONES_BACKUP
+		openqrm_post_event 0 "add_domain" 5 "openqrm-dns-domain-manager" "Removed custom domain $DNS_DOMAIN_NAME"
+
+		openqrm_lock_queue release dns $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+
+
+
+	add_host)
+
+		if [ "$DNS_DOMAIN_NAME" == "" ] || [ "$DNS_HOST_IP" == "" ] || [ "$DNS_HOST_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			dns_domain_usage
+			exit 1
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire dns`
+		trap "openqrm_lock_queue release dns $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		LAST_GOOD_ZONES_BACKUP=`dns_zone_backup`
+
+		if ! dns_domain_manage_host add $DNS_DOMAIN_NAME $DNS_HOST_IP $DNS_HOST_NAME; then
+			openqrm_post_event 0 "add_host" 3 "openqrm-dns-domain-manager" "Failed adding $DNS_HOST_NAME to custom domain $DNS_DOMAIN_NAME."
+		fi
+
+		if ! dns_reload $LAST_GOOD_ZONES_BACKUP; then
+			openqrm_post_event 0 "add_host" 3 "openqrm-dns-domain-manager" "Failed adding $DNS_HOST_NAME to custom domain $DNS_DOMAIN_NAME. Trying to revert custom zones"
+
+			openqrm_lock_queue release dns $LOCK_TIME
+			trap '' EXIT
+
+			exit 0
+		fi
+
+		dns_remove_zone_backup $LAST_GOOD_ZONES_BACKUP
+
+		openqrm_lock_queue release dns $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+
+
+	remove_host)
+		if [ "$DNS_DOMAIN_NAME" == "" ] || [ "$DNS_HOST_IP" == "" ] || [ "$DNS_HOST_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			dns_domain_usage
+			exit 1
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire dns`
+		trap "openqrm_lock_queue release dns $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		LAST_GOOD_ZONES_BACKUP=`dns_zone_backup`
+
+		if ! dns_domain_manage_host remove $DNS_DOMAIN_NAME $DNS_HOST_IP $DNS_HOST_NAME; then
+			openqrm_post_event 0 "remove_host" 3 "openqrm-dns-domain-manager" "Failed removing $DNS_HOST_NAME from custom domain $DNS_DOMAIN_NAME."
+			echo
+		fi
+
+		if ! dns_reload $LAST_GOOD_ZONES_BACKUP; then
+			openqrm_post_event 0 "remove_host" 3 "openqrm-dns-domain-manager" "Failed removing $DNS_HOST_NAME from custom domain $DNS_DOMAIN_NAME. Trying to revert custom zones"
+
+			openqrm_lock_queue release dns $LOCK_TIME
+			trap '' EXIT
+
+			exit 0
+		fi
+
+		dns_remove_zone_backup $LAST_GOOD_ZONES_BACKUP
+
+		openqrm_lock_queue release dns $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+
+
+
+
+
+
+
+	*)
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		dns_log openqrm-dns-manager "Usage: $0 {start|stop|init} "
+		exit 1
+		;;
+esac

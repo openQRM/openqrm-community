@@ -1,0 +1,74 @@
+#!/bin/bash
+# openQRM maintenance script, runs once a day via cron
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+. @@OPENQRM_SERVER_BASE_DIR@@/openqrm/etc/openqrm-server.conf
+. @@OPENQRM_SERVER_BASE_DIR@@/openqrm/include/openqrm-server-functions
+# get full server config
+openqrm_server_get_config
+
+# define maintenance dir for postgres backup files
+DB_MAINTENANCE_DIR="/var/spool/openqrm_db/"
+
+if ! which psql 1>/dev/null 2>&1; then
+	echo "ERROR: Postgres client 'psql' not installed/found on this system"
+	exit 1
+else
+	POSTGRES_CLIENT=`which psql`
+fi
+if ! which pg_dump 1>/dev/null 2>&1; then
+	echo "ERROR: Postgres 'pg_dump' not installed/found on this system"
+	exit 1
+else
+	POSTGRES_DUMP=`which pg_dump`
+fi
+
+BACKUP_TIME=`date +%T--%x | sed -e "s/:/-/g" | sed -e "s#/#-#g"`
+if [ ! -d "$DB_MAINTENANCE_DIR" ]; then
+	mkdir -p $DB_MAINTENANCE_DIR
+fi
+
+# backup event_info table
+echo "NOTICE: Saving event_info table to $DB_MAINTENANCE_DIR/openqrm_db_event_info_$BACKUP_TIME.sql"  | logger
+su - $OPENQRM_DATABASE_USER -c "$POSTGRES_DUMP -w -t event_info $OPENQRM_DATABASE_NAME" > $DB_MAINTENANCE_DIR/openqrm_db_event_info_$BACKUP_TIME.sql
+gzip $DB_MAINTENANCE_DIR/openqrm_db_event_info_$BACKUP_TIME.sql
+# clean up event_info table
+echo "NOTICE: Cleaning event_info table"  | logger
+su - $OPENQRM_DATABASE_USER -c "$POSTGRES_CLIENT -d $OPENQRM_DATABASE_NAME --set openqrmdbuser=$OPENQRM_DATABASE_USER -c 'delete from event_info'"
+# clean up datacenter_info table
+echo "NOTICE: Cleaning datacenter_info"  | logger
+su - $OPENQRM_DATABASE_USER -c "$POSTGRES_CLIENT -d $OPENQRM_DATABASE_NAME --set openqrmdbuser=$OPENQRM_DATABASE_USER -c 'delete from datacenter_info'"
+
+# backup cloud_transaction
+if su - $OPENQRM_DATABASE_USER -c "$POSTGRES_CLIENT -d $OPENQRM_DATABASE_NAME --set openqrmdbuser=$OPENQRM_DATABASE_USER -c 'select * from pg_tables'" | grep cloud_transaction 1>/dev/null; then
+    echo "NOTICE: Saving cloud_transaction table to $DB_MAINTENANCE_DIR/openqrm_db_cloud_transaction_$BACKUP_TIME.sql"  | logger
+    su - $OPENQRM_DATABASE_USER -c "$POSTGRES_DUMP -w -t cloud_transaction $OPENQRM_DATABASE_NAME" > $DB_MAINTENANCE_DIR/openqrm_db_cloud_transaction_$BACKUP_TIME.sql
+    gzip $DB_MAINTENANCE_DIR/openqrm_db_cloud_transaction_$BACKUP_TIME.sql
+    # clean up cloud_transaction
+    echo "NOTICE: Cleaning cloud_transaction table"  | logger
+    su - $OPENQRM_DATABASE_USER -c "$POSTGRES_CLIENT -d $OPENQRM_DATABASE_NAME --set openqrmdbuser=$OPENQRM_DATABASE_USER -c 'delete from cloud_transaction'"
+fi
+
+# backup cloud_zones_transaction
+if su - $OPENQRM_DATABASE_USER -c "$POSTGRES_CLIENT -d $OPENQRM_DATABASE_NAME --set openqrmdbuser=$OPENQRM_DATABASE_USER -c 'select * from pg_tables'" | grep cloud_zones_transaction 1>/dev/null; then
+    echo "NOTICE: Saving cloud_zones_transaction table to $DB_MAINTENANCE_DIR/openqrm_db_cloud_zones_transaction_$BACKUP_TIME.sql"  | logger
+    su - $OPENQRM_DATABASE_USER -c "$POSTGRES_DUMP -w -t cloud_zones_transaction $OPENQRM_DATABASE_NAME" > $DB_MAINTENANCE_DIR/openqrm_db_cloud_zones_transaction_$BACKUP_TIME.sql
+    gzip $DB_MAINTENANCE_DIR/openqrm_db_cloud_zones_transaction_$BACKUP_TIME.sql
+    # clean up cloud_zones_transaction
+    echo "NOTICE: Cleaning cloud_zones_transaction table"  | logger
+    su - $OPENQRM_DATABASE_USER -c "$POSTGRES_CLIENT -d $OPENQRM_DATABASE_NAME --set openqrmdbuser=$OPENQRM_DATABASE_USER -c 'delete from cloud_zones_transaction'"
+fi
+

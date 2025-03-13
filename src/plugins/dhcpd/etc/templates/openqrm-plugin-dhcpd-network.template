@@ -1,0 +1,26 @@
+	option domain-name "OPENQRM_DHCPD_DOMAIN";
+	subnet OPENQRM_DHCPD_NETWORK netmask OPENQRM_DHCPD_SUBNET_MASK {
+		default-lease-time 21600;
+		max-lease-time 43200;
+		
+		# the ip range to serve
+		range OPENQRM_DHCPD_RANGE_FIRST OPENQRM_DHCPD_RANGE_LAST;
+		filename "/pxelinux.0";
+
+
+# ! Please do NOT remove these lines ################
+# start_static_ips ##################################
+
+
+
+
+
+
+
+# end_static_ips ####################################
+
+	}
+
+
+
+

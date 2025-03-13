@@ -1,0 +1,44 @@
+.htmlobject_td.kernel_icon {
+	text-align:center;
+	width:25px;
+}
+.htmlobject_td.kernel_id {
+	text-align:center;
+	width:25px;
+}
+.htmlobject_td.kernel_name {
+	text-align:left;
+	width:220px;
+}
+.htmlobject_td.kernel_version {
+	text-align:left;
+	width:140px;
+}
+.htmlobject_td.kernel_comment {
+	text-align:left;
+}
+.htmlobject_td.identifier {
+	text-align:center;
+}
+.htmlobject_td.edit {
+	text-align:center;
+}
+.htmlobject_td.default {
+	text-align:center;
+	width:40px;
+}
+
+a.default {
+	padding: 0;
+	border: 0px none;
+	width: 32px;
+	height: 32px;
+	display:block;
+	text-align: center;
+	text-decoration: none;
+	line-height: 0px;
+	overflow: hidden;
+	color: transparent;
+	background: url('../../../img/snapshot.png') no-repeat center top;
+}
+

@@ -1,0 +1,150 @@
+img {
+	border:none;
+}
+
+.htmlobject_box textarea {
+	width: 350px;
+	height: 50px;
+}
+.htmlobject_box .right a {
+	text-decoration: none;
+}
+
+#step1 .htmlobject_box .left {
+	width: 80px;
+}
+#step1 #comment_box.htmlobject_box .left {
+	display: none;
+}
+#step1 #comment_box.htmlobject_box .right {
+	float: none;
+}
+#step1 #comment_box.htmlobject_box .right .errormsg {
+	text-align: center;
+}
+#step1 #comment_box.htmlobject_box .right textarea {
+	display: block;
+	width: 100%;
+	height: 80px;
+}
+#step2 .htmlobject_box .left {
+	width: 100px;
+}
+#step3 .htmlobject_box .left {
+	width: 100px;
+}
+#step4 .htmlobject_box .left {
+	width: 100px;
+}
+#step3 #image_edit_box.htmlobject_box .left {
+	width: 300px;
+	float: right;
+}
+#step3 #image_edit_box.htmlobject_box .right {
+	width: 30px;
+	float: right;
+	padding: 3px 0 0 0;
+}
+#or.span1 {
+	width: 60px;
+	text-align: center;
+	line-height: 20px;
+	margin: 0 0 0 0;
+}
+#info, #resource {
+	margin-top: 5px;
+	margin-bottom: 15px;
+}
+
+/* Edit */
+#appliance_edit .htmlobject_box .left {
+	float: left;
+	margin: 0;
+	padding: 0;
+	width: 180px;
+}
+#appliance_edit .htmlobject_box .right div {
+	line-height: 30px;
+}
+#appliance_edit.row {
+	margin: 0 0 0 10px;
+}
+#pluginsbox {
+	margin: 0 0 0 -30px;
+}
+#pluginsbox legend{
+	line-height: 18px;
+	padding: 0 0 8px 0;
+	margin: 0 0 10px 0;
+}
+#pluginsbox a {
+	display: block;
+	float: left;
+	clear: both;
+	text-decoration: none;
+	margin: 0 0 12px 0;
+}
+#pluginsbox a img{
+	float: left;
+	padding: 0 10px 0 0;
+	display: none;
+}
+#pluginsbox div{
+	border: 0px none;
+	height: 390px;
+	overflow: auto;
+}
+
+/* Select */
+.htmlobject_td.appliance_values {
+	text-align:left;
+	width:250px;
+	vertical-align:top;
+	white-space:nowrap;
+	line-height: 18px;
+}
+.htmlobject_td.appliance_values a {
+	text-decoration: none;
+	color: #4e4e4e;
+}
+.htmlobject_td.appliance_comment {
+	text-align:left;
+	vertical-align:top;
+}
+.htmlobject_td.appliance_comment img{
+	margin: 0 6px 0 0;
+}
+.htmlobject_td.appliance_comment hr{
+	margin: 10px 0;
+	color: #ccc;
+	background-color: #ccc;
+	border: 0 none;
+	height: 1px;
+}
+.htmlobject_td.identifier {
+	text-align:center;
+	vertical-align:top;
+	width: 20px;
+}
+.htmlobject_table .htmlobject_td.appliance_state {
+	width: 110px;
+	padding: 11px 0 0 8px;
+	text-align:left;
+	vertical-align:top;
+	width:90px;
+}
+.htmlobject_table .htmlobject_td.appliance_edit {
+	width: 100px;
+	vertical-align:top;
+}
+.htmlobject_table .htmlobject_td.appliance_edit a{
+	display: block;
+	text-align: left;
+}
+#resource_filter {
+	margin: 0 0 0 0 !important;
+}
+#resource_type_filter {
+	margin: 0 0 30px 0 !important;
+}
+

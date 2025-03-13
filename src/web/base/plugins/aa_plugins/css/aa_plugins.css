@@ -1,0 +1,52 @@
+.htmlobject_td.icon,
+.htmlobject_td.type,
+.htmlobject_td.type {
+	text-align:center;
+	width: 60px;
+}
+.htmlobject_td.enabled,
+.htmlobject_td.configure,
+.htmlobject_td.started {
+	width: 80px;
+	padding: 8px 5px 0px 0px;
+}
+.htmlobject_td.configure {
+	padding: 10px 4px 10px 15px;
+}
+.htmlobject_td.enabled,
+.htmlobject_td.started {
+	padding: 10px 4px 10px 0px;
+	margin: 0px;
+}
+#page #middle #content #plugins_filter .left {
+	width:110px;
+}
+a.enable, a.disable, a.manage { display:block; padding: 5px 12px 5px 5px; margin: 0px;}
+a.start, a.stop {  display:block; padding: 5px 12px 5px 5px; margin: 0px;}
+a.start {
+	background: #FF8000;
+}
+#configure_plugin .htmlobject_box .left {
+	width: 450px;
+}
+#configure_plugin .htmlobject_box .left label{
+	font-size: 11px;
+}
+#configure_plugin .htmlobject_box .right input.text {
+	width: 350px;
+}
+.htmlobject_tabs_box .msgBox {
+	display: block;
+	position: fixed;
+	top: 20px;
+	left: 500px;
+	font-size: 11px;
+	border: solid 1px #aaaaaa;
+	background-color: #FFFFE0;
+	color: black;
+	padding: 10px 15px;
+	margin: 0;
+	z-index: 100;
+	-webkit-box-shadow: 0 2px 2px 0 rgba(33, 33, 33, 0.5);
+	box-shadow: 0 2px 2px 0 rgba(33, 33, 33, 0.5);
+}

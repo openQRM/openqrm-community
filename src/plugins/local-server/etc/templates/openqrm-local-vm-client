@@ -1,0 +1,312 @@
+#!/bin/bash
+# openqrm-local-vm-client	openQRM init script for local-VMs
+# - kvm-storage, xen-storage, lxc-storage, openvz-storage, ...
+#
+# chkconfig: 2345 98 19
+# description: openQRM is the next generation Linux Data Center management
+
+# support for LSB init scripts
+### BEGIN INIT INFO
+# Provides: openqrm-local-vm-client
+# Required-Start: $all
+# Required-Stop: $all
+# Default-Start:  2 3 4 5
+# Default-Stop: 0 1 2 6
+# Short-Description: openQRM init script for local-VMs
+# Description: openQRM init script for local-VMs
+### END INIT INFO
+
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+# some defines setup by the plugin init
+###########################################################
+OPENQRM_SERVER_BASE_DIR=@@OPENQRM_SERVER_BASE_DIR@@
+export OPENQRM_SERVER_BASE_DIR
+OPENQRM_WEB_PROTOCOL=@@OPENQRM_WEB_PROTOCOL@@
+export OPENQRM_WEB_PROTOCOL
+OPENQRM_SERVER_IP_ADDRESS=@@OPENQRM_SERVER_IP_ADDRESS@@
+export OPENQRM_SERVER_IP_ADDRESS
+###########################################################
+
+export OPENQRM_SOURCE_DIR=$OPENQRM_SERVER_BASE_DIR/openqrm
+export LANG=C
+PATH=/usr/bin:/sbin:/bin:/usr/sbin
+export PATH
+LOCKFILE=/var/lock/subsys/openqrm
+mkdir -p $(dirname $LOCKFILE)
+mkdir -p /var/openqrm
+
+# define wget to use with https
+if [ "$OPENQRM_WEB_PROTOCOL" == "https" ]; then
+	WGET="wget -q --no-check-certificate"
+else
+	WGET="wget -q"
+fi
+
+# do not run on the initrd phase
+if [ -f /etc/initrd-devices.conf ]; then
+	exit 0
+fi
+
+if [ -f /var/openqrm/openqrm-resource.conf ]; then
+	. /var/openqrm/openqrm-resource.conf
+	# make sure to have a valid backup of the parameters, at least including the openQRM server ip
+	if [ ! -f /var/openqrm/openqrm-resource.conf.last ]; then
+		/bin/cp -f /var/openqrm/openqrm-resource.conf /var/openqrm/openqrm-resource.conf.last
+	fi
+	if [ "$resource_mac" == "" ]; then
+		/bin/cp -f /var/openqrm/openqrm-resource.conf.last /var/openqrm/openqrm-resource.conf
+		. /var/openqrm/openqrm-resource.conf
+		# if we still do not have a mac address here set it to xxxxxxxxxxxxxx which probes later
+		if [ "$resource_mac" == "" ]; then
+			resource_mac="xxxxxxxxxxxxxxxxxx"
+		fi
+	fi
+fi
+export resource_mac
+
+# install/uninstall
+FILE_NAME=$(basename $0)
+if [ "$1" == "" ]; then
+	# this should be a fresh installation, check to setup everyting in place
+	if [ ! -x $OPENQRM_SERVER_BASE_DIR/openqrm/etc/init.d/$FILE_NAME ]; then
+		# check for udev persistant net-rules
+		if [ -f /etc/udev/rules.d/70-persistent-net.rules ]; then
+			rm -f /etc/udev/rules.d/70-persistent-net.rules
+			ln -sf /dev/null /etc/udev/rules.d/70-persistent-net.rules
+		fi
+		mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/etc/init.d/
+		/bin/cp -f $0 $OPENQRM_SERVER_BASE_DIR/openqrm/etc/init.d/
+		chmod +x $OPENQRM_SERVER_BASE_DIR/openqrm/etc/init.d/$FILE_NAME
+		ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/etc/init.d/$FILE_NAME /etc/init.d/$FILE_NAME
+		/etc/init.d/$FILE_NAME start
+		exit 0
+	fi
+elif [ "$1" == "uninstall" ]; then
+	if [ -x "$OPENQRM_SERVER_BASE_DIR/openqrm/etc/init.d/$FILE_NAME" ]; then
+		$OPENQRM_SERVER_BASE_DIR/openqrm/etc/init.d/$FILE_NAME stop
+	fi
+	if [ -f "$OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions" ] && [ -f "$OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions" ]; then
+		. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+		. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+		openqrm_chkconfig del openqrm-local-vm-client
+	fi
+	rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm
+	rm -f /etc/init.d/$FILE_NAME
+	exit 0
+fi
+
+
+
+# gets/starts/stops enabled boot-services for the resources
+function openqrm_boot_service() {
+	local BOOT_SERVICE=$1
+	local BOOT_SERVICE_CMD=$2
+	local CURRENT=`pwd`
+
+	# get + install the package during start
+	if [ "$BOOT_SERVICE_CMD" == "start" ]; then
+		echo "Getting boot-service package $BOOT_SERVICE"
+		mkdir -p  $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$BOOT_SERVICE
+		cd $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$BOOT_SERVICE
+		if ! $WGET $OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/boot-service-$BOOT_SERVICE.tgz; then
+			echo "ERROR: Could not get boot-service package for boot-service $BOOT_SERVICE !"
+			return 1
+		fi
+		tar -xzf boot-service-$BOOT_SERVICE.tgz
+		rm -f boot-service-$BOOT_SERVICE.tgz
+		# get optional custom appliance config
+		if [ "$appliance_name" != "" ]; then
+			if $WGET -O $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$BOOT_SERVICE/etc/openqrm-plugin-$BOOT_SERVICE.conf.$appliance_name.conf $OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/plugins/$BOOT_SERVICE/openqrm-plugin-$BOOT_SERVICE.$appliance_name.conf; then
+				echo "- applying custom $BOOT_SERVICE boot-service configuration for appliance $appliance_name"
+				/bin/cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$BOOT_SERVICE/etc/openqrm-plugin-$BOOT_SERVICE.conf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$BOOT_SERVICE/etc/openqrm-plugin-$BOOT_SERVICE.conf.default
+				/bin/cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$BOOT_SERVICE/etc/openqrm-plugin-$BOOT_SERVICE.conf.$appliance_name.conf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$BOOT_SERVICE/etc/openqrm-plugin-$BOOT_SERVICE.conf
+			fi
+		fi
+
+	fi
+	# run the boot-service cmd
+	BOOT_SERVICE_INIT="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$BOOT_SERVICE/etc/init.d/$BOOT_SERVICE"
+	if [ -x $BOOT_SERVICE_INIT ]; then
+		echo "Running $BOOT_SERVICE_CMD on boot-service $BOOT_SERVICE"
+		$BOOT_SERVICE_INIT $BOOT_SERVICE_CMD
+	fi
+	cd $CURRENT
+}
+
+
+
+
+
+function openqrm_client_start() {
+	echo "Starting openQRM-local-vm-client"
+	openqrm_client_stop 1>/dev/null 2>&1
+	START_RETRY=0
+	LOOP_CONNECT=0
+	MAX_CONNECT=5
+
+	# network up ?
+	echo "NOTICE: Checking connection to openQRM server at $OPENQRM_SERVER_IP_ADDRESS"
+	while ! $WGET -q -t 1 -T 4 -O /dev/null "$OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/action/resource-monitor.php"; do
+		echo -n "."
+		sleep 2
+		LOOP_CONNECT=$(( LOOP_CONNECT + 1 ))
+		if [ "$LOOP_CONNECT" == "$MAX_CONNECT" ]; then
+			echo "NOTICE: Could not connect to openQRM server at $OPENQRM_SERVER_IP_ADDRESS!"
+			# exit good here without starting the boot-services since we cannot reach openQRM anyway
+			exit 0
+		fi
+	done
+
+	# download function files
+	if [ ! -f "$OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions" ]; then
+		mkdir $OPENQRM_SERVER_BASE_DIR/openqrm/include/
+		if ! $WGET -q -t 1 -T 4 -O $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions "$OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/openqrm-functions"; then
+			echo "NOTICE: Could not connect to openQRM server at $OPENQRM_SERVER_IP_ADDRESS!"
+			rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+			# exit good here without starting the boot-services since we cannot reach openQRM anyway
+			exit 0
+		fi
+	fi
+	if [ ! -f "$OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions" ]; then
+		if ! $WGET -q -t 1 -T 4 -O $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions "$OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/openqrm-package-functions"; then
+			echo "NOTICE: Could not connect to openQRM server at $OPENQRM_SERVER_IP_ADDRESS!"
+			rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+			# exit good here without starting the boot-services since we cannot reach openQRM anyway
+			exit 0
+		fi
+	fi
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+	openqrm_chkconfig add openqrm-local-vm-client
+
+	# check if we have resource_mac, if not try to find the right interface integrated in openQRM
+	if ifconfig -a | grep ^e | grep -i $resource_mac &>/dev/null; then
+		if ! $WGET -q -t 1 -T 4 -O /var/openqrm/openqrm-resource.conf "$OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/action/resource-monitor.php?resource_command=get_parameter&resource_mac=$resource_mac"; then
+			# restore
+			/bin/cp -f /var/openqrm/openqrm-resource.conf.last /var/openqrm/openqrm-resource.conf
+			echo "NOTICE: Could not refresh resource-parameters. Using previous one."
+		else
+			. /var/openqrm/openqrm-resource.conf
+		fi
+	else
+		# here we do not found the resource_mac on one of the systems network cards
+		# assuming auto-install or clone to local-disk
+		if [ -f /var/openqrm/openqrm-resource.conf ]; then
+			/bin/cp -f /var/openqrm/openqrm-resource.conf /var/openqrm/openqrm-resource.conf.previous_res
+		fi
+
+		# centos 7 is using a different ifconfig output
+		RESOURCE_MAC_LIST=`ifconfig -a | grep ^e | grep -v ":oq" | awk '{ print $5 }'`
+		if [ "$RESOURCE_MAC_LIST" == "" ]; then
+			RESOURCE_MAC_LIST=`ifconfig -a | grep -A3 ^e | grep -v :oq | grep ether | awk '{ print $2 }'`
+		fi
+		for RESOURCE_MAC in $RESOURCE_MAC_LIST; do
+			echo "NOTICE: Refreshing resource-parameters. Trying $RESOURCE_MAC."
+			rm -f /var/openqrm/openqrm-resource.conf
+			if $WGET -q -t 1 -T 4 -O /var/openqrm/openqrm-resource.conf "$OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/action/resource-monitor.php?resource_command=get_parameter&resource_mac=$RESOURCE_MAC"; then
+				if grep -i $RESOURCE_MAC /var/openqrm/openqrm-resource.conf &>/dev/null; then
+					. /var/openqrm/openqrm-resource.conf
+					break
+				fi
+			fi
+		done
+	fi
+	# start openqrm-monitord if existing -> vm plugin config dependent if monitoring is on the Host or VM
+	if [ -x $resource_basedir/openqrm/sbin/openqrm-monitord ]; then
+		if [ ! -d /tmp ]; then mkdir -p /tmp; fi
+		nohup $resource_basedir/openqrm/sbin/openqrm-monitord 1>/tmp/openqrm-monitord.out 2>&1 &
+		rm -f /tmp/openqrm-monitord.out
+	fi
+	openqrm_post_event $resource_id "openqrm-client" 5 openqrm_client_start "Resource $resource_id fully started"
+	# allow to overwrite the resource-configuration e.g. for cluster-resources
+	if [ -f /var/openqrm/openqrm-resource.conf.static ]; then
+		cat /var/openqrm/openqrm-resource.conf.static >> /var/openqrm/openqrm-resource.conf
+	fi
+	# set the image password if not idle
+	if [ "$resource_image" != "idle" ]; then
+		if  $WGET -O /tmp/iauth.$image_id $openqrm_web_protocol://$resource_openqrmserver/openqrm/action/image-auth/iauth.$image_id.php 2>/tmp/iauth.log; then
+			cryptedpassword=`cat /tmp/iauth.$image_id`
+			rm -f /tmp/iauth.$image_id /tmp/iauth.log
+			if [ "$cryptedpassword" != "" ]; then
+				sed -i "s#^root:[^:]*#root:$cryptedpassword#" /etc/shadow
+				sed -i "s#^root:[^:]*#root:$cryptedpassword#" /etc/shadow-
+			fi
+		fi
+		# if not idle make sure acpid is installed
+		if [ -f /etc/debian_version ]; then
+			if ! openqrm_full_fill_os_dependency acpid acpid; then
+				echo "ERROR: Could not install acpid! Please install manually."
+			fi
+		elif [ -f /etc/redhat-release ]; then
+			if ! openqrm_full_fill_os_dependency acpid acpid; then
+				echo "ERROR: Could not install acpid! Please install manually."
+			fi
+		elif [ -f /etc/SuSE-release ]; then
+			if ! openqrm_full_fill_os_dependency acpid acpid; then
+				echo "ERROR: Could not install acpid! Please install manually."
+			fi
+		fi
+	fi
+
+	# start boot-services from enabled plugins
+	for boot_service in $openqrm_boot_services; do
+		openqrm_boot_service $boot_service start
+	done
+	touch ${LOCKFILE}
+}
+
+
+function openqrm_client_stop() {
+	echo "Stopping openQRM-local-vm-client"
+	# stop boot-services from enabled plugins
+	for boot_service in $openqrm_boot_services; do
+		openqrm_boot_service $boot_service stop
+	done
+	/bin/rm -f ${LOCKFILE}
+}
+
+
+function openqrm_client_status() {
+	if [ -f ${LOCKFILE} ]; then
+		echo "openQRM-local-vm-client service is running"
+	else
+		echo "openQRM-local-vm-client service is not running"
+	fi
+}
+
+
+
+case "$1" in
+	start)
+		openqrm_client_start
+		;;
+	stop)
+		openqrm_client_stop
+		;;
+	status)
+		openqrm_client_status
+		;;
+	restart)
+		openqrm_client_stop
+		openqrm_client_start
+		;;
+	*)
+		echo $"Usage: $0 {start|stop|status|restart|uninstall}"
+		exit 1
+		;;
+esac
+

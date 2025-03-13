@@ -1,0 +1,82 @@
+#!/bin/bash
+# this script automatically manages template
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/template/include/openqrm-plugin-template-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/template/etc/openqrm-plugin-template.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+openqrm_server_get_config
+export resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+export LANG=C
+
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+function template_manager_usage() {
+	echo "Usage : $0"
+	exit 1
+}
+
+
+FULL_COMMANDLINE="$0 $@"
+TEMPLATE_MANAGER_COMMAND=$1
+# main
+case "$TEMPLATE_MANAGER_COMMAND" in 
+	start)
+		APPLIANCE_ID=$2
+		APPLIANCE_NAME=$3
+		APPLIANCE_IP=$4
+		openqrm_post_event 0 "start" 5 "openqrm-template-manager" "Appliance $APPLIANCE_NAME id $APPLIANCE_ID starting with ip-address $APPLIANCE_IP."
+
+		LOCK_TIME=`openqrm_lock_queue aquire template`
+		trap "openqrm_lock_queue release template $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# TODO: add your own commands here
+
+		openqrm_lock_queue release template $LOCK_TIME
+		trap '' EXIT
+		;;
+	stop)
+		APPLIANCE_ID=$2
+		APPLIANCE_NAME=$3
+		APPLIANCE_IP=$4
+		openqrm_post_event 0 "stop" 5 "openqrm-template-manager" "Appliance $APPLIANCE_NAME id $APPLIANCE_ID stopping with ip-address $APPLIANCE_IP."
+
+		LOCK_TIME=`openqrm_lock_queue aquire template`
+		trap "openqrm_lock_queue release template $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# TODO: add your own commands here
+
+		openqrm_lock_queue release template $LOCK_TIME
+		trap '' EXIT
+		;;
+	*)
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		echo "ERROR: Free commandline arguments are not allowed!"
+		template_manager_usage
+		exit 6
+		;;
+esac
+

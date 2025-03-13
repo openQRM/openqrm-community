@@ -1,0 +1,41 @@
+#!/bin/bash
+# this script gets activated via cron to sequentially check 
+# if there are new config updates in the svn repo
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+SVN_COMMIT_MESSAGE="Automatically updated through openQRM ansible plugin"
+CUR=`pwd`
+export LANGUAGE=C
+export LANG=C
+export LC_ALL=C
+
+# here it commits any changes made through the web-interface
+cd $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/web/ansible/
+# check for removed files
+for r in `svn status . | grep ^"!" | awk {' print $2 '}`; do
+	echo "found removed file $r" | logger
+	svn del $r
+	svn commit -m "$SVN_COMMIT_MESSAGE" . | logger
+done
+
+# add new files
+svn add `find | grep -v svn` | logger
+# commit
+svn commit -m "$SVN_COMMIT_MESSAGE" . | logger
+# update eventual changes from external
+svn update . | logger
+

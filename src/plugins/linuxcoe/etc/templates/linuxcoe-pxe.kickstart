@@ -1,0 +1,9 @@
+default linux
+
+label linux
+kernel boot/@@OPENQRM_BOOTIMAGE_KERNEL@@
+append ramdisk_size=131072 initrd=boot/@@OPENQRM_BOOTIMAGE_INITRD@@ ksdevice=@@PARAM_RESOURCE_MAC@@ ks=http://@@OPENQRM_SERVER_IP_ADDRESS@@/openqrm/boot-service/lcoe/ks.@@OPENQRM_RESOURCE_ID@@-@@LINUXCOE_PROFILE_NAME@@.cfg
+ipappend 3
+
+label local
+LOCALBOOT 0

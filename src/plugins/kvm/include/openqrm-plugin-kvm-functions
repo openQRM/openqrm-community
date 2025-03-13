@@ -1,0 +1,565 @@
+#!/bin/bash
+# this is the functions file for the kvm-plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+
+# some definitions
+DEFAULT_IMAGE_SIZE=5000
+LV_SIZE_DEFAULT=5000
+DEVICE_MAPPER_TIMEOUT=120
+
+################ common kvm functions
+
+# logs for kvm
+function kvm_log() {
+	local COMPONENT=$1
+	shift
+	local MESSAGE=$@
+	logger -i -t "kvm plug-in" "$COMPONENT : $MESSAGE"
+}
+
+
+# deps function
+function check_kvm_deps() {
+
+	# check and fullfill dependencies
+	# screen
+	if ! openqrm_full_fill_os_dependency screen screen; then
+		return 1
+	fi
+	if [ -x /usr/bin/screen.real ]; then
+		export RUNSCREEN="/usr/bin/screen.real"
+	else
+		export RUNSCREEN=`which screen`
+	fi
+	# wget
+	if ! openqrm_full_fill_os_dependency wget wget; then
+		return 1
+	fi
+	# procmail for lockfile
+	if ! openqrm_full_fill_os_dependency lockfile procmail; then
+		return 1
+	fi
+	# socat
+	if ! openqrm_full_fill_os_dependency socat socat; then
+		return 1
+	fi
+	# rsync
+	if ! openqrm_full_fill_os_dependency rsync rsync; then
+		return 1
+	fi
+	# resize2fs
+	if ! openqrm_full_fill_os_dependency resize2fs e2fsprogs; then
+		return 1
+	fi
+	# kpartx
+	if ! openqrm_full_fill_os_dependency kpartx kpartx; then
+		return 1
+	fi
+	# parted
+	if ! openqrm_full_fill_os_dependency parted parted; then
+		return 1
+	fi
+	# lvm2
+	if ! openqrm_full_fill_os_dependency lvs lvm2; then
+		return 1
+	fi
+	# bridge-utils
+	if ! openqrm_full_fill_os_dependency brctl bridge-utils; then
+		return 1
+	fi
+
+	# different package names for different distros
+	if [ -f /etc/debian_version ]; then
+		if ! openqrm_full_fill_os_dependency vconfig vlan; then
+			return 1
+		fi
+		if ! openqrm_install_os_dependency ntfsprogs; then
+			if ! openqrm_full_fill_os_dependency ntfsresize ntfs-3g; then
+				return 1
+			fi
+		fi
+		# nfs-common
+		if ! openqrm_full_fill_os_dependency mount.nfs nfs-common; then
+			return 1
+		fi
+		# qemu-kvm
+		if ! openqrm_full_fill_os_dependency kvm qemu-kvm; then
+			return 1
+		fi
+	elif [ -f /etc/redhat-release ]; then
+		if ! openqrm_full_fill_os_dependency vconfig vconfig; then
+			return 1
+		fi
+		if ! openqrm_full_fill_os_dependency ntfsresize ntfsprogs; then
+			return 1
+		fi
+		# nfs-utils
+		if ! openqrm_full_fill_os_dependency mount.nfs nfs-utils; then
+			return 1
+		fi
+		# qemu-kvm
+		if ! openqrm_full_fill_os_dependency ksmtuned qemu-kvm; then
+			return 1
+		fi
+
+	elif [ -f /etc/SuSE-release ]; then
+		if ! openqrm_full_fill_os_dependency vconfig vlan; then
+			return 1
+		fi
+		if ! openqrm_full_fill_os_dependency ntfsresize ntfsprogs; then
+			return 1
+		fi
+		# nfs-utils
+		if ! openqrm_full_fill_os_dependency mount.nfs nfs-client; then
+			return 1
+		fi
+		# qemu-kvm
+		if ! openqrm_full_fill_os_dependency qemu-kvm kvm; then
+			return 1
+		fi
+	fi
+	return 0
+
+
+}
+
+
+
+
+################ kvm functions
+
+# refresh lvm metadata
+function kvm_refresh_lvm() {
+	openqrm_post_event 0 "refresh_lvm" 5 "openqrm-kvm" "Refreshing lvm meta-data!"
+	for LVMCMD in pvscan vgscan lvscan; do
+		CMD_ERR=`$LVMCMD 2>&1`
+		if [ "$?" != 0 ]; then
+			CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+			openqrm_post_event 0 "refresh_lvm" 3 "openqrm-kvm" "Error refreshing lvm meta-data! $CMD_ERR"
+			return 1
+		fi
+	done
+
+#	CMD_ERR=`vgchange --refresh 2>&1`
+#	if [ "$?" != 0 ]; then
+#		CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+#		openqrm_post_event 0 "refresh_lvm" 3 "openqrm-kvm" "Error refreshing VG lvm meta-data! $CMD_ERR"
+#		return 1
+#	fi
+	return 0
+}
+
+
+
+function kvm_get_backend_dir() {
+	local STORAGE_LOC_NAME=$1
+	for FILE_BACKEND in `echo $OPENQRM_PLUGIN_KVM_FILE_BACKEND_DIRECTORIES`; do
+		BACKEND_LOCATION_NAME=`echo $FILE_BACKEND | cut -d':' -f1`
+		if [ "$BACKEND_LOCATION_NAME" == "$STORAGE_LOC_NAME" ]; then
+			FILE_BACKEND_DIR=`echo $FILE_BACKEND | cut -d':' -f2`
+			break
+		fi
+	done
+	if [ "$FILE_BACKEND_DIR" == "" ]; then
+		echo $STORAGE_LOC_NAME
+	else
+		echo $FILE_BACKEND_DIR
+	fi
+}
+
+
+function kvm_get_gluster_backend_dir() {
+	local STORAGE_LOC_NAME=$1
+	GET_BACKEND_TMP=`mktemp /tmp/kvm-gluster.XXXXXX`
+	gluster volume info $STORAGE_LOC_NAME > $GET_BACKEND_TMP
+	for GLUSTER_BRICK in `grep -w "^Brick[0-9].*" $GET_BACKEND_TMP | awk '{ print $2 }'`; do
+		FILE_BACKEND_DIR=`echo $GLUSTER_BRICK | cut -d':' -f2`
+		break
+	done
+	rm -f $GET_BACKEND_TMP
+	echo $FILE_BACKEND_DIR
+}
+
+
+function kvm_get_image_type() {
+	local FILE_PATH=$1
+	local FILE_TYPE=""
+	FILE_TYPE_STR=`file $FILE_PATH`
+	if echo $FILE_TYPE_STR | grep -w "backing file" 1>/dev/null; then
+		# snap
+		FILE_TYPE="snapshot"
+	elif echo $FILE_TYPE_STR | grep -w "User-mode" 1>/dev/null; then
+		# cow
+		FILE_TYPE="cow"
+	elif echo $FILE_TYPE_STR | grep -w "QEMU QCOW Image (v1)" 1>/dev/null; then
+		# qcow
+		FILE_TYPE="qcow"
+	elif echo $FILE_TYPE_STR | grep -w "QEMU QCOW Image (v2)" 1>/dev/null; then
+		# qcow2
+		FILE_TYPE="qcow2"
+	else
+		FILE_TYPE="raw"
+	fi
+	echo $FILE_TYPE
+}
+
+
+function kvm_trigger_gluster_replication() {
+	local VLOC=$1
+	local VNAME=$2
+	V_VOL_TMP_DIR="/tmp/kvm-gluster.$VNAME"
+	mkdir -p $V_VOL_TMP_DIR
+
+	CMD_ERR=`mount -t nfs $resource_ip:$VLOC $V_VOL_TMP_DIR 2>&1`
+	if [ "$?" != 0 ]; then
+		CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+		openqrm_post_event 0 "snap" 3 "openqrm-kvm" "Error mounting $resource_ip:$VLOC/$VNAME. Not replicating! $CMD_ERR"
+		rmdir $V_VOL_TMP_DIR
+		return 1
+	fi
+	touch $V_VOL_TMP_DIR/$VNAME
+	umount $V_VOL_TMP_DIR
+	rmdir $V_VOL_TMP_DIR
+	return 0
+}
+
+
+
+function kvm_clean_dev_maps() {
+	local INAME=$1
+	local VOLG=$2
+	kpartx -d /dev/mapper/$VOLG-$INAME
+	for DM in `ls /dev/mapper/$VOLG-$INAME""p*`; do
+		dmsetup remove $DM
+	done
+}
+
+
+
+function kvm_resize_fs() {
+
+	local LVM_VOLUME=$1
+	local LVM_VOLUME_NAME=`basename $LVM_VOLUME`
+	local LVM_VOLUME_GROUP=`dirname $LVM_VOLUME`
+	local LVM_VOLUME_GROUP=`basename $LVM_VOLUME_GROUP`
+
+	if [ "$LVM_VOLUME" == "" ]; then
+		return
+	fi
+	# find the rootfs and resize it
+	kvm_clean_dev_maps $LVM_VOLUME_NAME $LVM_VOLUME_GROUP
+	PARTITION_START=`parted -s /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME unit B print | grep -A1 ^Number | grep ^" 1" | awk '{ print $2 }'`
+	if [ "$?" != 0 ]; then
+		openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Error finding partition start for volume $LVM_VOLUME_NAME! skipping resize!"
+		return 1
+	fi
+	# get the full disk size
+	ROOTFS_SIZE=`parted -s /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME unit MB print | head -n3 | grep -w ^Disk | grep MB | awk {' print $3 '} | sed -e "s/MB//g" | cut -d',' -f1 | cut -d'.' -f1`
+	if [ "$ROOTFS_SIZE" == "" ]; then
+		openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Error finding disk size for volume $LVM_VOLUME_NAME! $ROOTFS_SIZE skipping resize!"
+		return 1
+	fi
+	ORIGIN_DISK_SIZE=$ROOTFS_SIZE
+
+	# check if we can find swap space
+	CREATE_SWAPSPACE=false
+	SWAPSPACE_SIZE=`parted -s /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME unit MB print 2>/dev/null | grep "linux-swap" | head -n1 | awk {' print $4 '} | sed -e "s/MB//g" | cut -d',' -f1 | cut -d'.' -f1`
+	if [ "$SWAPSPACE_SIZE" != "" ]; then
+		CREATE_SWAPSPACE=true
+		ROOTFS_SIZE=$(( $ROOTFS_SIZE - $SWAPSPACE_SIZE ))
+	else
+		SWAPSPACE_SIZE=`parted -s /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME unit MB print 2>/dev/null | grep "type=82" | head -n1 | awk {' print $4 '} | sed -e "s/MB//g" | cut -d',' -f1 | cut -d'.' -f1`
+		if [ "$SWAPSPACE_SIZE" != "" ]; then
+			CREATE_SWAPSPACE=true
+			ROOTFS_SIZE=$(( $ROOTFS_SIZE - $SWAPSPACE_SIZE ))
+		fi
+	fi
+	# remove partitions
+	for N in `seq 1 5`; do
+		parted -s /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME rm $N
+	done
+
+	# recreate root-partition
+	parted -s /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME mkpart primary $PARTITION_START $ROOTFS_SIZE""MB
+	# make it bootable
+	parted -s /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME set 1 boot on
+
+	if [ "$CREATE_SWAPSPACE" == "true" ]; then
+		# recreate swap
+		parted -s /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME mkpart primary linux-swap $ROOTFS_SIZE""MB $ORIGIN_DISK_SIZE""MB
+
+		# creating partitions on the lvol triggers device-mapper to create p1 + p2 devices in /dev/mapper/vg-lv
+		# this results in the device being already busy when trying to re-create the dev-maps
+		kvm_clean_dev_maps $LVM_VOLUME_NAME $LVM_VOLUME_GROUP
+		SWAP_PARTITION=`kpartx -av /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME | awk '{ print $3 }' | tail -n1`
+		if [ "$?" == 0 ] && [ "$SWAP_PARTITION" != "" ]; then
+			# wait until the device link is created
+			while (:); do
+				if [ -e "/dev/mapper/$SWAP_PARTITION" ]; then
+					break
+				fi
+				sleep 1
+				DL=$(( $DL + 1 ))
+				if [ "$DL" == $DEVICE_MAPPER_TIMEOUT ]; then
+					openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Adding device maps for volume /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME! Not creating swap /dev/mapper/$SWAP_PARTITION - $CMD_ERR!"
+					break
+				fi
+			done
+			CMD_ERR=`mkswap /dev/mapper/$SWAP_PARTITION 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Could not create swap space /dev/mapper/$SWAP_PARTITION on /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME - $CMD_ERR!"
+			fi
+			kpartx -dv /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME
+		fi
+		sync
+		sleep 2
+		kvm_clean_dev_maps $LVM_VOLUME_NAME $LVM_VOLUME_GROUP
+		sleep 2
+	fi
+
+	# filesystem resize
+	FIRST_PARTITION=`kpartx -av /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME | awk '{ print $3 }' | head -n1`
+	if [ "$?" != 0 ]; then
+		openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Adding device maps for volume /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME failed!"
+		return
+	fi
+	sleep 2
+	# wait until the device link is created
+	if [ "$FIRST_PARTITION" != "" ]; then
+		while (:); do
+			if [ -e "/dev/mapper/$FIRST_PARTITION" ]; then
+				break
+			fi
+			sleep 1
+			DLT=$(( $DLT + 1 ))
+			if [ "$DLT" == $DEVICE_MAPPER_TIMEOUT ]; then
+				openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Adding device maps for volume /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME timed out! Not resizsing!"
+				break
+			fi
+		done
+	fi
+
+	if [ "$FIRST_PARTITION" != "" ] && [ -e /dev/mapper/$FIRST_PARTITION ]; then
+			PARTITION_TYPE=`fdisk -l /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME | grep ^/dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME | head -n1 | sed -e "s#\*##g" | awk '{ print $5 }'`
+			case "$PARTITION_TYPE" in
+					83)
+						e2fsck -y /dev/mapper/$FIRST_PARTITION
+						openqrm_post_event 0 "/dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME" 5 "openqrm-kvm" "Resizing Linux filesystem of volume /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME."
+						CMD_ERR=`resize2fs -f -p /dev/mapper/$FIRST_PARTITION 2>&1`
+						if [ "$?" == 0 ]; then
+							openqrm_post_event 0 "kvm_resize_fs" 5 "openqrm-kvm" "Successfully resized volume /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME."
+						else
+							CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+							openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Errors during resizing volume /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME! $CMD_ERR"
+							if ! e2fsck -fy /dev/mapper/$FIRST_PARTITION; then
+								openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Errors on filesystem of volume /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME!"
+							fi
+						fi
+						e2fsck -fy /dev/mapper/$FIRST_PARTITION
+						;;
+					7)
+						VOLUME_SIZE_PARAM="-s $ROOTFS_SIZE""M"
+						openqrm_post_event 0 "/dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME" 5 "openqrm-kvm" "Resizing Windows filesystem of volume /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME to $ROOTFS_SIZE MB."
+						CMD_ERR=`ntfsresize $VOLUME_SIZE_PARAM -b -f /dev/mapper/$FIRST_PARTITION 2>&1`
+						if [ "$?" == 0 ]; then
+							openqrm_post_event 0 "kvm_resize_fs" 5 "openqrm-kvm" "Successfully resized volume /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME to $ROOTFS_SIZE MB."
+						else
+							CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+							openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Errors during resizing volume /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME! $CMD_ERR"
+						fi
+						;;
+					*)
+						openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Could not find out filesystem type of volume /dev/$LVM_VOLUME_GROUP/$LVM_VOLUME_NAME. Not resizing."
+						;;
+			esac
+	fi
+	sync
+	sleep 2
+	kvm_clean_dev_maps $LVM_VOLUME_NAME $LVM_VOLUME_GROUP
+	return 0
+
+}
+
+
+
+function kvm_resize_ceph_fs() {
+
+	local CEPH_VOLUME=$1
+	local CEPH_POOL=$2
+
+	if [ "$CEPH_VOLUME" == "" ] || [ "$CEPH_POOL" == "" ]; then
+		return
+	fi
+
+	# map
+	rbd unmap $CEPH_VOLUME --pool $CEPH_POOL 2>&1
+	CMD_ERR=`rbd map $CEPH_VOLUME --pool $CEPH_POOL 2>&1`
+	if [ "$?" != 0 ]; then
+		CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+		openqrm_post_event 0 "resize" 3 "openqrm-kvm" "Error mapping rbd volume rbd:$CEPH_POOL/$CEPH_VOLUME! $CMD_ERR"
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+
+		exit 1
+	else
+		CEPHDEV=$CMD_ERR
+	fi
+
+
+	openqrm_post_event 0 "resize" 2 "openqrm-kvm" "Found dev $CEPHDEV for rbd volume rbd:$CEPH_POOL/$CEPH_VOLUME!"
+
+	# find the rootfs and resize it
+	PARTITION_START=`parted -s $CEPHDEV unit B print | grep -A1 ^Number | grep ^" 1" | awk '{ print $2 }'`
+	if [ "$?" != 0 ]; then
+		openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Error finding partition start for volume $CEPHDEV! skipping resize!"
+		return 1
+	fi
+	# get the full disk size
+	ROOTFS_SIZE=`parted -s $CEPHDEV unit MB print | head -n3 | grep -w ^Disk | grep MB | awk {' print $3 '} | sed -e "s/MB//g" | cut -d',' -f1 | cut -d'.' -f1`
+	if [ "$ROOTFS_SIZE" == "" ]; then
+		openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Error finding disk size for volume $CEPHDEV! Skipping resize!"
+		return 1
+	fi
+	ORIGIN_DISK_SIZE=$ROOTFS_SIZE
+
+	# check if we can find swap space
+	CREATE_SWAPSPACE=false
+	SWAPSPACE_SIZE=`parted -s $CEPHDEV unit MB print 2>/dev/null | grep "linux-swap" | head -n1 | awk {' print $4 '} | sed -e "s/MB//g" | cut -d',' -f1 | cut -d'.' -f1`
+	if [ "$SWAPSPACE_SIZE" != "" ]; then
+		CREATE_SWAPSPACE=true
+		ROOTFS_SIZE=$(( $ROOTFS_SIZE - $SWAPSPACE_SIZE ))
+	else
+		SWAPSPACE_SIZE=`parted -s $CEPHDEV unit MB print 2>/dev/null | grep "type=82" | head -n1 | awk {' print $4 '} | sed -e "s/MB//g" | cut -d',' -f1 | cut -d'.' -f1`
+		if [ "$SWAPSPACE_SIZE" != "" ]; then
+			CREATE_SWAPSPACE=true
+			ROOTFS_SIZE=$(( $ROOTFS_SIZE - $SWAPSPACE_SIZE ))
+		fi
+	fi
+
+	# remove partitions
+	for N in `seq 1 5`; do
+		parted -s $CEPHDEV rm $N
+	done
+
+	# recreate root-partition
+	parted -s $CEPHDEV mkpart primary $PARTITION_START $ROOTFS_SIZE""MB
+	# make it bootable
+	parted -s $CEPHDEV set 1 boot on
+
+	if [ "$CREATE_SWAPSPACE" == "true" ]; then
+		# recreate swap
+		parted -s $CEPHDEV mkpart primary linux-swap $ROOTFS_SIZE""MB $ORIGIN_DISK_SIZE""MB
+
+		CMD_ERR=`mkswap $CEPHDEV""p2 2>&1`
+		if [ "$?" != 0 ]; then
+			CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+			openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Could not create swap space on $CEPHDEV - $CMD_ERR!"
+		fi
+		sync
+		sleep 2
+	fi
+
+	FIRST_PARTITION=$CEPHDEV""p1
+
+	# filesystem resize
+	if [ -e $FIRST_PARTITION ]; then
+			PARTITION_TYPE=`fdisk -l $CEPHDEV | grep ^$CEPHDEV | head -n1 | sed -e "s#\*##g" | awk '{ print $5 }'`
+			case "$PARTITION_TYPE" in
+					83)
+						e2fsck -y $FIRST_PARTITION
+						openqrm_post_event 0 "$CEPHDEV" 5 "openqrm-kvm" "Resizing Linux filesystem of volume $CEPHDEV."
+						CMD_ERR=`resize2fs -f -p $FIRST_PARTITION 2>&1`
+						if [ "$?" == 0 ]; then
+							openqrm_post_event 0 "kvm_resize_fs" 5 "openqrm-kvm" "Successfully resized volume $CEPHDEV."
+						else
+							CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+							openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Errors during resizing volume $CEPHDEV! $CMD_ERR"
+							if ! e2fsck -fy $FIRST_PARTITION; then
+								openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Errors on filesystem of volume $CEPHDEV!"
+							fi
+						fi
+						e2fsck -fy $FIRST_PARTITION
+						;;
+					7)
+						VOLUME_SIZE_PARAM="-s $ROOTFS_SIZE""M"
+						openqrm_post_event 0 "$CEPHDEV" 5 "openqrm-kvm" "Resizing Windows filesystem of volume $CEPHDEV to $ROOTFS_SIZE MB."
+						CMD_ERR=`ntfsresize $VOLUME_SIZE_PARAM -b -f $FIRST_PARTITION 2>&1`
+						if [ "$?" == 0 ]; then
+							openqrm_post_event 0 "kvm_resize_fs" 5 "openqrm-kvm" "Successfully resized volume $CEPHDEV to $ROOTFS_SIZE MB."
+						else
+							CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+							openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Errors during resizing volume $CEPHDEV! $CMD_ERR"
+						fi
+						;;
+					*)
+						openqrm_post_event 0 "kvm_resize_fs" 2 "openqrm-kvm" "Could not find out filesystem type of volume $CEPHDEV. Not resizing."
+						;;
+			esac
+	fi
+	sync
+	sleep 2
+
+
+	# unmap
+	CMD_ERR=`rbd unmap $CEPH_VOLUME --pool $CEPH_POOL 2>&1`
+	CMD_ERR=`rbd unmap $CEPHDEV 2>&1`
+	if [ "$?" != 0 ]; then
+		CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+		openqrm_post_event 0 "resize" 3 "openqrm-kvm" "Error unmapping rbd volume rbd:$CEPH_POOL/$CEPH_VOLUME! $CMD_ERR"
+
+		openqrm_lock_queue release kvm $LOCK_TIME
+		trap '' EXIT
+
+		exit 1
+	fi
+
+
+	return 0
+
+}
+
+
+
+# translates ceph df output in MB (can be M, G, T)
+function ceph_inmb()  {
+        local CNUM=$1
+        if echo $CNUM | grep M 1>/dev/null; then
+                COUTPUT=`echo $CNUM | sed -e "s/MiB//g"`
+                COUTPUT=$(echo $COUTPUT | cut -d'.' -f1)
+        elif echo $CNUM | grep G 1>/dev/null; then
+                COUTPUT=`echo $CNUM | sed -e "s/GiB//g"`
+                COUTPUT=$(echo $COUTPUT*1000 | bc | cut -d'.' -f1)
+        elif echo $CNUM | grep T 1>/dev/null; then
+                COUTPUT=`echo $CNUM | sed -e "s/TiB//g"`
+                COUTPUT=$(echo $COUTPUT*1000*1000 | bc | cut -d'.' -f1)
+        else
+                COUTPUT=$CNUM
+        fi
+        echo $COUTPUT
+}
+
+
+
+
+
+
+
+
+
+

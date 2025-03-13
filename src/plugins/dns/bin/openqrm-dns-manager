@@ -1,0 +1,174 @@
+#!/bin/bash
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/include/openqrm-plugin-dns-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/openqrm-plugin-dns.conf
+export LANG=C
+BIND_BACKUP_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/bind/backup"
+DNS_INDB_FILE=`basename $DNS_INDB`
+DNS_REVDB_FILE=`basename $DNS_REVDB`
+
+
+FULL_COMMANDLINE="$0 $@"
+DNS_CMD=$1
+case "$DNS_CMD" in
+	start|stop)
+		APPLIANCE_ID=$2
+		APPLIANCE_NAME=$3
+		APPLIANCE_IP=$4
+		if [ "$APPLIANCE_ID" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "start/stop" 3 "openqrm-dns-manager" "Missing Appliance ID in start/stop hook"
+			# exit good to avoid re-run
+			exit 0
+		fi
+		if [ "$APPLIANCE_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "start/stop" 3 "openqrm-dns-manager" "Missing Name in start/stop hook for Appliance $APPLIANCE_ID"
+			# exit good to avoid re-run
+			exit 0
+		fi
+		if [ "$APPLIANCE_IP" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "start/stop" 5 "openqrm-dns-manager" "Skipping start hook/stop for Appliance $APPLIANCE_ID. Missing IP."
+			# exit good to avoid re-run
+			exit 0
+		fi
+		# get the last byte from the ip for the reverse entry
+		APPLIANCE_LAST_IP_BYTE=`echo $APPLIANCE_IP | cut -d'.' -f 4`
+		if [ "$APPLIANCE_LAST_IP_BYTE" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "start/stop" 3 "openqrm-dns-manager" "Failed to get reverse DNS entry for Appliance $APPLIANCE_ID"
+			# exit good to avoid re-run
+			exit 0
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire dns`
+		trap "openqrm_lock_queue release dns $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		dns_log openqrm-dns-manager "Appliance $APPLIANCE_NAME id $APPLIANCE_ID ip-address $APPLIANCE_IP"
+		# back lastgood state of the zone files
+		TIMESTAMP=`date +%s`
+		mkdir -p $BIND_BACKUP_DIR/$TIMESTAMP
+		cp -a $DNS_INDB $BIND_BACKUP_DIR/$TIMESTAMP/
+		cp -a $DNS_REVDB $BIND_BACKUP_DIR/$TIMESTAMP/
+
+		# stop / remove in any case
+		cat $DNS_INDB | grep -v -w $APPLIANCE_IP > $DNS_INDB.tmp
+		mv -f $DNS_INDB.tmp $DNS_INDB
+		cat $DNS_REVDB | grep -v -w ^$APPLIANCE_LAST_IP_BYTE > $DNS_REVDB.tmp
+		mv -f $DNS_REVDB.tmp $DNS_REVDB
+
+		# start
+		if [ "$DNS_CMD" == "start" ]; then
+			echo "$APPLIANCE_NAME	IN	A	$APPLIANCE_IP" >> $DNS_INDB
+			echo "$APPLIANCE_LAST_IP_BYTE	IN	PTR	$APPLIANCE_NAME.$OPENQRM_SERVER_DOMAIN." >> $DNS_REVDB
+		fi
+
+		# update serial no / regular
+		SERIAL_INDB="`cat $DNS_INDB | grep -i ';.*erial' | awk '{print $1}'`"
+		if [ "$SERIAL_INDB" == "" ]; then
+			openqrm_post_event 0 "start/stop" 3 "openqrm-dns-manager" "Failed to get serial number (regular). Restoring Zones files ($TIMESTAMP)"
+			# restore
+			cp -a $BIND_BACKUP_DIR/$TIMESTAMP/$DNS_INDB_FILE $DNS_INDB
+			cp -a $BIND_BACKUP_DIR/$TIMESTAMP/$DNS_REVDB_FILE $DNS_REVDB
+
+			openqrm_lock_queue release dns $LOCK_TIME
+			trap '' EXIT
+			# exit good to avoid re-run
+			exit 0
+		elif [ "$SERIAL_INDB" -ge 0 ]; then
+			SERIAL_INDB_NEW=$((SERIAL_INDB+1))
+			sed -i -e "s/$SERIAL_INDB.*;.*erial/$SERIAL_INDB_NEW ; Serial/g" $DNS_INDB
+		fi
+		# update serial no / reverse
+		SERIAL_REVDB="`cat $DNS_REVDB | grep -i ';.*erial' | awk '{print $1}'`"
+		if [ "$SERIAL_REVDB" == "" ]; then
+			openqrm_post_event 0 "start/stop" 3 "openqrm-dns-manager" "Failed to get serial number (reverse). Restoring Zones files ($TIMESTAMP)"
+			# restore
+			cp -a $BIND_BACKUP_DIR/$TIMESTAMP/$DNS_INDB_FILE $DNS_INDB
+			cp -a $BIND_BACKUP_DIR/$TIMESTAMP/$DNS_REVDB_FILE $DNS_REVDB
+
+			openqrm_lock_queue release dns $LOCK_TIME
+			trap '' EXIT
+			# exit good to avoid re-run
+			exit 0
+		elif [ "$SERIAL_REVDB" -ge 0 ]; then
+			SERIAL_REVDB_NEW=$((SERIAL_REVDB+1))
+			sed -i -e "s/$SERIAL_REVDB.*;.*erial/$SERIAL_REVDB_NEW ; Serial/g" $DNS_REVDB
+		fi
+
+		# reload dns
+		if ! $DNS_INIT reload; then
+			openqrm_post_event 0 "start/stop" 3 "openqrm-dns-manager" "DNS reload failed. Restoring Zones files ($TIMESTAMP)"
+			# restore
+			cp -a $BIND_BACKUP_DIR/$TIMESTAMP/$DNS_INDB_FILE $DNS_INDB
+			cp -a $BIND_BACKUP_DIR/$TIMESTAMP/$DNS_REVDB_FILE $DNS_REVDB
+			# retry restart again
+			$DNS_INIT stop
+			if ! $DNS_INIT start; then
+				openqrm_post_event 0 "start/stop" 3 "openqrm-dns-manager" "Failed to start DNS! Please recheck the DNS configuration!"
+
+				openqrm_lock_queue release dns $LOCK_TIME
+				trap '' EXIT
+			fi
+
+			openqrm_lock_queue release dns $LOCK_TIME
+			trap '' EXIT
+		fi
+		# restart name service cache daemon if installed
+		if [ -x /etc/init.d/nscd ]; then
+			/etc/init.d/nscd restart
+		fi
+		openqrm_lock_queue release dns $LOCK_TIME
+		trap '' EXIT
+		;;
+	init)
+		LOCK_TIME=`openqrm_lock_queue aquire dns`
+		trap "openqrm_lock_queue release dns $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		dns_log openqrm-dns-manager "Initialysing bind (dns) configuration."
+		$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/init.d/openqrm-plugin-dns init
+
+		openqrm_lock_queue release dns $LOCK_TIME
+		trap '' EXIT
+		;;
+	restart)
+		LOCK_TIME=`openqrm_lock_queue aquire dns`
+		trap "openqrm_lock_queue release dns $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		if ! $DNS_INIT restart; then
+			openqrm_post_event 0 "restart" 3 "openqrm-dns-manager" "Failed to restart DNS! Please recheck the DNS configuration!"
+		fi
+		# restart name service cache daemon if installed
+		if [ -x /etc/init.d/nscd ]; then
+			/etc/init.d/nscd restart
+		fi
+		openqrm_lock_queue release dns $LOCK_TIME
+		trap '' EXIT
+		;;
+	*)
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		dns_log openqrm-dns-manager "Usage: $0 {start|stop|init} "
+		exit 1
+		;;
+esac

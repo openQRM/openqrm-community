@@ -1,0 +1,135 @@
+#!/bin/bash
+# init script for the openQRM tmpfs-storage-plugin
+#
+# This file is part of openQRM.
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/tmpfs-storage/include/openqrm-plugin-tmpfs-storage-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/tmpfs-storage/etc/openqrm-plugin-tmpfs-storage.conf
+
+# get the ip config
+openqrm_server_get_config
+export resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+export LANG=C
+# define wget to use with https
+if [ "$OPENQRM_WEB_PROTOCOL" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate"
+fi
+
+
+function openqrm_plugin_tmpfs_storage_start() {
+	openqrm_plugin_tmpfs_storage_stop 1>/dev/null 2>&1
+	echo "Starting the openQRM tmpfs-storage-plugin"
+	touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/tmpfs-storage/.running
+}
+
+
+function openqrm_plugin_tmpfs_storage_stop() {
+	echo "Stopping the openQRM tmpfs-storage-plugin"
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/tmpfs-storage/.running
+}
+
+function openqrm_plugin_tmpfs_storage_uninstall() {
+	local USERNAME=$1
+	local PASSWORD=$2
+	if [ "$USERNAME" == "" ] && [ "$PASSWORD" == "" ]; then
+		echo -n "tmpfs-storage: Please give a username to uninstall the plugin : "
+		read USERNAME
+		echo
+		echo -n "tmpfs-storage: Please give the password for user $USERNAME : "
+		read PASSWORD
+		echo
+	fi
+	echo "Uninstalling the openQRM tmpfs-storage-plugin"
+	openqrm_plugin_tmpfs_storage_stop
+	# drop the table
+	if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$USERNAME --http-password=$PASSWORD "$OPENQRM_WEB_PROTOCOL://$resource_openqrmserver/openqrm/base/plugins/tmpfs-storage/tmpfs-storage-action.php?tmpfs_storage_command=uninstall"; then
+		tmpfs-storage_log init "ERROR: Could not drop the tmpfs-storage-plugin tables in the database!"
+		return 1
+	fi
+	openqrm_server_remove_deployment_type $USERNAME $PASSWORD tmpfs-deployment
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/tmpfs-storage
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.tmpfs-deployment
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.tmpfs-deployment.php
+
+}
+
+function openqrm_plugin_tmpfs_storage_init() {
+	local USERNAME=$1
+	local PASSWORD=$2
+	if [ "$USERNAME" == "" ] && [ "$PASSWORD" == "" ]; then
+		echo -n "tmpfs-storage: Please give a username to init the plugin : "
+		read USERNAME
+		echo
+		echo -n "tmpfs-storage: Please give the password for user $USERNAME : "
+		read PASSWORD
+		echo
+	fi
+	echo "Initializing the openQRM tmpfs-storage-plugin"
+	openqrm_server_add_deployment_type $USERNAME $PASSWORD tmpfs-deployment tmpfs-deployment "Tmpfs-root deployment" tmpfs-storage "temporary In-Memory Storage"
+	# linking the web dir
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/tmpfs-storage/web $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/tmpfs-storage
+	# linking the root mount hook
+	
+	chmod +x $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/tmpfs-storage/web/root-mount.tmpfs-deployment
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.tmpfs-deployment
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/tmpfs-storage/web/root-mount.tmpfs-deployment $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.tmpfs-deployment
+	
+	# linking the default image-parameters
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/tmpfs-storage/web/image.tmpfs-deployment.php $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.tmpfs-deployment.php
+
+	# creating the table
+	if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$USERNAME --http-password=$PASSWORD "$OPENQRM_WEB_PROTOCOL://$resource_openqrmserver/openqrm/base/plugins/tmpfs-storage/tmpfs-storage-action.php?tmpfs_storage_command=init"; then
+		tmpfs-storage_log init "ERROR: Could not create the tmpfs-storage-plugin tables in the database!"
+		return 1
+	fi
+
+}
+
+USER=$2
+PASS=$3
+
+case "$1" in
+	start)
+		openqrm_plugin_tmpfs_storage_start
+		;;
+	stop)
+		openqrm_plugin_tmpfs_storage_stop
+		;;
+	restart)
+		openqrm_plugin_tmpfs_storage_stop
+		sleep 1
+		openqrm_plugin_tmpfs_storage_start
+		;;
+	init)
+		openqrm_plugin_tmpfs_storage_init $USER $PASS
+		;;
+	uninstall)
+		openqrm_plugin_tmpfs_storage_uninstall $USER $PASS
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|init|uninstall}"
+		exit 1
+
+esac
+exit $?
+
+
+
+

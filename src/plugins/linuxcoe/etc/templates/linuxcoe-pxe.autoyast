@@ -1,0 +1,9 @@
+default linux
+
+label linux
+kernel boot/@@OPENQRM_BOOTIMAGE_KERNEL@@
+append ramdisk_size=65536 initrd=boot/@@OPENQRM_BOOTIMAGE_INITRD@@ acpi=off apm=off autoyast=http://@@OPENQRM_SERVER_IP_ADDRESS@@/openqrm/boot-service/lcoe/autoyast.@@OPENQRM_RESOURCE_ID@@-@@LINUXCOE_PROFILE_NAME@@.xml info=http://@@OPENQRM_SERVER_IP_ADDRESS@@/openqrm/boot-service/lcoe/info.@@OPENQRM_RESOURCE_ID@@-@@LINUXCOE_PROFILE_NAME@@ id=@@OPENQRM_RESOURCE_ID@@ openqrm=@@OPENQRM_SERVER_IPADDRESS@@ selinux=0
+ipappend 3
+
+label local
+LOCALBOOT 0

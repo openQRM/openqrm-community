@@ -1,0 +1,261 @@
+#!/bin/bash
+# init script for the openQRM dns plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/include/openqrm-plugin-dns-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/openqrm-plugin-dns.conf
+
+function openqrm_plugin_dns_start() {
+	echo "Starting the openQRM dns-plugin"
+	openqrm_server_get_config
+	openqrm_plugin_dns_stop 1>/dev/null 2>&1
+	if $DNS_INIT start; then
+		# do we want to adjust the resolv.conf ?
+		if [ "$OPENQRM_SERVER_ADJUST_RESOLV_CONF" == "yes" ]; then
+			# backup
+			if [ ! -f /etc/resolv.conf.openqrm-dns-plugin.backup ]; then
+				cp -f /etc/resolv.conf /etc/resolv.conf.openqrm-dns-plugin.backup
+			fi
+			# create new resolv.conf
+			echo "domain $OPENQRM_SERVER_DOMAIN" > /etc/resolv.conf
+			echo "search $OPENQRM_SERVER_DOMAIN $OPENQRM_SERVER_SEARCH_DOMAIN" >> /etc/resolv.conf
+			echo "nameserver $OPENQRM_SERVER_IP_ADDRESS" >> /etc/resolv.conf
+		fi
+	else
+		openqrm_post_event 0 "start" 3 "openqrm-plugin-dns" "Failed to start DNS! Please recheck the DNS configuration!"
+		return 1
+	fi
+
+	touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/dns/.running
+	return $RET
+
+}
+
+
+function openqrm_plugin_dns_stop() {
+	echo "Stopping the openQRM dns-plugin"
+	$DNS_INIT stop
+	# do we want to adjust the resolv.conf ?
+	if [ "$OPENQRM_SERVER_ADJUST_RESOLV_CONF" == "yes" ]; then
+			# restore
+			if [ -f /etc/resolv.conf.openqrm-dns-plugin.backup ]; then
+				cp -f /etc/resolv.conf.openqrm-dns-plugin.backup /etc/resolv.conf
+			fi
+	fi
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/dns/.running
+	return 0
+}
+
+
+function openqrm_plugin_dns_init() {
+	echo "Initializing the openQRM dns-plugin"
+	openqrm_server_get_config
+	OPENQRM_SERVER_IP_LAST_BYTE=`echo $OPENQRM_SERVER_IP_ADDRESS | cut -d'.' -f 4`
+	OPENQRM_SERVER_IP_FIRST_BYTE=`echo $OPENQRM_SERVER_IP_ADDRESS | cut -d'.' -f1`
+	OPENQRM_SERVER_IP_SECOND_BYTE=`echo $OPENQRM_SERVER_IP_ADDRESS | cut -d'.' -f2`
+	OPENQRM_SERVER_IP_THIRD_BYTE=`echo $OPENQRM_SERVER_IP_ADDRESS | cut -d'.' -f3`
+	OPENQRM_SERVER_IP_FIRSTS_BYTES_REV="$OPENQRM_SERVER_IP_THIRD_BYTE.$OPENQRM_SERVER_IP_SECOND_BYTE.$OPENQRM_SERVER_IP_FIRST_BYTE"
+
+	# take backups of an eventual existing config
+	if [ -f /etc/bind/named.conf.local ] && [ ! -f /etc/bind/named.conf.local.openqrm-dns-plugin.backup ]; then
+		cp -f /etc/bind/named.conf.local /etc/bind/named.conf.local.openqrm-dns-plugin.backup
+	fi
+
+	# preparing bind config
+	mkdir -p /etc/bind/zones/
+	mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/bind/zones
+
+	# named.conf local
+	cat $DNS_NAMED_LOCAL_TEMPLATE |	\
+		sed -e "s/@@OPENQRM_SERVER_IP_FIRSTS_BYTES_REV@@/$OPENQRM_SERVER_IP_FIRSTS_BYTES_REV/g" |	\
+			sed -e "s/@@OPENQRM_SERVER_DOMAIN@@/$OPENQRM_SERVER_DOMAIN/g" > $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/bind/named.conf.local
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/bind/named.conf.local /etc/bind/named.conf.local
+
+	# in db
+	cat $DNS_INDB_TEMPLATE |	\
+		sed -e "s/@@OPENQRM_SERVER_DOMAIN@@/$OPENQRM_SERVER_DOMAIN/g" |	\
+		sed -e "s/@@OPENQRM_SERVER_IP_ADDRESS@@/$OPENQRM_SERVER_IP_ADDRESS/g" |	\
+		sed -e "s/@@OPENQRM_SERVER_IP_LAST_BYTE@@/$OPENQRM_SERVER_IP_LAST_BYTE/g" > $DNS_INDB
+	DNS_INDB_FSNAME=`basename $DNS_INDB`
+	ln -sf $DNS_INDB /etc/bind/zones/$DNS_INDB_FSNAME
+
+	# rev db
+	cat $DNS_REVDB_TEMPLATE |	\
+		sed -e "s/@@OPENQRM_SERVER_DOMAIN@@/$OPENQRM_SERVER_DOMAIN/g" |	\
+		sed -e "s/@@OPENQRM_SERVER_IP_ADDRESS@@/$OPENQRM_SERVER_IP_ADDRESS/g" |	\
+		sed -e "s/@@OPENQRM_SERVER_IP_LAST_BYTE@@/$OPENQRM_SERVER_IP_LAST_BYTE/g" > $DNS_REVDB
+	DNS_REVDB_FSNAME=`basename $DNS_REVDB`
+	ln -sf $DNS_REVDB /etc/bind/zones/$DNS_REVDB_FSNAME
+
+	# check if we have forwarders already
+	NAMED_OPTIONS_EXIST=true
+	if [ -f /etc/redhat-release ]; then
+		touch /etc/bind/named.conf.options
+		NAMED_OPTIONS_EXIST=false
+	fi
+	CONFIGURED_DNS_FORWARDERS=`cat /etc/bind/named.conf.options | grep -v "//" | grep -A2 forwarders | grep -v forwarders | grep -v "}" | head -n1 | awk {' print $1 '} | sed -e "s/;//g"`
+	if [ "$CONFIGURED_DNS_FORWARDERS" != "" ] && openqrm_validate_ip $CONFIGURED_DNS_FORWARDERS; then
+		echo "NOTICE: Found already configured dns-forwarders $CONFIGURED_DNS_FORWARDERS"
+	else
+		if [ -f /etc/resolv.conf.openqrm-dns-plugin.backup ]; then
+			CHECK_FOR_FORWARDERS="/etc/resolv.conf.openqrm-dns-plugin.backup"
+		else
+			CHECK_FOR_FORWARDERS="/etc/resolv.conf"
+		fi
+		DNS_FORWARDER=`cat $CHECK_FOR_FORWARDERS | grep -v ^# | grep nameserver | head -n1 | awk {' print $2 '}`
+		if [ "$DNS_FORWARDER" != "" ]  && openqrm_validate_ip $DNS_FORWARDER; then
+			echo "NOTICE: Configuring dns-forwarder to $DNS_FORWARDER"
+			if [ ! -f /etc/bind/named.conf.options.openqrm-dns-plugin.backup ]; then
+				cp -f /etc/bind/named.conf.options /etc/bind/named.conf.options.openqrm-dns-plugin.backup
+			fi
+			rm -f /etc/bind/named.conf.options.new
+			if [ "$NAMED_OPTIONS_EXIST" == "false" ]; then
+				echo "options {" >> /etc/bind/named.conf.options.new
+			fi
+			cat /etc/bind/named.conf.options | grep -v "^};" >> /etc/bind/named.conf.options.new
+			echo "		forwarders {" >> /etc/bind/named.conf.options.new
+			echo "			$DNS_FORWARDER;" >> /etc/bind/named.conf.options.new
+			echo "		};" >> /etc/bind/named.conf.options.new
+			echo "};" >> /etc/bind/named.conf.options.new
+			mv -f /etc/bind/named.conf.options.new /etc/bind/named.conf.options
+		else
+			openqrm_post_event 0 "init" 3 "openqrm-plugin-dns" "Could not find out any dns-forwarders! Please configure manually in /etc/bind/named.conf.options"
+		fi
+	fi
+	# link the named.conf file to /etc on redhat based systems
+	if [ -f /etc/redhat-release ]; then
+		if [ -f /etc/named.conf ]; then
+			mv -f /etc/named.conf /etc/named.conf.openqrm-backup
+		fi
+		ln -sf /etc/bind/named.conf.local /etc/named.conf
+		# include options
+		echo 'include "/etc/bind/named.conf.options";' >> /etc/bind/named.conf.local
+	elif [ -f /etc/SuSE-release ]; then
+		# chroot is not supported yet
+		sed -i -e 's/NAMED_RUN_CHROOTED.*/NAMED_RUN_CHROOTED="no"/g' /etc/sysconfig/named
+		if [ -f /etc/named.conf.include ]; then
+			/bin/cp -f /etc/named.conf.include /etc/named.conf.include.openqrm-backup
+		fi
+cat >> /etc/named.conf.include << EOF
+include "/etc/bind/named.conf.local";
+EOF
+	fi
+
+	# enable apparmor if needed
+	if [ -f /etc/apparmor.d/usr.sbin.named ]; then
+		if ! grep openQRM /etc/apparmor.d/usr.sbin.named 1>/dev/null; then
+			sed -i -e "s#^}##g" /etc/apparmor.d/usr.sbin.named
+			echo "  # openQRM" >> /etc/apparmor.d/usr.sbin.named
+			echo "  $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/** rw," >> /etc/apparmor.d/usr.sbin.named
+			if [ -d /etc/openqrm/plugins/dhcpd/ ]; then
+				echo "  /etc/openqrm/plugins/dns/** rw," >> /etc/apparmor.d/usr.sbin.named
+			fi
+			echo "}" >> /etc/apparmor.d/usr.sbin.named
+			echo >> /etc/apparmor.d/usr.sbin.named
+			if [ -x "/etc/init.d/apparmor" ]; then
+				if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+					invoke-rc.d apparmor reload
+				else
+					/etc/init.d/apparmor reload
+				fi
+			fi
+		fi
+	fi
+
+	# linking the web dir
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/web $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/dns
+
+	return 0
+}
+
+
+function openqrm_plugin_dns_uninstall() {
+	echo "Uninstalling the openQRM dns-plugin"
+	openqrm_plugin_dns_stop
+
+	# cleaning up + restore bind config
+	rm -f /etc/bind/zones/$OPENQRM_SERVER_DOMAIN.*.db
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/dns/etc/bind/zones/$OPENQRM_SERVER_DOMAIN-*.db
+
+	# restore eventual existing config
+	if [ -f /etc/bind/named.conf.local.openqrm-dns-plugin.backup ]; then
+		rm -f /etc/bind/named.conf.local
+		cp -f /etc/bind/named.conf.local.openqrm-dns-plugin.backup /etc/bind/named.conf.local
+	fi
+	if [ -f /etc/bind/named.conf.options.openqrm-dns-plugin.backup ]; then
+		cp -f /etc/bind/named.conf.options.openqrm-dns-plugin.backup /etc/bind/named.conf.options
+	fi
+
+	# unlink the named.conf file to /etc on redhat based systems
+	if [ -f /etc/redhat-release ]; then
+		if [ -f /etc/named.conf.openqrm-backup ]; then
+			mv -f /etc/named.conf.openqrm-backup /etc/named.conf
+		fi
+		rm -f /etc/bind/named.conf.options
+	elif [ -f /etc/SuSE-release ]; then
+		if [ -f /etc/named.conf.include.openqrm-backup ]; then
+			/bin/cp -f /etc/named.conf.include.openqrm-backup /etc/named.conf.include
+		fi
+	fi
+
+	# remove apparmor setup
+	if [ -f /etc/apparmor.d/usr.sbin.named ]; then
+		sed -i -e "s#.*openQRM.*##g" /etc/apparmor.d/usr.sbin.named
+		sed -i -e "s#.*openqrm.*##g" /etc/apparmor.d/usr.sbin.named
+		if [ -x "/etc/init.d/apparmor" ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d apparmor reload
+			else
+				/etc/init.d/apparmor reload
+			fi
+		fi
+	fi
+
+	# unlinking the web dir
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/dns
+}
+
+
+
+case "$1" in
+	start)
+		openqrm_plugin_dns_start
+		;;
+	stop)
+		openqrm_plugin_dns_stop
+		;;
+	restart)
+		openqrm_plugin_dns_stop
+		sleep 1
+		openqrm_plugin_dns_start
+		;;
+	init)
+		openqrm_plugin_dns_init
+		;;
+	uninstall)
+		openqrm_plugin_dns_uninstall
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|init|uninstall}"
+		exit 1
+
+esac
+exit $?
+
+

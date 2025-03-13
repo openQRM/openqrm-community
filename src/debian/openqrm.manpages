@@ -1,0 +1,9 @@
+debian/man/openqrm-cmd-queue.1
+debian/man/openqrm-cmd.1
+debian/man/openqrm-create-plugin.1
+debian/man/openqrm-crypt.1
+debian/man/openqrm-exec.1
+debian/man/openqrm-execd.1
+debian/man/openqrm-monitord.1
+debian/man/openqrm-postencode.1
+debian/man/openqrm.1

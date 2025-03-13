@@ -1,0 +1,51 @@
+#!/bin/bash
+# this is a hook function for the kernel-creation phase
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+function lvm_storage_kernel_hook() {
+
+	local KERNEL_NAME=$1
+	local KERNEL_VERSION=$2
+	local KERNEL_LOCATION=$3
+	local KERNEL_TYPE=$4
+
+	echo "lvm-storage-plugin: Running lvm_storage_kernel_hook $KERNEL_NAME $KERNEL_VERSION $KERNEL_LOCATION $KERNEL_TYPE"
+	echo "lvm-storage-plugin: Running lvm_storage_kernel_hook $KERNEL_NAME $KERNEL_VERSION $KERNEL_LOCATION $KERNEL_TYPE" | logger
+
+	# try to find the iscsid + iscsiadm util fitting to the created kernel
+	if [ -x "$KERNEL_LOCATION/sbin/iscsid" ]; then
+		cp -a $KERNEL_LOCATION/sbin/iscsid $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/iscsid.$KERNEL_NAME
+		echo "lvm-storage-plugin: Found iscsid at $KERNEL_LOCATION/sbin/iscsid. Coping to $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/iscsid.$KERNEL_NAME"
+		echo "lvm-storage-plugin: Found iscsid at $KERNEL_LOCATION/sbin/iscsid. Coping to $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/iscsid.$KERNEL_NAME" | logger
+	fi
+	if [ -x "$KERNEL_LOCATION/usr/sbin/iscsid" ]; then
+		cp -a $KERNEL_LOCATION/usr/sbin/iscsid $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/iscsid.$KERNEL_NAME
+		echo "lvm-storage-plugin: Found iscsid at $KERNEL_LOCATION/usr/sbin/iscsid. Coping to $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/iscsid.$KERNEL_NAME"
+		echo "lvm-storage-plugin: Found iscsid at $KERNEL_LOCATION/usr/sbin/iscsid. Coping to $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/iscsid.$KERNEL_NAME" | logger
+	fi
+	if [ -x "$KERNEL_LOCATION/sbin/iscsiadm" ]; then
+		cp -a $KERNEL_LOCATION/sbin/iscsiadm $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/iscsiadm.$KERNEL_NAME
+		echo "lvm-storage-plugin: Found iscsiadm at $KERNEL_LOCATION/sbin/iscsiadm. Coping to $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/iscsiadm.$KERNEL_NAME"
+		echo "lvm-storage-plugin: Found iscsiadm at $KERNEL_LOCATION/sbin/iscsiadm. Coping to $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/iscsiadm.$KERNEL_NAME" | logger
+	fi
+	if [ -x "$KERNEL_LOCATION/usr/bin/iscsiadm" ]; then
+		cp -a $KERNEL_LOCATION/usr/bin/iscsiadm $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/iscsiadm.$KERNEL_NAME
+		echo "lvm-storage-plugin: Found iscsiadm at $KERNEL_LOCATION/usr/bin/iscsiadm. Coping to $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/iscsiadm.$KERNEL_NAME"
+		echo "lvm-storage-plugin: Found iscsiadm at $KERNEL_LOCATION/usr/bin/iscsiadm. Coping to $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/iscsiadm.$KERNEL_NAME" | logger
+	fi
+
+}
+

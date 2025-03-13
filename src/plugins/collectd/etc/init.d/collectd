@@ -1,0 +1,128 @@
+#!/bin/bash
+# this is the boot-service init script for the collectd resources
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+# for including the package functions
+export OPENQRM_SOURCE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/"
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/include/openqrm-plugin-collectd-functions
+. $OPENQRM_RESOURCE_PARAMETER_FILE
+OPENQRM_SERVER_IP=$resource_openqrmserver
+
+COLLECTD_CONF="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/etc/collectd.conf"
+# for the clients we use the regular data dir since they are sending
+# their stats to the server anyway
+COLLECTD_DATA_DIR="/var/lib/collectd/rdd"
+
+# do not run on idle resources
+if [ "$resource_image" == "idle" ]; then
+	exit 0
+fi
+
+# set the hostname early :)
+hostname $appliance_name
+
+# also do not run before the real init of the rootfs
+# if we have this file /etc/initrd-devices.conf we are still in the initrd
+if [ -f /etc/initrd-devices.conf ]; then
+	exit 0
+fi
+if [ -f /etc/debian_version ]; then
+	echo "$appliance_name" > /etc/hostname
+elif [ -f /etc/redhat-release ]; then
+	sed -i -e "s#HOSTNAME=.*#HOSTNAME=$appliance_name#g" /etc/sysconfig/network
+elif [ -f /etc/SuSE-release ]; then
+	echo "$appliance_name" > /etc/HOSTNAME
+fi
+
+
+function collectd_start() {
+	echo "Starting the openQRM collectd-plugin"
+	collectd_stop 1>/dev/null 2>&1
+	if ! openqrm_full_fill_os_dependency collectd collectd; then
+		return 0
+	fi
+	openqrm_chkconfig del collectd
+	collectd_stop 1>/dev/null 2>&1
+
+	# prepare collectd client config
+	mkdir -p $COLLECTD_DATA_DIR
+	cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/etc/templates/openqrm-collectd.conf | \
+		sed -e "s/@@MODE@@/Server/g" |  \
+		sed -e "s#@@COLLECTD_DATA_DIR@@#$COLLECTD_DATA_DIR#g" |  \
+		sed -e "s#@@OPENQRM_HOSTNAME@@#$appliance_name#g" |  \
+		sed -e "s/@@OPENQRM_SERVER_IP_ADDRESS@@/$resource_openqrmserver/g" > $COLLECTD_CONF
+
+	# start collectd
+	if [ -x /usr/sbin/collectdmon ]; then
+		if ! /usr/sbin/collectdmon -P /var/run/collectdmon.pid -- -C $COLLECTD_CONF 1>/dev/null 2>&1; then
+			echo "ERROR: Could not start collectd"
+		fi
+	elif [ -x /usr/sbin/collectd ]; then
+		if ! /usr/sbin/collectd -C $COLLECTD_CONF; then
+			echo "ERROR: Could not start collectd"
+		fi
+	fi
+}
+
+
+function collectd_stop() {
+	echo "Stopping the openQRM collectd-plugin"
+	if [ -x /etc/init.d/collectd ]; then
+		/etc/init.d/collectd stop
+	fi
+	kill `ps ax | grep collectd.conf | grep -v grep | awk {' print $1 '}` 2>/dev/null
+	# be sure it is gone
+	kill -9 `ps ax | grep collectd.conf | grep -v grep | awk {' print $1 '}` 2>/dev/null
+}
+
+
+
+
+
+case "$1" in
+	start)
+		collectd_start
+		;;
+	stop)
+		collectd_stop
+		;;
+	restart)
+		collectd_stop
+		sleep 1
+		collectd_start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+
+esac
+exit $?
+
+
+
+
+
+
+
+
+
+
+
+
+

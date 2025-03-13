@@ -1,0 +1,34 @@
+#!/bin/bash
+# this is the functions file for the linuxcoe-plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+LINUXCOE_PROFILE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/profiles"
+LINUXCOE_SYSTEMDESIGNER_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/linuxcoe-sd/var/cache/linuxcoe-sd/scratchmonkey/systemdesigner"
+LINUXCOE_ISO_DIRECTORY="/linuxcoe"
+NFSEXPORTS="/etc/exports"
+################ common linuxcoe functions
+
+# logs for linuxcoe
+function linuxcoe_log() {
+	local COMPONENT=$1
+	shift
+	local MESSAGE=$@
+	echo "linuxcoe plug-in" "$COMPONENT : $MESSAGE"
+	logger -i -t "linuxcoe plug-in" "$COMPONENT : $MESSAGE"
+}
+
+
+################ linuxcoe functions
+

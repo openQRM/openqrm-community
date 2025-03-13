@@ -1,0 +1,119 @@
+#!/bin/bash
+# init script for the openQRM local-server-plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/local-server/include/openqrm-plugin-local-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/local-server/etc/openqrm-plugin-local-server.conf
+openqrm_server_get_config
+
+
+function openqrm_plugin_local_server_start() {
+	echo "Starting the openQRM local-server-plugin"
+	touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/local-server/.running
+}
+
+
+function openqrm_plugin_local_server_stop() {
+	echo "Stopping the openQRM local-server-plugin"
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/local-server/.running
+}
+
+function openqrm_plugin_local_server_uninstall() {
+	local USERNAME=$1
+	local PASSWORD=$2
+	if [ "$USERNAME" == "" ] && [ "$PASSWORD" == "" ]; then
+		echo -n "local-server: Please give a username to uninstall the plugin : "
+		read USERNAME
+		echo
+		echo -n "local-server: Please give the password for user $USERNAME : "
+		read PASSWORD
+		echo
+	fi
+	echo "Uninstalling the openQRM local-server-plugin"
+	openqrm_plugin_local_server_stop
+	openqrm_server_remove_deployment_type $USERNAME $PASSWORD local-server
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/local-server
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.local-server
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/openqrm-functions
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/openqrm-package-functions
+
+}
+
+function openqrm_plugin_local_server_init() {
+	local USERNAME=$1
+	local PASSWORD=$2
+	if [ "$USERNAME" == "" ] && [ "$PASSWORD" == "" ]; then
+		echo -n "local-server: Please give a username to init the plugin : "
+		read USERNAME
+		echo
+		echo -n "local-server: Please give the password for user $USERNAME : "
+		read PASSWORD
+		echo
+	fi
+	echo "Initializing the openQRM local-server-plugin"
+	openqrm_server_add_deployment_type $USERNAME $PASSWORD local-server local-server "Local-installed server" local-server "Local-installed server"
+	# linking the web dir
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/local-server/web $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/local-server
+	chmod +x $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/local-server/web/root-mount.local-server
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/local-server/web/root-mount.local-server $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.local-server
+	# create openqrm-local-vm-client
+	mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/local-server/web/local-vm
+	cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/local-server/etc/templates/openqrm-local-vm-client |	\
+		sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" |	\
+		sed -e "s#@@OPENQRM_SERVER_IP_ADDRESS@@#$OPENQRM_SERVER_IP_ADDRESS#g" |	\
+		sed -e "s#@@OPENQRM_WEB_PROTOCOL@@#$OPENQRM_WEB_PROTOCOL#g" > $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/local-server/web/local-vm/openqrm-local-vm-client
+	chmod +x $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/local-server/web/local-vm/openqrm-local-vm-client
+	# linking function files to enable downloading them
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/openqrm-functions
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/openqrm-package-functions
+
+}
+
+USER=$2
+PASS=$3
+
+case "$1" in
+	start)
+		openqrm_plugin_local_server_start
+		;;
+	stop)
+		openqrm_plugin_local_server_stop
+		;;
+	restart)
+		openqrm_plugin_local_server_stop
+		sleep 1
+		openqrm_plugin_local_server_start
+		;;
+	init)
+		openqrm_plugin_local_server_init $USER $PASS
+		;;
+	uninstall)
+		openqrm_plugin_local_server_uninstall $USER $PASS
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|init|uninstall}"
+		exit 1
+
+esac
+exit $?
+
+
+
+

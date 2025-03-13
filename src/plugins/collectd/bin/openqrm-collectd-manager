@@ -1,0 +1,116 @@
+#!/bin/bash
+# this script automatically manages collectd
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+# unblock starting command queue early for non-blocking + ui commands
+COLLECTD_MANAGER_COMMAND=$1
+if [ "$COLLECTD_MANAGER_COMMAND" == "remove" ]; then
+	openqrm_unblock_starting_queue $@
+	NON_BLOCKING=true
+fi
+
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/include/openqrm-plugin-collectd-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/etc/openqrm-plugin-collectd.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+openqrm_server_get_config
+export resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+export LANG=C
+CURRENT_DIR=`pwd`
+
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+# the collectd plugin depends on dns working so it needs the dns plugin available+enabled
+# collectd autosigning needs a domain name. This we get from the dns-plugin config
+if [ ! -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/openqrm-plugin-dns.conf ]; then
+	openqrm_post_event 0 "collectd-plugin" 3 "collectd-plugin" "The openQRM collectd-plugin depends on the dns-plugin. Please enable the dns-plugin first!"
+	exit 1
+fi
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/openqrm-plugin-dns.conf
+
+function collectd_manager_usage() {
+	echo "Usage : $0 graph"
+	echo "      : $0 remove <appliance-name> [now/later]"
+	echo ""
+	echo "Optional parameters:"
+	echo "             [--openqrm-ui-user <username>]"
+	echo "             [--openqrm-internal-cmd <true/false>]"
+	echo "             [--openqrm-cmd-mode <regular/background/fork>]"
+	exit 1
+}
+
+
+COLLECTD_MANAGER_COMMAND=$1
+# main
+case "$COLLECTD_MANAGER_COMMAND" in 
+	graph)
+		# running by crond
+		LOCK_TIME=`openqrm_lock_queue aquire collectd-graph`
+		trap "openqrm_lock_queue release collectd-graph $LOCK_TIME" EXIT
+
+		for APPLIANCE_NAME in `ls $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/data/`; do
+			echo "Creating graphs for Appliance $APPLIANCE_NAME"
+			rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/web/graphs/$APPLIANCE_NAME.work
+			mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/web/graphs/$APPLIANCE_NAME.work/data-snapshot/
+			cp -a `find $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/data/$APPLIANCE_NAME/ -name *.rrd` $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/web/graphs/$APPLIANCE_NAME.work/data-snapshot/
+			cd $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/web/graphs/$APPLIANCE_NAME.work
+			nice -n 19 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/bin/collectd2html.pl --data-dir=$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/web/graphs/$APPLIANCE_NAME.work/data-snapshot/ --host=$APPLIANCE_NAME | logger
+			ln -sf $APPLIANCE_NAME.html index.html
+			rm -rf data-snapshot/
+			cd $CURRENT_DIR
+			rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/web/graphs/$APPLIANCE_NAME
+			mv $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/web/graphs/$APPLIANCE_NAME.work $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/web/graphs/$APPLIANCE_NAME
+		done
+		openqrm_lock_queue release collectd-graph $LOCK_TIME
+		trap '' EXIT
+		;;
+	remove)
+		# running from the engine
+		APPLIANCE_NAME=$2
+		WHEN=$3
+		if [ "$APPLIANCE_NAME" == "" ]; then
+			exit
+		fi
+		if [ "$WHEN" == "later" ]; then
+			# wait until the appliance is fully stopped
+			sleep 60
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire collectd`
+		trap "openqrm_lock_queue release collectd $LOCK_TIME" EXIT
+
+		# remove data
+		rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/data/$APPLIANCE_NAME
+		# remove graphs
+		rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/collectd/web/graphs/$APPLIANCE_NAME
+
+		openqrm_lock_queue release collectd $LOCK_TIME
+		trap '' EXIT
+		;;
+	*)
+		echo "ERROR: Free commandline arguments are not allowed"
+		collectd_manager_usage
+		exit 6
+		;;
+esac
+

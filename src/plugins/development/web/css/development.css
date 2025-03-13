@@ -1,0 +1,274 @@
+.htmlobject_td.edit,
+.htmlobject_td.lang,
+.htmlobject_td.docblock,
+.htmlobject_td.template,
+.htmlobject_td.api,
+.htmlobject_td.hooks,
+.htmlobject_td.js,
+.htmlobject_td.css {
+	text-align: center;
+	vertical-align: top;
+	width: 30px;
+}
+
+#form .legend {
+	float: right;
+	margin: 0px 16px 0 0;
+	box-shadow: 3px 3px 8px rgba(0, 0, 0, 0.3);
+	border: 1px solid #ccc;
+	padding: 8px 10px 5px 10px;
+	background: white;
+}
+#form .legend.hooks h4 {
+	margin: 0 0 5px 0;
+}
+#form .legend.hooks {
+	width: 500px;
+}
+#form .legend.hooks .available {
+	background: #eee;
+	padding: 5px;
+	border: 1px solid #bbb;
+	margin: 0 0 5px 0;
+}
+#form .legend.hooks .available h4 {
+	margin: 0 0 5px 0;
+	border: 0px none;
+	font-weight: bold;
+}
+
+
+#form .legend.hooks .hookexplain {
+	margin: 0 0 10px 5px;
+}
+
+#form .phpinfobox {
+	height: 180px;
+	overflow: scroll;
+	white-space: nowrap;
+	border: 1px solid #91A7B4;
+	padding: 2px 5px 5px 5px;
+	margin: 0 0 15px 0;
+}
+#form .plugininfo fieldset {
+	background: #fff;
+}
+#form div.plugin {
+	margin: 0 0 10px 0;
+	padding: 15px;
+	background: #E4EEFF;
+	border: 1px solid #ccc;
+}
+#form .controller {
+	border: 1px solid #ccc;
+	margin: 0 0 10px 0;
+	padding: 15px;
+	background: #FFFFE0;
+}
+#form div.plugin b,
+#form .controller b {
+	text-decoration: underline;
+	padding: 0 0 0 0;
+	margin: 0 0 5px 0;
+}
+#form div.plugin b.error,
+#form .controller b.error {
+	text-decoration: none;
+	padding: 0 0 0 0;
+	margin: 0 0 5px 0;
+	color: red;
+}
+#form div.plugin b.succes,
+#form .controller b.success {
+	text-decoration: none;
+	padding: 0 0 0 0;
+	margin: 0 0 5px 0;
+	color: green;
+}
+#form div.name {
+	margin: 0;
+	padding: 5px 5px 25px 0;
+}
+#form .methods {
+	margin: 0;
+	padding: 0;
+}
+
+#form .methods span {
+	display: block;
+}
+#form .methods span.action {
+	color: green;
+}
+#form .vars div,
+#form .vars span {
+	display: block;
+	margin: 0 0 0 10px;
+}
+#form .action{
+	margin: 0 0 10px 0px;
+	border: 1px solid #CCCCCC;
+	padding: 15px 0 15px 15px;
+	background: white;
+}
+#form .action .params {
+	margin: 0 0 20px 250px;
+	padding: 0 0 0 0;
+}
+#form .action .params b{
+	text-decoration: underline;
+}
+#form .action .params span{
+	display: block;
+}
+#form .link {
+	margin: 10px 50px 10px 0;
+	padding: 0;
+}
+
+
+
+.htmlobject_tabs_box h1.apih1 {
+	margin: 0 0 15px 0;
+}
+#form .paginator {
+	border-bottom: 1px solid #91A7B4;
+	padding: 0 5px 15px 5px;
+	margin: 0 0 20px 0;
+}
+#form .paginator a{
+	text-decoration: none;
+}
+#form .paginator .switch {
+	margin: 0 auto;
+	width: 580px;
+	text-align: center;
+}
+#form .paginator .switch a {
+	border: 1px solid;
+	display: block;
+	float: left;
+	width: 70px;
+	text-align: center;
+	margin: 2px;
+	padding: 3px;
+}
+
+
+
+#documentation_content {
+	left: 0px;
+	padding: 0 5px !important;
+	position: relative;
+	top: 0px;
+	width: 750px;
+}
+
+#plugin_content {
+	left: 0px;
+	padding: 0 5px !important;
+	position: relative;
+	top: 0px;
+	width: 255px;
+}
+
+#form .toplink {
+	display: block;
+	text-align:right;
+	margin: 0 0 0 0;
+	padding:15px;
+	font-size:12px;
+	color:black;
+	text-decoration:none;
+}
+#form .apidoc {
+	padding: 15px;
+	border: 1px solid #ccc;
+	background: #eee;
+	margin: 0 0 10px 0;
+	color: black;
+}
+#form .apidoc h1 {
+	font-size: 18px;
+}
+#form .apidoc h3 {
+	background: transparent;
+	font-size: 14px;
+	border: 0px none;
+	font-weight: bold;
+}
+#form .apidoc code {
+	border:1px dotted #ccc;
+	display:block;
+	padding:10px;
+	margin: 10px 0 0 0;
+	background:#eee;
+	overflow: auto;
+	font-family: inherit;
+}
+#form .apidoc pre {
+	overflow: auto;
+	font-family: inherit;
+	background: white;
+	padding: 5px;
+}
+#form .apidoc pre.head {
+	border:1px solid #ccc;
+	padding: 10px;
+}
+#form .apidoc .links {
+	margin: 20px 0 40px 10px;
+}
+#form .apidoc .attribs {
+	background: #FFFFE0;
+	padding: 15px;
+	border: 1px solid #ccc;
+}
+#form .apidoc .methods {
+	background: #E4EEFF;
+	padding: 15px;
+	border: 1px solid #ccc;
+	margin: 20px 0 0 0;
+}
+#form .apidoc .attribs a,
+#form  .apidoc .methods a {
+	display:block;
+	text-align:right;
+	margin: 10px 0 0 0;
+	padding:10px;
+	font-size:12px;
+	color:black;
+	text-decoration:none;
+}
+#form .apidoc .attribs div,
+#form .apidoc .methods div {
+	background: white;
+	border:1px solid #ccc;
+	margin: 0 0 0 0;
+	padding:10px;
+}
+#form .apidoc .attribs pre,
+#form .apidoc .methods pre {
+	border: 0px none;
+	display: block;
+	font-size: 13px;
+	line-height: 15px;
+	margin: 0;
+	padding: 0;
+}
+#form .apidoc .attribs .indent,
+#form .apidoc .methods .indent {
+	margin: 0;
+	border: none 0px;
+	padding: 15px 10px 0px 35px;
+	font-size:15px;
+}
+
+
+/* HOOKS */
+.hooktable td {
+	padding: 2px 20px 2px 0;
+}
+
+
+

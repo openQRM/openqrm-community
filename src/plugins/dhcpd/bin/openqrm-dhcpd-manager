@@ -1,0 +1,484 @@
+#!/bin/bash
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/include/openqrm-plugin-dhcpd-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+openqrm_server_get_config
+OPENQRM_SERVER_IP=$OPENQRM_SERVER_IP_ADDRESS
+resource_id=0
+resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+openqrm_web_protocol=$OPENQRM_WEB_PROTOCOL
+DHCPD_CONF="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/dhcpd.conf"
+DHCPD_HOST_TEMPLATE="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/templates/openqrm-plugin-dhcpd-host.template"
+export LANG=C
+# define wget to use with https
+if [ "$openqrm_web_protocol" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate"
+fi
+
+function dhcpd_usage() {
+	echo "Usage: $0 add/remove -d [resource-id] -m [resource-mac] -s [resource-subnet] -i [resource-ip] -u [admin-user] -p [admin-password]"
+	echo "       $0 remove_by_mac -m [resource_mac]"
+	echo "       $0 add_network/remove_network -l [openqrm-server-interface]"
+	echo "       $0 add_listen/remove_listen -l [openqrm-server-interface]"
+	exit 1
+}
+
+FULL_COMMANDLINE="$0 $@"
+DHCPD_CMD=$1
+shift
+
+while [ $# -ne 0 ]; do
+	case "$1" in
+		-d)
+			RESOURCE_ID=$2
+			HOSTNAME="resource$RESOURCE_ID"
+			shift
+			;;
+		-m)
+			RESOURCE_MAC=$2
+			shift
+			;;
+		-i)
+			RESOURCE_IP=$2
+			shift
+			;;
+		-s)
+			RESOURCE_SUBNET=$2
+			shift
+			;;
+		-l)
+			LISTEN_INTERFACE=$2
+			shift
+			;;
+		-q)
+			RESOURCE_DOMAIN=$2
+			shift
+			;;
+		-u)
+			OPENQRM_USERNAME=$2
+			shift
+			;;
+		-p)
+			OPENQRM_PASSWORD=$2
+			shift
+			;;
+		--openqrm-ui-user)
+			OPENQRM_UI_USER=$2
+			shift
+			;;
+		--openqrm-internal-cmd)
+			OPENQRM_INTERNAL_CMD=$2
+			shift
+			;;
+		--openqrm-cmd-mode)
+			OPENQRM_CMD_MODE=$2
+			shift
+			;;
+		*)
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			echo "ERROR: Free commandline arguments are not allowed"
+			dhcpd_usage
+			exit 6
+			;;
+	esac
+	shift
+done
+
+# checks
+if [ "$DHCPD_CMD" == "" ]; then
+	openqrm_unblock_starting_queue $FULL_COMMANDLINE
+	dhcpd_usage
+fi
+
+
+function guess_next_ip() {
+	OPENQRM_DHCPD_NETWORK=`grep subnet $DHCPD_CONF | grep netmask | awk '{ print $2 }'`
+	OPENQRM_DHCPD_SUBNETMASK=`grep subnet $DHCPD_CONF | grep netmask | awk '{ print $4 }'`
+	OPENQRM_DHCPD_FIRSTIP=`grep -w range $DHCPD_CONF | grep -v '#' | awk '{ print $2 }'`
+	if [ "$OPENQRM_DHCPD_FIRSTIP" == "" ]; then
+		OPENQRM_DHCPD_FIRSTIP=`openqrm_plugin_dhcpd_range_calculator $OPENQRM_DHCPD_NETWORK $OPENQRM_DHCPD_SUBNETMASK first`
+	fi
+	OPENQRM_DHCPD_LASTIP=`grep -w range $DHCPD_CONF | grep -v '#' | awk '{ print $3 }' | sed -e "s/;//g"`
+	if [ "$OPENQRM_DHCPD_LASTIP" == "" ]; then
+		OPENQRM_DHCPD_LASTIP=`openqrm_plugin_dhcpd_range_calculator $OPENQRM_DHCPD_NETWORK $OPENQRM_DHCPD_SUBNETMASK last`
+	fi
+	OPENQRM_DHCPD_LOOP=0
+	while (true); do
+			if [ "$GUESSED_NEW_IP" == "$OPENQRM_DHCPD_FIRSTIP" ]; then
+					dhcpd_log openqrm-dhcpd-manager "WARNING: Reached start of available ip-range! No free ips available any more"
+					return
+			fi
+			GUESSED_NEW_IP=`openqrm_plugin_dhcpd_range_calculator $OPENQRM_DHCPD_NETWORK $OPENQRM_DHCPD_SUBNETMASK next $OPENQRM_DHCPD_LOOP`
+			IPCHECK_GUESSED=`echo $GUESSED_NEW_IP | sed -e "s/\.//g"`
+			IPCHECK_FIRST=`echo $OPENQRM_DHCPD_FIRSTIP | sed -e "s/\.//g"`
+			IPCHECK_LAST=`echo $OPENQRM_DHCPD_LASTIP | sed -e "s/\.//g"`
+			if [ "$IPCHECK_GUESSED" -gt "$IPCHECK_LAST" ]; then
+				OPENQRM_DHCPD_LOOP=$(( OPENQRM_DHCPD_LOOP + 1 ))
+				continue
+			fi
+			if [ "$IPCHECK_FIRST" -gt "$IPCHECK_GUESSED" ]; then
+				OPENQRM_DHCPD_LOOP=$(( OPENQRM_DHCPD_LOOP + 1 ))
+				continue
+			fi
+			if ! grep $GUESSED_NEW_IP $DHCPD_CONF | grep fixed-address 1>/dev/null; then
+				if ! ping -c 1 -i 1 -w 1 $GUESSED_NEW_IP 1>/dev/null; then
+						dhcpd_log openqrm-dhcpd-manager "NOTICE: Found $GUESSED_NEW_IP free and not pingable"
+						break
+				fi
+			fi
+			OPENQRM_DHCPD_LOOP=$(( OPENQRM_DHCPD_LOOP + 1 ))
+	done
+	echo "$GUESSED_NEW_IP"
+}
+
+
+
+function restart_dhcpd() {
+	local DHCPD_PART=$1
+	local DHCPD_RESOURCE_ID=$2
+	local DHCPD_RESOURCE_MAC=$3
+	# is dhcpd running ? do we have to restart ?
+	if [ -e $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/dhcpd/.running ]; then
+		$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/init.d/openqrm-plugin-dhcpd stop
+		if ! $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/init.d/openqrm-plugin-dhcpd start; then
+			dhcpd_log openqrm-dhcpd-manager "Adding Resource $DHCPD_RESOURCE_ID / $DHCPD_RESOURCE_MAC failed! Reverting dhcpd-configuration."
+			# restore previous version, better not to add it than to corrupt the config
+			case "$DHCPD_PART" in
+				main)
+					cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/dhcpd.conf $DHCPD_CONF
+					;;
+				subnet)
+					rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks
+					cp -aRf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/networks $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/
+					;;
+			esac
+			$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/init.d/openqrm-plugin-dhcpd start
+		fi
+	fi
+}
+
+
+
+
+case "$DHCPD_CMD" in
+	add)
+		LOCK_TIME=`openqrm_lock_queue aquire dhcpd`
+		trap "openqrm_lock_queue release dhcpd $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		if [ "$RESOURCE_SUBNET" == "" ]; then
+			RESOURCE_SUBNET=`grep subnet $DHCPD_CONF | grep netmask | awk '{ print $4 }'`
+		fi
+
+		# new VM without any ip yet ?
+		if [ "$RESOURCE_IP" == "0.0.0.0" ]; then
+			# this is when a new virtual machine is added
+			# running via the new-resource hook
+			# resource will be added to the default management network / set subnetmask to default network if empty
+			if [ "$RESOURCE_SUBNET" == "0.0.0.0" ]; then
+				RESOURCE_SUBNET=`grep subnet $DHCPD_CONF | grep netmask | awk '{ print $4 }'`
+			fi
+			NEXT_RESOURCE_IP=`guess_next_ip`
+			if [ "$NEXT_RESOURCE_IP" == "" ]; then
+				dhcpd_log openqrm-dhcpd-manager "Failed to guess the next ip address for Resource $HOSTNAME $RESOURCE_ID $RESOURCE_MAC. Not adding it."
+
+				openqrm_lock_queue release dhcpd $LOCK_TIME
+				trap '' EXIT
+
+				exit 0
+			else
+				RESOURCE_IP=$NEXT_RESOURCE_IP
+				dhcpd_log openqrm-dhcpd-manager "Guessed next ip address $RESOURCE_IP for Resource $HOSTNAME $RESOURCE_ID $RESOURCE_MAC."
+			fi
+		fi
+		# decide to which network the resource should be added
+		NEW_RESOURCE_NETWORK=`openqrm_plugin_dhcpd_range_calculator $RESOURCE_IP $RESOURCE_SUBNET net`
+		if grep "subnet $NEW_RESOURCE_NETWORK netmask $RESOURCE_SUBNET" $DHCPD_CONF 1>/dev/null; then
+			# openQRM default Management network
+			if grep $RESOURCE_MAC $DHCPD_CONF | grep -v "^#" 1>/dev/null; then
+				dhcpd_log openqrm-dhcpd-manager "Resource  $HOSTNAME $RESOURCE_ID $RESOURCE_MAC $RESOURCE_IP already existing in the dhcpd-server. Not adding it."
+
+				openqrm_lock_queue release dhcpd $LOCK_TIME
+				trap '' EXIT
+
+				exit 0
+			fi
+			dhcpd_log openqrm-dhcpd-manager "adding $HOSTNAME $RESOURCE_ID $RESOURCE_MAC $RESOURCE_IP to default network"
+			TIMESTAMP=`date +%s`
+			mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/
+			cp -f $DHCPD_CONF $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/dhcpd.conf
+			cp -f $DHCPD_CONF $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/dhcpd.conf.$TIMESTAMP
+			grep -B 1000000 "^# end_static_ips" $DHCPD_CONF | sed -e "s/^# end_static_ips.*//g" > $DHCPD_CONF.first_part
+			grep -A 1000000 "^# end_static_ips" $DHCPD_CONF > $DHCPD_CONF.last_part
+			cat $DHCPD_HOST_TEMPLATE | \
+				sed -e "s/DHCPD_RESOURCE_HOSTNAME/$HOSTNAME/g" |	\
+				sed -e "s/DHCPD_RESOURCE_MAC/$RESOURCE_MAC/g" |	\
+				sed -e "s/DHCPD_RESOURCE_IP/$RESOURCE_IP/g" > $DHCPD_CONF.host_part
+			cat $DHCPD_CONF.first_part $DHCPD_CONF.host_part $DHCPD_CONF.last_part > $DHCPD_CONF
+			sed -i -e '/^$/d' $DHCPD_CONF
+			rm -f $DHCPD_CONF.first_part $DHCPD_CONF.host_part $DHCPD_CONF.last_part
+			restart_dhcpd main $RESOURCE_IP $RESOURCE_MAC
+
+		else
+
+			# resource will be added to an additional managed network
+			if [ -d "$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks" ]; then
+				for ADDITIONAL_DHCPD_CONF in `ls $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks/*.conf 2>/dev/null`; do
+					if grep "subnet $NEW_RESOURCE_NETWORK netmask $RESOURCE_SUBNET" $ADDITIONAL_DHCPD_CONF 1>/dev/null; then
+						if grep -i $RESOURCE_MAC $ADDITIONAL_DHCPD_CONF | grep -v "^#" 1>/dev/null; then
+							dhcpd_log openqrm-dhcpd-manager "Resource  $HOSTNAME $RESOURCE_ID $RESOURCE_MAC $RESOURCE_IP already existing in $ADDITIONAL_DHCPD_CONF. Not adding it."
+
+							openqrm_lock_queue release dhcpd $LOCK_TIME
+							trap '' EXIT
+
+							exit 0
+						fi
+						dhcpd_log openqrm-dhcpd-manager "adding $HOSTNAME $RESOURCE_ID $RESOURCE_MAC $RESOURCE_IP to $ADDITIONAL_DHCPD_CONF"
+						TIMESTAMP=`date +%s`
+						mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/networks.$TIMESTAMP
+						cp -aRf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/
+						cp -aRf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks/* $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/networks.$TIMESTAMP/
+						grep -B 1000000 "^# end_static_ips" $ADDITIONAL_DHCPD_CONF | sed -e "s/^# end_static_ips.*//g" > $ADDITIONAL_DHCPD_CONF.first_part
+						grep -A 1000000 "^# end_static_ips" $ADDITIONAL_DHCPD_CONF > $ADDITIONAL_DHCPD_CONF.last_part
+						cat $DHCPD_HOST_TEMPLATE | \
+							sed -e "s/DHCPD_RESOURCE_HOSTNAME/$HOSTNAME/g" |	\
+							sed -e "s/DHCPD_RESOURCE_MAC/$RESOURCE_MAC/g" |	\
+							sed -e "s/DHCPD_RESOURCE_IP/$RESOURCE_IP/g" > $ADDITIONAL_DHCPD_CONF.host_part
+						cat $ADDITIONAL_DHCPD_CONF.first_part $ADDITIONAL_DHCPD_CONF.host_part $ADDITIONAL_DHCPD_CONF.last_part > $ADDITIONAL_DHCPD_CONF
+						sed -i -e '/^$/d' $ADDITIONAL_DHCPD_CONF
+						rm -f $ADDITIONAL_DHCPD_CONF.first_part $ADDITIONAL_DHCPD_CONF.last_part $ADDITIONAL_DHCPD_CONF.host_part
+						restart_dhcpd subnet $RESOURCE_IP $RESOURCE_MAC
+					fi
+				done
+			fi
+		fi
+		# if we have a username + pass we send back the eventual new generated ip to update the resource_ip in the db
+		if [ "$OPENQRM_USERNAME" != "" ] && [ "$OPENQRM_PASSWORD" != "" ]; then
+			if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$OPENQRM_USERNAME --http-password=$OPENQRM_PASSWORD "$openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/dhcpd/dhcpd-action.php?dhcpd_command=post_ip&resource_id=$RESOURCE_ID&resource_ip=$RESOURCE_IP"; then
+				dhcpd_log openqrm-dhcpd-manager "ERROR: Could not post resource ip $RESOURCE_IP to the openQRM-server at $resource_openqrmserver!"
+			fi
+		fi
+
+		openqrm_lock_queue release dhcpd $LOCK_TIME
+		trap '' EXIT
+		;;
+	remove)
+		LOCK_TIME=`openqrm_lock_queue aquire dhcpd`
+		trap "openqrm_lock_queue release dhcpd $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# default openQRM Management network
+		if grep -w $HOSTNAME $DHCPD_CONF 1>/dev/null; then
+			dhcpd_log openqrm-dhcpd-manager "removing $HOSTNAME $RESOURCE_ID $RESOURCE_MAC $RESOURCE_IP from default network"
+			TIMESTAMP=`date +%s`
+			mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/
+			cp -f $DHCPD_CONF $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/dhcpd.conf
+			cp -f $DHCPD_CONF $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/dhcpd.conf.$TIMESTAMP
+			# first - resource
+			grep -B 10000 -A 4 "^host $HOSTNAME {" $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/dhcpd.conf | sed -e :a -e '$d;N;2,5ba' -e 'P;D' > $DHCPD_CONF.first_part
+			# after resource
+			grep -A 10000 "^host $HOSTNAME {" $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/dhcpd.conf | sed '1,5d' > $DHCPD_CONF.last_part
+			cat $DHCPD_CONF.first_part $DHCPD_CONF.last_part > $DHCPD_CONF
+			sed -i -e '/^$/d' $DHCPD_CONF
+			rm -f $DHCPD_CONF.first_part $DHCPD_CONF.host_part $DHCPD_CONF.last_part
+			restart_dhcpd main $RESOURCE_IP $RESOURCE_MAC
+
+		else
+			# additional managed networks
+			for ADDITIONAL_DHCPD_CONF in `ls $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks/*.conf 2>/dev/null`; do
+				if grep -w $HOSTNAME $ADDITIONAL_DHCPD_CONF 1>/dev/null; then
+					dhcpd_log openqrm-dhcpd-manager "removing $HOSTNAME $RESOURCE_ID $RESOURCE_MAC $RESOURCE_IP from $ADDITIONAL_DHCPD_CONF"
+					TIMESTAMP=`date +%s`
+					mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/networks.$TIMESTAMP
+					cp -aRf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/
+					cp -aRf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks/* $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/backup/networks.$TIMESTAMP/
+					# first - resource
+					grep -B 10000 -A 4 "^host $HOSTNAME {" $ADDITIONAL_DHCPD_CONF | sed -e :a -e '$d;N;2,5ba' -e 'P;D' > $ADDITIONAL_DHCPD_CONF.first_part
+					# after resource
+					grep -A 10000 "^host $HOSTNAME {" $ADDITIONAL_DHCPD_CONF | sed '1,5d' > $ADDITIONAL_DHCPD_CONF.last_part
+					cat $ADDITIONAL_DHCPD_CONF.first_part $ADDITIONAL_DHCPD_CONF.last_part > $ADDITIONAL_DHCPD_CONF
+					sed -i -e '/^$/d' $ADDITIONAL_DHCPD_CONF
+					rm -f $ADDITIONAL_DHCPD_CONF.first_part $ADDITIONAL_DHCPD_CONF.last_part
+					restart_dhcpd subnet $RESOURCE_IP $RESOURCE_MAC
+				fi
+			done
+		fi
+
+		openqrm_lock_queue release dhcpd $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+	remove_by_mac)
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# default openQRM Management network
+		if grep -i $RESOURCE_MAC $DHCPD_CONF 1>/dev/null; then
+			dhcpd_log openqrm-dhcpd-manager "removing $HOSTNAME $RESOURCE_ID $RESOURCE_MAC $RESOURCE_IP from default network"
+			RES_ID=`grep -B1 -i $RESOURCE_MAC $DHCPD_CONF | grep "^host resource" | sed -e "s/.*resource//g" | awk '{ print $1 }'`
+			RES_IP=`grep -A1 -i $RESOURCE_MAC $DHCPD_CONF | grep "fixed-address" | awk '{ print $2 }' | sed -e "s/;//g"`
+			RES_SUBNET=`grep -w subnet.*netmask $DHCPD_CONF | awk '{ print $4 }'`
+			if $0 remove -d $RES_ID -m $RESOURCE_MAC -i $RES_IP -s $RES_SUBNET; then
+				dhcpd_log openqrm-dhcpd-manager "Successfully removed $RES_ID $RESOURCE_MAC $RES_IP from $DHCPD_CONF"
+			else
+				dhcpd_log openqrm-dhcpd-manager "Failed removing $RES_ID $RESOURCE_MAC $RES_IP from $DHCPD_CONF"
+			fi
+		else
+			# additional managed networks
+			for ADDITIONAL_DHCPD_CONF in `ls $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks/*.conf 2>/dev/null`; do
+				if grep -i $RESOURCE_MAC $ADDITIONAL_DHCPD_CONF 1>/dev/null; then
+					dhcpd_log openqrm-dhcpd-manager "removing $HOSTNAME $RESOURCE_ID $RESOURCE_MAC $RESOURCE_IP from $ADDITIONAL_DHCPD_CONF"
+					RES_ID=`grep -B1 -i $RESOURCE_MAC $ADDITIONAL_DHCPD_CONF | grep "^host resource" | sed -e "s/.*resource//g" | awk '{ print $1 }'`
+					RES_IP=`grep -A1 -i $RESOURCE_MAC $ADDITIONAL_DHCPD_CONF | grep "fixed-address" | awk '{ print $2 }' | sed -e "s/;//g"`
+					RES_SUBNET=`grep -w subnet.*netmask $ADDITIONAL_DHCPD_CONF | awk '{ print $4 }'`
+					if $0 remove -d $RES_ID -m $RESOURCE_MAC -i $RES_IP -s $RES_SUBNET; then
+						dhcpd_log openqrm-dhcpd-manager "Successfully removed $RES_ID $RESOURCE_MAC $RES_IP from $ADDITIONAL_DHCPD_CONF"
+					else
+						dhcpd_log openqrm-dhcpd-manager "Failed removing $RES_ID $RESOURCE_MAC $RES_IP from $ADDITIONAL_DHCPD_CONF"
+					fi
+				fi
+			done
+		fi
+		;;
+
+
+
+
+
+
+
+
+
+	add_network)
+		LOCK_TIME=`openqrm_lock_queue aquire dhcpd`
+		trap "openqrm_lock_queue release dhcpd $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		ORIGIN_LISTEN_INTERFACE=$LISTEN_INTERFACE
+		if [ -e /etc/openqrm/openvswitch-manager/nat/$LISTEN_INTERFACE ]; then
+			. /etc/openqrm/openvswitch-manager/nat/$LISTEN_INTERFACE
+			if [ "$OVS_VLAN" != "" ] &&  [ "$OVS_VLAN" != 0 ]; then
+			    LISTEN_INTERFACE=$LISTEN_INTERFACE"."$OVS_VLAN
+			fi
+		fi
+
+
+		OPENQRM_DHCPD_NETWORK_IP_ADDRESS=`ip a s $LISTEN_INTERFACE | grep -w $LISTEN_INTERFACE$ | grep -w inet | awk '{ print $2 }' | cut -d'/' -f1`
+
+		echo "- configuring additional network for $LISTEN_INTERFACE - $OPENQRM_DHCPD_NETWORK_IP_ADDRESS"
+		mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks
+		OPENQRM_DHCPD_NETWORK_BROADCAST_ADDRESS=`ip a s $LISTEN_INTERFACE | grep -w $LISTEN_INTERFACE$ | grep -w inet | awk '{ print $4 }' | cut -d'/' -f1`
+		OPENQRM_DHCPD_NETWORK_CIDR=`ip a s $LISTEN_INTERFACE | grep -w $LISTEN_INTERFACE$ | grep -w inet | awk '{ print $2 }' | cut -d'/' -f2`
+		OPENQRM_DHCPD_NETWORK_SUBNET_MASK=`cidr2subnet $OPENQRM_DHCPD_NETWORK_CIDR`
+		OPENQRM_DHCPD_NETWORK=`openqrm_plugin_dhcpd_range_calculator $OPENQRM_DHCPD_NETWORK_IP_ADDRESS $OPENQRM_DHCPD_NETWORK_SUBNET_MASK net`
+		OPENQRM_DHCPD_NETWORK_IP_RANGE_FIRST=`openqrm_plugin_dhcpd_range_calculator $OPENQRM_DHCPD_NETWORK_IP_ADDRESS $OPENQRM_DHCPD_NETWORK_SUBNET_MASK first`
+		OPENQRM_DHCPD_NETWORK_IP_RANGE_LAST=`openqrm_plugin_dhcpd_range_calculator $OPENQRM_DHCPD_NETWORK_IP_ADDRESS $OPENQRM_DHCPD_NETWORK_SUBNET_MASK last`
+
+		cat $OPENQRM_PLUGIN_DHCPD_NETWORK_TEMPLATE |	\
+			sed -e "s/OPENQRM_DHCPD_NETWORK/$OPENQRM_DHCPD_NETWORK/g" |	\
+			sed -e "s/OPENQRM_DHCPD_SUBNET_MASK/$OPENQRM_DHCPD_NETWORK_SUBNET_MASK/g" |	\
+			sed -e "s/OPENQRM_DHCPD_RANGE_FIRST/$OPENQRM_DHCPD_NETWORK_IP_RANGE_FIRST/g" |	\
+			sed -e "s/OPENQRM_DHCPD_RANGE_LAST/$OPENQRM_DHCPD_NETWORK_IP_RANGE_LAST/g" |	\
+			sed -e "s/OPENQRM_DHCPD_DOMAIN/$RESOURCE_DOMAIN/g" \
+			> $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks/$ORIGIN_LISTEN_INTERFACE.conf
+
+		# add as include to dhcpd.conf
+		sed -i -e "s#^}#include \"$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks/$ORIGIN_LISTEN_INTERFACE.conf\";\n}#" $OPENQRM_PLUGIN_DHCPD_CONF
+
+		restart_dhcpd subnet
+
+		openqrm_lock_queue release dhcpd $LOCK_TIME
+		trap '' EXIT
+		;;
+
+	remove_network)
+		LOCK_TIME=`openqrm_lock_queue aquire dhcpd`
+		trap "openqrm_lock_queue release dhcpd $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks/$LISTEN_INTERFACE.conf
+		# remove as include to dhcpd.conf
+		sed -i -e "s#include \"$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/networks/$LISTEN_INTERFACE.conf\";##" $OPENQRM_PLUGIN_DHCPD_CONF
+
+		restart_dhcpd subnet
+
+		openqrm_lock_queue release dhcpd $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+	add_listen)
+		LOCK_TIME=`openqrm_lock_queue aquire dhcpd`
+		trap "openqrm_lock_queue release dhcpd $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		ORIGIN_LISTEN_INTERFACE=$LISTEN_INTERFACE
+		if [ -e /etc/openqrm/openvswitch-manager/nat/$LISTEN_INTERFACE ]; then
+			. /etc/openqrm/openvswitch-manager/nat/$LISTEN_INTERFACE
+			if [ "$OVS_VLAN" != "" ] &&  [ "$OVS_VLAN" != 0 ]; then
+			    LISTEN_INTERFACE=$LISTEN_INTERFACE"."$OVS_VLAN
+			fi
+		fi
+
+
+		. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/dhcpd-interfaces.conf
+
+		sed -i -e "s/DHCPD_LISTEN_INTERFACES=.*/DHCPD_LISTEN_INTERFACES=\"$DHCPD_LISTEN_INTERFACES $LISTEN_INTERFACE\"/g" $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/dhcpd-interfaces.conf
+
+		restart_dhcpd main
+
+		openqrm_lock_queue release dhcpd $LOCK_TIME
+		trap '' EXIT
+		;;
+
+	remove_listen)
+		LOCK_TIME=`openqrm_lock_queue aquire dhcpd`
+		trap "openqrm_lock_queue release dhcpd $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		ORIGIN_LISTEN_INTERFACE=$LISTEN_INTERFACE
+		if [ -e /etc/openqrm/openvswitch-manager/nat/$LISTEN_INTERFACE ]; then
+			. /etc/openqrm/openvswitch-manager/nat/$LISTEN_INTERFACE
+			if [ "$OVS_VLAN" != "" ] &&  [ "$OVS_VLAN" != 0 ]; then
+			    LISTEN_INTERFACE=$LISTEN_INTERFACE"."$OVS_VLAN
+			fi
+		fi
+
+		sed -i -e "s/ $LISTEN_INTERFACE//g" $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dhcpd/etc/dhcpd-interfaces.conf
+
+		restart_dhcpd main
+
+		openqrm_lock_queue release dhcpd $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+
+
+
+
+
+	*)
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		dhcpd_log openqrm-dhcpd-manager "Usage: $0 {add|remove} <resource-id> <resource_mac> [resource_ip]"
+		exit 1
+		;;
+esac

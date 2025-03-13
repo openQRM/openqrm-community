@@ -1,0 +1,17 @@
+.htmlobject_td.resource_id,
+.htmlobject_td.resource_icon,
+.htmlobject_td.resource_state {
+	text-align:center;
+	width:25px;
+}
+.htmlobject_td.data {
+	text-align:left;
+	width:400px;
+}
+
+#resource_filter {
+	margin: 0 0 0 0 !important;
+}
+#resource_type_filter {
+	margin: 0 0 30px 0 !important;
+}

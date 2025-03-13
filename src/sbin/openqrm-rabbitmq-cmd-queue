@@ -1,0 +1,97 @@
+#!/usr/bin/env python
+#  openQRM-rabbitmq-cmd-queue read queued commands and runs them
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+import pika
+import subprocess
+import syslog
+import os
+import sys
+import time
+
+
+try:
+	os.environ["RABBITMQ_QUEUE_NAME"]
+except KeyError:
+	print("Please set the environment variable RABBITMQ_QUEUE_NAME")
+	sys.exit(1)
+
+try:
+	os.environ["RABBITMQ_SERVER"]
+except KeyError:
+	print("Please set the environment variable RABBITMQ_SERVER")
+	sys.exit(1)
+
+try:
+	os.environ["RABBITMQ_PASSWORD"]
+except KeyError:
+	print("Please set the environment variable RABBITMQ_PASSWORD")
+	sys.exit(1)
+
+
+RECONNECTDELAY=10
+RABBITMQ_SERVER = os.environ["RABBITMQ_SERVER"]
+RABBITMQ_PASSWORD = os.environ["RABBITMQ_PASSWORD"]
+RABBITMQ_QUEUE_NAME = os.environ["RABBITMQ_QUEUE_NAME"]
+RABBITMQ_QUEUE_NAME_UI = RABBITMQ_QUEUE_NAME + ".ui"
+
+credentials = pika.PlainCredentials('openqrm', RABBITMQ_PASSWORD)
+parameters = pika.ConnectionParameters(RABBITMQ_SERVER, 5671, '/', credentials, ssl=True)
+
+def run_command(n):
+	t = '';
+	p = subprocess.Popen(n, shell=True, stdout=subprocess.PIPE)
+	while True:
+		line = p.stdout.readline()
+		if not line:
+			break
+		t = t + line;
+	return t
+
+def on_request(ch, method, props, body):
+    n = str(body)
+    print("Received  (%s)"  % (n,))
+    print("reply to %s" % props.reply_to)
+    print("id %s" % props.correlation_id)
+    syslog.syslog( 'rabbitmq-queue running: %s' % n )
+    response = run_command(n)
+
+    ch.basic_publish(exchange='',
+                     routing_key=props.reply_to,
+                     properties=pika.BasicProperties(correlation_id = \
+                                                     props.correlation_id),
+                     body=str(response))
+    ch.basic_ack(delivery_tag = method.delivery_tag)
+
+
+while True:
+        try:
+			connection = pika.BlockingConnection(parameters)
+			channel = connection.channel()
+			channel.queue_declare(queue=RABBITMQ_QUEUE_NAME)
+			channel.queue_declare(queue=RABBITMQ_QUEUE_NAME_UI)
+			channel.basic_qos(prefetch_count=1)
+			channel.basic_consume(on_request, queue=RABBITMQ_QUEUE_NAME)
+			channel.basic_consume(on_request, queue=RABBITMQ_QUEUE_NAME_UI)
+			syslog.syslog('openqrm-rabbitmq-cmd-queue: Awaiting RPC requests' )
+			print(" [x] Awaiting RPC requests")
+			channel.start_consuming()
+
+        except:
+			print("openqrm-rabbitmq-cmd-queue: Connection lost! Reconnecting in %s" % RECONNECTDELAY)
+			syslog.syslog('openqrm-rabbitmq-cmd-queue: Connection lost! Reconnecting in %s' % RECONNECTDELAY )
+			time.sleep(RECONNECTDELAY)
+

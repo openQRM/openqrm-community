@@ -1,0 +1,27 @@
+
+HOWTO create openqrm RPM packages from SVN:
+
+---
+1. check out via svn
+
+svn co https://openqrm.svn.sourceforge.net/svnroot/openqrm openqrm
+
+
+---
+2. create rpm package
+
+cd openqrm/trunk/src
+make rpm
+
+---
+3. Finished.
+
+You now have source and binary packages.
+
+Source RPM packag is located in SRPMS directory.
+Binary packages are located in RPMS/<$arch/
+
+
+Martin Alfke
+<tuxmea@users.sourceforge.net>
+

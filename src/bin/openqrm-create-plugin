@@ -1,0 +1,124 @@
+#!/bin/bash
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+SOURCE_PLUGIN=$1
+DESTINATION_PLUGIN=$2
+WORKSPACE=`dirname $0`/../plugins
+
+export LANGUAGE=C
+export LANG=C
+export LC_ALL=C
+
+if [ "$#" != "2" ]; then
+	echo "Usage : $0 <SOURCE_PLUGIN> <DESTINATION_PLUGIN>"
+	exit 1
+fi
+if [ ! -d $WORKSPACE/$SOURCE_PLUGIN ]; then
+	echo "Error : Source plugin $SOURCE_PLUGIN does not exit at $WORKSPACE"
+	exit 1
+fi
+if [ -d $WORKSPACE/$DESTINATION_PLUGIN ]; then
+	echo "Error : Destination plugin $WORKSPACE/$DESTINATION_PLUGIN already exist !"
+	echo -n "Continue ? (y/n) "
+	read CONFIRM
+	if [ "$CONFIRM" != "y" ]; then
+		exit 1
+	else
+		echo "...Continuing"
+		sleep 2
+	fi
+fi
+
+
+echo "creating plugin $DESTINATION_PLUGIN from the $SOURCE_PLUGIN plugin"
+
+# genearating the strings to change
+SOURCE_NAME_UPPER_CASE=`echo $SOURCE_PLUGIN | tr '[:lower:]:' '[:upper:]-'`
+SOURCE_NAME_LOWER_CASE=`echo $SOURCE_PLUGIN | tr '[:upper:]:' '[:lower:]-'`
+SOURCE_NAME_STRLEN=${#SOURCE_PLUGIN}
+SOURCE_NAME_FIRST_CHAR=`echo ${SOURCE_PLUGIN:0:1} | tr a-z A-Z`
+SOURCE_NAME_END=`echo ${SOURCE_PLUGIN:1:$(( SOURCE_NAME_STRLEN - 1 )) } | tr A-Z a-z`
+SOURCE_NAME_START_UPPER_CASE="$SOURCE_NAME_FIRST_CHAR$SOURCE_NAME_END"
+
+DESTINATION_NAME_UPPER_CASE=`echo $DESTINATION_PLUGIN | tr '[:lower:]:' '[:upper:]-'`
+DESTINATION_NAME_LOWER_CASE=`echo $DESTINATION_PLUGIN | tr '[:upper:]:' '[:lower:]-'`
+DESTINATION_NAME_STRLEN=${#DESTINATION_PLUGIN}
+DESTINATION_NAME_FIRST_CHAR=`echo ${DESTINATION_PLUGIN:0:1} | tr a-z A-Z`
+DESTINATION_NAME_END=`echo ${DESTINATION_PLUGIN:1:$(( DESTINATION_NAME_STRLEN - 1 )) } | tr A-Z a-z`
+DESTINATION_NAME_START_UPPER_CASE="$DESTINATION_NAME_FIRST_CHAR$DESTINATION_NAME_END"
+
+echo "transforming : $SOURCE_NAME_UPPER_CASE to $DESTINATION_NAME_UPPER_CASE"
+echo "               $SOURCE_NAME_LOWER_CASE to $DESTINATION_NAME_LOWER_CASE"
+echo "               $SOURCE_NAME_START_UPPER_CASE to $DESTINATION_NAME_START_UPPER_CASE"
+
+# copy sources
+/bin/cp -aR $WORKSPACE/$SOURCE_PLUGIN $WORKSPACE/$DESTINATION_PLUGIN
+
+
+# re-name files and content
+cd $WORKSPACE
+for OLD_FILE in `find $DESTINATION_PLUGIN/ -type f`; do
+
+	# content
+	if `grep -i $SOURCE_PLUGIN $OLD_FILE 1>/dev/null`; then
+		if [ ! -z "$DEBUG" ]; then
+			echo "adjusting content in $OLD_FILE"
+		fi
+		cat $OLD_FILE | \
+			sed -i -e "s/$SOURCE_NAME_UPPER_CASE/$DESTINATION_NAME_UPPER_CASE/g" $OLD_FILE
+			sed -i -e "s/$SOURCE_NAME_LOWER_CASE/$DESTINATION_NAME_LOWER_CASE/g" $OLD_FILE
+			sed -i -e "s/$SOURCE_NAME_START_UPPER_CASE/$DESTINATION_NAME_START_UPPER_CASE/g" $OLD_FILE
+	else
+		if [ ! -z "$DEBUG" ]; then
+			echo "skipping to adjust the content of $OLD_FILE"
+		fi
+	fi
+
+	# name
+	if `echo $OLD_FILE | grep -i $SOURCE_PLUGIN 1>/dev/null`; then
+		NEW_FILE=`echo $OLD_FILE | \
+			sed -e "s/$SOURCE_NAME_UPPER_CASE/$DESTINATION_NAME_UPPER_CASE/g" | \
+			sed -e "s/$SOURCE_NAME_LOWER_CASE/$DESTINATION_NAME_LOWER_CASE/g" | \
+			sed -e "s/$SOURCE_NAME_START_UPPER_CASE/$DESTINATION_NAME_START_UPPER_CASE/g"`
+		if [ ! -z "$DEBUG" ]; then
+			echo "renaming $OLD_FILE to $NEW_FILE"
+		fi
+		mkdir -p `dirname $NEW_FILE`
+		/bin/mv $OLD_FILE $NEW_FILE
+	else
+		if [ ! -z "$DEBUG" ]; then
+			echo "skipping file $OLD_FILE"
+		fi
+	fi
+
+done
+
+# remove .svn dir
+for svn in `find $WORKSPACE/$DESTINATION_PLUGIN/* -name .svn`; do
+	if [ ! -z "$DEBUG" ]; then
+		echo "removing $svn"
+	fi
+	rm -rf $svn
+done
+if [ ! -z "$DEBUG" ]; then
+	echo "removing $WORKSPACE/$DESTINATION_PLUGIN/.svn"
+fi
+rm -rf $WORKSPACE/$DESTINATION_PLUGIN/.svn
+
+echo "Finished creating new plugin template $DESTINATION_PLUGIN"
+
+
+

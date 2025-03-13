@@ -1,0 +1,83 @@
+openQRM
+
+ Being pluggable in nature openQRM has a design that allows and enables developers to add features or plugins.  The enviroment is full of technologies and software that is discussed here.
+
+PHP
+ PHP5 enables the majority of openQRM in its web interface and in normal programing.  Additionally PHP runs along with Apache2, ADODB (MySQL, DB2, Oracle, or PostgreSQL) and a host of other technologies like XML, AJAX and more.
+
+Base
+ The base of openQRM describes the components that are required to run and offer the API to the plugins. The base is the infrastructure that allows the plugins to interact with the resources in openQRM. Local administration and the plugin management system are parts of the base.
+
+Plugins
+ Many plugins offer features and access to resources.  Some plugins offer monitoring, storage management, deployment or other service to the openQRM system. The list of plugins will change and grow faster than this document.  Please check the website for up to date information.
+
+ To write a plugin you will need certian required and optional structures. 
+
+ Required:
+
+  base-directory
+    base-dir/openqrm/plugins/[plugin-name]
+    All plugins specific source code should go here.
+
+  plugin etc directory
+    base-dir/openqrm/plugins/[plugin-name]/etc
+    All plugins specific configuration files should go here.
+
+  plugin etc/init.d directory
+    base-dir/openqrm/plugins/[plugin-name]/etc/init.d
+    All plugins specific init scripts should go here.
+    The plugins init script should be named "openqrm-plugin-[plugin-name]" and accept at least the start/stop parameters.
+  
+  plugins postinstall stage
+    base-dir/openqrm/plugins/[plugin-name]/etc/init.d/openqrm-plugin-[plugin-name].postinstall
+    This postinstall script must exist for packaging. It should run the commands needed for initialyzing the plugin after installation.
+    (it does not enable the plugin but just prepare it so it could get enabled)
+
+  plugins preremove stage
+    base-dir/openqrm/plugins/[plugin-name]/etc/init.d/openqrm-plugin-[plugin-name].preremove
+    This preremove script must exist for packaging. It should run the commands needed to stop and uninitialyze the plugin after installation.
+    (it does not disable the plugin but just prepare it so it could get disabled)
+
+  plugins configuration file
+    base-dir/openqrm/plugins/[plugin-name]/etc/openqrm-plugin-[plugin-name].conf
+    This main plugins configuration file must exists.
+    It should set the following variables
+     # plugin version
+     OPENQRM_PLUGIN_VERSION="[openqrm-server-version]-[plugin-version]"
+     # plugin dependencies for redhat-, suse- and debian-based systems
+     OPENQRM_PLUGIN_DEPENDENCIES_REDHAT
+     OPENQRM_PLUGIN_DEPENDENCIES_SUSE
+     OPENQRM_PLUGIN_DEPENDENCIES_DEBIAN
+     This OPENQRM_PLUGIN_DEPENDENCIES variables should be set to a comma-separated
+     list of required components (dependencies) for redhat-, suse- and debian-based systems.
+
+  plugins Makefile
+    base-dir/openqrm/plugins/[plugin-name]/Makefile
+    This Makefile compiles and packages the plugin. 
+    It should implement the following targets
+     configure, compile, install, uninstall, clean, realclean and all
+
+ Optional:
+
+  bin directory
+   base-dir/openqrm/plugins/[plugin-name]/bin
+   All plugins specific binaries should go here.
+
+  plugin sbin directory
+   base-dir/openqrm/plugins/[plugin-name]/sbin
+   All plugins specific daemons/server-binaries should go here.
+
+  plugin include directory
+   base-dir/openqrm/plugins/[plugin-name]/include
+   All plugins specific functions files should go here.
+   The plugin specific functions files should be named "openqrm-plugin-[plugin-name]-functions" 
+
+  plugin etc/templates directory
+   base-dir/openqrm/plugins/[plugin-name]/etc/templates
+   All plugins specific template files should go here.
+   The plugins templates should be named "openqrm-plugin-[plugin-name]..."
+
+   plugin web directory
+    base-dir/openqrm/plugins/[plugin-name]/web
+    All plugins specific web-pages should go here.
+

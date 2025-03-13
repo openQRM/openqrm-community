@@ -1,0 +1,511 @@
+#!/bin/bash
+# this script automatically manages network devices
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+export OPENQRM_SOURCE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/"
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/network-manager/include/openqrm-plugin-network-manager-functions
+OPENQRM_POSTENCODE="$OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-postencode"
+if [ -f $OPENQRM_RESOURCE_PARAMETER_FILE ]; then
+	. $OPENQRM_RESOURCE_PARAMETER_FILE
+	OPENQRM_SERVER_IP=$resource_openqrmserver
+	OPENQRM_EXEC_PORT=$resource_execdport
+elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+	openqrm_server_get_config
+	OPENQRM_SERVER_IP=$OPENQRM_SERVER_IP_ADDRESS
+	resource_id=0
+	resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+	openqrm_web_protocol=$OPENQRM_WEB_PROTOCOL
+fi
+export LANG=C
+# define wget to use with https
+if [ "$openqrm_web_protocol" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate"
+fi
+
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+# deps installed ?
+# screen
+if ! openqrm_full_fill_os_dependency screen screen; then
+	if [ "$NON_BLOCKING" != "true" ]; then
+		openqrm_unblock_starting_queue $@
+	fi
+	exit 1
+fi
+# wget
+if ! openqrm_full_fill_os_dependency wget wget; then
+	if [ "$NON_BLOCKING" != "true" ]; then
+		openqrm_unblock_starting_queue $@
+	fi
+	exit 1
+fi
+# procmail for lockfile
+if ! openqrm_full_fill_os_dependency lockfile procmail; then
+	if [ "$NON_BLOCKING" != "true" ]; then
+		openqrm_unblock_starting_queue $@
+	fi
+	exit 1
+fi
+# bridge-utils
+if ! openqrm_full_fill_os_dependency brctl bridge-utils; then
+	if [ "$NON_BLOCKING" != "true" ]; then
+		openqrm_unblock_starting_queue $@
+	fi
+	exit 1
+fi
+# iptables
+if ! openqrm_full_fill_os_dependency iptables iptables; then
+	if [ "$NON_BLOCKING" != "true" ]; then
+		openqrm_unblock_starting_queue $@
+	fi
+	exit 1
+fi
+# dnsmasq
+if ! openqrm_full_fill_os_dependency dnsmasq dnsmasq; then
+	if [ "$NON_BLOCKING" != "true" ]; then
+		openqrm_unblock_starting_queue $@
+	fi
+	exit 1
+fi
+if [ -f /etc/debian_version ]; then
+	# vlan
+	if ! openqrm_full_fill_os_dependency vconfig vlan; then
+		if [ "$NON_BLOCKING" != "true" ]; then
+			openqrm_unblock_starting_queue $@
+		fi
+		exit 1
+	fi
+elif [ -f /etc/redhat-release ]; then
+	# vlan
+	if ! openqrm_full_fill_os_dependency vconfig vconfig; then
+		if [ "$NON_BLOCKING" != "true" ]; then
+			openqrm_unblock_starting_queue $@
+		fi
+		exit 1
+	fi
+elif [ -f /etc/SuSE-release ]; then
+	# vlan
+	if ! openqrm_full_fill_os_dependency vconfig vlan; then
+		if [ "$NON_BLOCKING" != "true" ]; then
+			openqrm_unblock_starting_queue $@
+		fi
+		exit 1
+	fi
+fi
+# load vlan kernel module
+modprobe 8021q
+
+
+function network_manager_usage() {
+	echo "Usage : $0 post_config <-u username> <-p password>"
+	echo "        $0 add_br <-b bridge-name> <-n network-card> <-i brige_ip> <-s brige_subnet> <-u username> <-p password> [-f bridge-fd ] [-h brige_hello] [-a brige_maxage] [-t brige_stp] [-m brige_mac] [-g brige_gateway] [-df dnsmasq_first_ip ] [-dl dnsmasq_last_ip ] [-v VLAN ID]"
+	echo "        $0 remove_br <-b bridge-name> <-u username> <-p password>"
+	echo ""
+	echo "Optional parameters:"
+	echo "             [--openqrm-ui-user <username>]"
+	echo "             [--openqrm-internal-cmd <true/false>]"
+	echo "             [--openqrm-cmd-mode <regular/background/fork>]"
+	exit 1
+}
+
+FULL_COMMANDLINE="$0 $@"
+NETWORK_MANAGER_MANAGER_COMMAND=$1
+shift
+
+while [ $# -ne 0 ]; do
+	case "$1" in
+		-n)
+			NETWORK_CARD=$2
+			shift
+			;;
+		-b)
+			NETWORK_BRIDGE_NAME=$2
+			shift
+			;;
+		-f)
+			NETWORK_BRIDGE_FD=$2
+			shift
+			;;
+		-h)
+			NETWORK_BRIDGE_HELLO=$2
+			shift
+			;;
+		-a)
+			NETWORK_BRIDGE_MAXAGE=$2
+			shift
+			;;
+		-t)
+			NETWORK_BRIDGE_STP=$2
+			shift
+			;;
+		-m)
+			NETWORK_BRIDGE_MAC=$2
+			shift
+			;;
+		-i)
+			NETWORK_BRIDGE_IP_ADDRESS=$2
+			shift
+			;;
+		-s)
+			NETWORK_BRIDGE_SUBNETMASK=$2
+			shift
+			;;
+		-g)
+			NETWORK_BRIDGE_GATEWAY=$2
+			shift
+			;;
+		-v)
+			NETWORK_BRIDGE_VLAN=$2
+			shift
+			;;
+		-df)
+			NETWORK_BRIDGE_DNSMASQ_IP_FIRST=$2
+			shift
+			;;
+		-dl)
+			NETWORK_BRIDGE_DNSMASQ_IP_LAST=$2
+			shift
+			;;
+		-u)
+			NETWORK_MANAGER_OPENQRM_USERNAME=$2
+			shift
+			;;
+		-p)
+			NETWORK_MANAGER_OPENQRM_PASSWORD=$2
+			shift
+			;;
+		--openqrm-ui-user)
+			OPENQRM_UI_USER=$2
+			shift
+			;;
+		--openqrm-internal-cmd)
+			OPENQRM_INTERNAL_CMD=$2
+			shift
+			;;
+		--openqrm-cmd-mode)
+			OPENQRM_CMD_MODE=$2
+			shift
+			;;
+		*)
+			if [ "$NON_BLOCKING" != "true" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			fi
+			echo "ERROR: Free commandline arguments are not allowed"
+			network_manager_manager_usage
+			exit 6
+			;;
+	esac
+	shift
+done
+
+if [ "$OPENQRM_UI_USER" != "" ]; then
+	OPENQRM_UI_USER_PARAMETER=" --openqrm-ui-user $OPENQRM_UI_USER"
+fi
+
+# main
+case "$NETWORK_MANAGER_MANAGER_COMMAND" in
+
+	post_config)
+		LOCK_TIME=`openqrm_lock_queue aquire network-manager`
+		trap "openqrm_lock_queue release network-manager $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		TMP_CONFIG=`mktemp /tmp/network-manager.XXXXXX`
+		SYSTEM_STATUS_TMP=$resource_id.network_config
+		> $SYSTEM_STATUS_TMP
+		ALL_NET_DEV_LIST=""
+		for NET_DEV in `ip a s | grep ^[0-9] | cut -d':' -f2 | awk '{ print $1 }' | grep -v lo`; do
+			ALL_NET_DEV_LIST="$ALL_NET_DEV_LIST $NET_DEV"
+			if brctl show | tail -n+2 | awk '{ print $1 }' | grep -w $NET_DEV 1>/dev/null; then
+				ATTACHED_TO=`brctl show | tail -n+2 | grep -w $NET_DEV | awk '{ print $4 }'`
+				BRIDGE_MAC=`ip a s $NET_DEV | grep -w $NET_DEV$ | grep "link/ether" | awk '{ print $2 }' | tr "[:upper:]" "[:lower:]"`
+				BRIDGE_IP_LIST=`get_ip_list_for_dev $NET_DEV`
+				echo "b@$NET_DEV@$BRIDGE_MAC@$BRIDGE_IP_LIST@$ATTACHED_TO" >> $SYSTEM_STATUS_TMP
+			else
+				NET_DEV_MAC=`ip a s $NET_DEV | grep -w $NET_DEV$ | grep "link/ether" | awk '{ print $2 }' | tr "[:upper:]" "[:lower:]"`
+				NET_DEV_IP_LIST=`get_ip_list_for_dev $NET_DEV`
+				echo "n@$NET_DEV@$NET_DEV_MAC@$NET_DEV_IP_LIST" >> $SYSTEM_STATUS_TMP
+			fi
+		done
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$NETWORK_MANAGER_OPENQRM_USERNAME --http-password=$NETWORK_MANAGER_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $SYSTEM_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/network-manager/network-manager-action.php?network_manager_command=get_network_config; then
+			openqrm_post_event 0 "post_vg" 2 "openqrm-network-manager" "Could not post the device list to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $SYSTEM_STATUS_TMP $SYSTEM_STATUS_TMP.post
+
+		openqrm_lock_queue release network-manager $LOCK_TIME
+		trap '' EXIT
+		;;
+
+	add_br)
+		RETURN_CODE=0
+		RETURN_MSG=""
+		if [ "$NETWORK_BRIDGE_NAME" == "" ] || [ "$NETWORK_CARD" == "" ] || [ "$NETWORK_BRIDGE_IP_ADDRESS" == "" ] || [ "$NETWORK_BRIDGE_SUBNETMASK" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			network_manager_usage
+		fi
+		if `brctl show | tail -n+2 | grep -w $NETWORK_BRIDGE_NAME 1>/dev/null`; then
+			RETURN_CODE=1
+			RETURN_MSG="Network bridge $NETWORK_BRIDGE_NAME already exists on resource $resource_id."
+			openqrm_post_event 0 "add_br" 3 "openqrm-network-manager" "$RETURN_MSG"
+		fi
+		# if the bridge-ports nic has already the same ip as the new vlan nic
+		if [ "$NETWORK_BRIDGE_VLAN" != "" ] && [ "$NETWORK_BRIDGE_VLAN" != "0" ]; then
+			NETWORK_CARD_CONFIG=`get_ip_list_for_dev $NETWORK_CARD`
+			NETWORK_CARD_IP_ADDRESS=`echo $NETWORK_CARD_CONFIG | cut -d'/' -f1`
+			if [ "$NETWORK_CARD_IP_ADDRESS" == "$NETWORK_BRIDGE_IP_ADDRESS" ]; then
+				openqrm_post_event 0 "add_br" 2 "openqrm-network-manager" "IP Address $NETWORK_BRIDGE_IP_ADDRESS already in use by $NETWORK_CARD on resource $resource_id."
+				RETURN_CODE=1
+				RETURN_MSG="IP Address $NETWORK_BRIDGE_IP_ADDRESS already in use by $NETWORK_CARD on resource $resource_id."
+			fi
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire network-manager`
+		trap "openqrm_lock_queue release network-manager $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		openqrm_save_network_config
+		if [ "$RETURN_CODE" == 0 ]; then
+			if [ "$NETWORK_CARD" != "" ]; then
+				ifdown $NETWORK_CARD
+			fi
+			openqrm_add_interface bridge"@"$NETWORK_BRIDGE_NAME"@"$NETWORK_CARD"@"$NETWORK_BRIDGE_FD"@"$NETWORK_BRIDGE_HELLO"@"$NETWORK_BRIDGE_MAXAGE"@"$NETWORK_BRIDGE_STP"@"$NETWORK_BRIDGE_MAC"@"$NETWORK_BRIDGE_IP_ADDRESS"@"$NETWORK_BRIDGE_SUBNETMASK"@"$NETWORK_BRIDGE_GATEWAY"@"$NETWORK_BRIDGE_VLAN"@"
+			ifdown $NETWORK_BRIDGE_NAME 2>/dev/null
+			if [ "$NETWORK_CARD" != "" ]; then
+				ifup $NETWORK_CARD
+			fi
+			# bring up the new bridge
+			if ! ifup $NETWORK_BRIDGE_NAME; then
+				openqrm_rollback_network_config
+				ifconfig $NETWORK_BRIDGE_NAME down
+				brctl delbr $NETWORK_BRIDGE_NAME
+				if [ "$NETWORK_CARD" != "" ]; then
+					ifup $NETWORK_CARD
+				fi
+				openqrm_post_event 0 "add_br" 2 "openqrm-network-manager" "Error activating bridge $NETWORK_BRIDGE_NAME. Rolling back network-configuration on resource $resource_id."
+				RETURN_CODE=1
+				RETURN_MSG="Error activating bridge $NETWORK_BRIDGE_NAME on resource $resource_id."
+			fi
+		fi
+
+		# check if the openQRM still can be reached, if not roll back
+		if [ "$RETURN_CODE" == 0 ]; then
+			if ! ping -c 1 $OPENQRM_SERVER_IP -w 5 -W 5 2>/dev/null 1>/dev/null; then
+				openqrm_rollback_network_config
+				ifconfig $NETWORK_BRIDGE_NAME down
+				brctl delbr $NETWORK_BRIDGE_NAME
+				if [ "$NETWORK_CARD" != "" ]; then
+					ifup $NETWORK_CARD
+				fi
+				openqrm_post_event 0 "add_br" 2 "openqrm-network-manager" "Error reaching openQRM Server at $OPENQRM_SERVER_IP. Rolling back network-configuration on resource $resource_id."
+				RETURN_CODE=1
+				RETURN_MSG="Error reaching openQRM Server at $OPENQRM_SERVER_IP on resource $resource_id."
+			fi
+		fi
+
+		# in case this is the openQRM Server itself and the openQRM Interface changed we need to adapt the openqrm-server.conf
+		if [ "$RETURN_CODE" == 0 ]; then
+			if [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+				if [ "$NETWORK_CARD" != "" ]; then
+					if [ "$OPENQRM_SERVER_INTERFACE" == "$NETWORK_CARD" ]; then
+						sed -i -e "s/^OPENQRM_SERVER_INTERFACE=.*/OPENQRM_SERVER_INTERFACE=\"$NETWORK_BRIDGE_NAME\"/g" $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+					fi
+				fi
+			fi
+		fi
+
+
+#		# dnsmasq - take the subnet from the bridge
+#		if [ "$RETURN_CODE" == 0 ]; then
+#			if [ "$NETWORK_BRIDGE_SUBNETMASK" != "" ] && [ "$NETWORK_BRIDGE_IP_ADDRESS" != "" ] && [ "$NETWORK_BRIDGE_DNSMASQ_IP_FIRST" != "" ] && [ "$NETWORK_BRIDGE_DNSMASQ_IP_LAST" != "" ]; then
+#				NETWORK_BRIDGE_DNSMASQ_NETWORK=`get_network_address $NETWORK_BRIDGE_IP_ADDRESS $NETWORK_BRIDGE_SUBNETMASK`
+#				# iptables masq
+#				if ! iptables -t nat -A POSTROUTING -s $NETWORK_BRIDGE_DNSMASQ_NETWORK ! -d $NETWORK_BRIDGE_DNSMASQ_NETWORK -j MASQUERADE; then
+#					RETURN_CODE=1
+#					RETURN_MSG="Error masquarading dsnmasq network $NETWORK_BRIDGE_DNSMASQ_NETWORK for $NETWORK_BRIDGE_GATEWAY for $NETWORK_BRIDGE_NAME on resource $resource_id."
+#					openqrm_post_event 0 "add_br" 3 "openqrm-network-manager" "$RETURN_MSG"
+#				fi
+#				# dnsmasq
+#				if [ "$RETURN_CODE" == 0 ]; then
+#					if ! dnsmasq --strict-order --bind-interfaces --pid-file=/var/run/dnsmasq.$NETWORK_BRIDGE_NAME.pid --listen-address $NETWORK_BRIDGE_IP_ADDRESS --dhcp-range $NETWORK_BRIDGE_DNSMASQ_IP_FIRST,$NETWORK_BRIDGE_DNSMASQ_IP_LAST --dhcp-no-override --except-interface=lo --interface=$NETWORK_BRIDGE_NAME; then
+#						RETURN_CODE=1
+#						RETURN_MSG="Error starting dsnmasq network $NETWORK_BRIDGE_DNSMASQ_NETWORK for $NETWORK_BRIDGE_GATEWAY for $NETWORK_BRIDGE_NAME on resource $resource_id."
+#						openqrm_post_event 0 "add_br" 3 "openqrm-network-manager" "$RETURN_MSG"
+#					fi
+#					echo 1 > /proc/sys/net/ipv4/ip_forward
+#				fi
+#				DNSMASQ_PID=`cat /var/run/dnsmasq.$NETWORK_BRIDGE_NAME.pid`
+#			fi
+#		fi
+
+
+
+
+		if [ "$RETURN_CODE" == 0 ]; then
+			RETURN_MSG="ok"
+		fi
+		# Send message
+		SYSTEM_STATUS_TMP=$resource_id.network_stat
+		> $SYSTEM_STATUS_TMP
+		echo $RETURN_MSG > $SYSTEM_STATUS_TMP
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$NETWORK_MANAGER_OPENQRM_USERNAME --http-password=$NETWORK_MANAGER_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $SYSTEM_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/network-manager/network-manager-action.php?network_manager_command=get_network_config; then
+			openqrm_post_event 0 "add_br" 2 "openqrm-network-manager" "Could not post the device list to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $SYSTEM_STATUS_TMP
+
+		openqrm_lock_queue release network-manager $LOCK_TIME
+		trap '' EXIT
+
+		exit $RETURN_CODE
+		;;
+
+
+	remove_br)
+		RETURN_CODE=0
+		RETURN_MSG=""
+		if [ "$NETWORK_BRIDGE_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			network_manager_usage
+		fi
+		if `! brctl show | tail -n+2 | grep -w $NETWORK_BRIDGE_NAME 1>/dev/null`; then
+			RETURN_CODE=1
+			RETURN_MSG="Network bridge $NETWORK_BRIDGE_NAME does not exists on resource $resource_id."
+			openqrm_post_event 0 "add_br" 3 "openqrm-network-manager" "$RETURN_MSG"
+		fi
+		NETWORK_CARD=`brctl show | tail -n+2 | grep -w $NETWORK_BRIDGE_NAME | awk '{ print $4 }'`
+		# if this is openQRM itself
+		if [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+			if [ "$OPENQRM_SERVER_INTERFACE" == "$NETWORK_BRIDGE_NAME" ]; then
+				if [ "$NETWORK_CARD" == "" ]; then
+					RETURN_CODE=1
+					RETURN_MSG="$NETWORK_BRIDGE_NAME is the openQRM Management Network Interface! Not remove bridge $NETWORK_BRIDGE_NAME which does not have any Interfaces attached."
+					openqrm_post_event 0 "add_br" 3 "openqrm-network-manager" "$RETURN_MSG"
+				fi
+			fi
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire network-manager`
+		trap "openqrm_lock_queue release network-manager $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		openqrm_post_event 0 "remove_br" 5 "openqrm-network-manager" "Removing network bridge $NETWORK_BRIDGE_NAME on resource $resource_id."
+		openqrm_save_network_config
+
+
+#		# clean up iptables + dnsmasq
+#		if [ "$NETWORK_CARD_IP_ADDRESS" != "" ] && [ "$NETWORK_CARD_SUBNET_MASK" != "" ]; then
+#			NETWORK_BRIDGE_DNSMASQ_NETWORK=`get_network_address $NETWORK_CARD_IP_ADDRESS $NETWORK_CARD_SUBNET_MASK`
+#			iptables -t nat -D POSTROUTING -s $NETWORK_BRIDGE_DNSMASQ_NETWORK -j MASQUERADE
+#			DNSMASQ_PID=`cat /var/run/dnsmasq.$NETWORK_BRIDGE_NAME.pid 2>/dev/null` && kill -9 $DNSMASQ_PID
+#		fi
+
+		# if network-card = attached_to apply previous ip config of the removed bridge
+		if [ "$NETWORK_CARD" != "" ]; then
+			# if it is a real phys. interface and not a VLAN nic
+			if ! echo $NETWORK_CARD | grep .[0-9]\.[0-9] 1>/dev/null; then
+				# get ip config of attached_to to apply to physical device later
+				NETWORK_CARD_CONFIG=`get_ip_list_for_dev $NETWORK_BRIDGE_NAME`
+				NETWORK_CARD_IP_ADDRESS=`echo $NETWORK_CARD_CONFIG | cut -d'/' -f1`
+				NETWORK_CARD_BROADCAST=`echo $NETWORK_CARD_CONFIG | cut -d'/' -f2`
+				NETWORK_CARD_SUBNET_MASK=`echo $NETWORK_CARD_CONFIG | cut -d'/' -f3`
+				NETWORK_CARD_GATEWAY=`route -n | grep -w ^0.0.0.0 | grep -w $NETWORK_BRIDGE_NAME | awk '{ print $2 }'`
+			fi
+		fi
+
+		# bring down the bridge and remove from config
+		ifconfig $NETWORK_BRIDGE_NAME down
+		brctl delbr $NETWORK_BRIDGE_NAME
+		openqrm_remove_interface bridge"@"$NETWORK_BRIDGE_NAME"@"$NETWORK_CARD
+		if [ "$NETWORK_CARD_IP_ADDRESS" != "" ] && [ "$NETWORK_CARD_SUBNET_MASK" != "" ]; then
+			# re-write config for nic
+			openqrm_add_interface nic"@"$NETWORK_CARD"@@@@@@@"$NETWORK_CARD_IP_ADDRESS"@"$NETWORK_CARD_SUBNET_MASK"@"$NETWORK_CARD_GATEWAY"@@"
+		fi
+		if [ "$NETWORK_CARD" != "" ]; then
+			if ! echo $NETWORK_CARD | grep .[0-9]\.[0-9] 1>/dev/null; then
+				ifdown $NETWORK_CARD
+				ifup $NETWORK_CARD
+			else
+				# remove VLAN Interface
+				ifconfig $NETWORK_CARD down
+				vconfig rem $NETWORK_CARD
+			fi
+		fi
+
+		# check if the openQRM still can be reached, if not roll back
+		if [ "$RETURN_CODE" == 0 ]; then
+			if ! ping -c 1 $OPENQRM_SERVER_IP -w 5 -W 5 2>/dev/null 1>/dev/null; then
+				if [ "$NETWORK_CARD" != "" ]; then
+					ifdown $NETWORK_CARD
+				fi
+				openqrm_rollback_network_config
+				ifup $NETWORK_BRIDGE_NAME
+				openqrm_post_event 0 "add_br" 2 "openqrm-network-manager" "Error reaching openQRM Server at $OPENQRM_SERVER_IP. Rolling back network-configuration on resource $resource_id."
+				RETURN_CODE=1
+				RETURN_MSG="Error reaching openQRM Server at $OPENQRM_SERVER_IP on resource $resource_id."
+			fi
+		fi
+
+		# in case this is the openQRM Server itself and the openQRM Interface changed we need to adapt the openqrm-server.conf
+		if [ "$RETURN_CODE" == 0 ]; then
+			if [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+				if [ "$OPENQRM_SERVER_INTERFACE" == "$NETWORK_BRIDGE_NAME" ]; then
+					if [ "$NETWORK_CARD" != "" ]; then
+						sed -i -e "s/^OPENQRM_SERVER_INTERFACE=.*/OPENQRM_SERVER_INTERFACE=\"$NETWORK_CARD\"/g" $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+					fi
+				fi
+			fi
+		fi
+
+		if [ "$RETURN_CODE" == 0 ]; then
+			RETURN_MSG="ok"
+			openqrm_post_event 0 "remove_br" 5 "openqrm-network-manager" "Removed network bridge $NETWORK_BRIDGE_NAME on resource $resource_id."
+		fi
+		# Send message
+		SYSTEM_STATUS_TMP=$resource_id.network_stat
+		> $SYSTEM_STATUS_TMP
+		echo $RETURN_MSG > $SYSTEM_STATUS_TMP
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$NETWORK_MANAGER_OPENQRM_USERNAME --http-password=$NETWORK_MANAGER_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $SYSTEM_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/network-manager/network-manager-action.php?network_manager_command=get_network_config; then
+			openqrm_post_event 0 "remove_br" 2 "openqrm-network-manager" "Could not post the device list to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $SYSTEM_STATUS_TMP
+
+		openqrm_lock_queue release network-manager $LOCK_TIME
+		trap '' EXIT
+
+		exit $RETURN_CODE
+		;;
+
+
+
+
+
+	*)
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		echo "ERROR: Free commandline arguments are not allowed!"
+		network_manager_usage
+		exit 6
+		;;
+esac
+

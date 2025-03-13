@@ -1,0 +1,4 @@
+
+deb @METHOD@ftp.halifax.rwth-aachen.de/ubuntu trusty main
+#deb-src deb @METHOD@archive.ubuntu.com/ubuntu trusty main
+

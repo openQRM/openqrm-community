@@ -1,0 +1,138 @@
+#!/bin/bash
+# this script provides a guided installation/uninstallation for linuxcoe
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+# get the openQRM functions
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+OPENQRM_SOURCE_DIR=$OPENQRM_SERVER_BASE_DIR
+export OPENQRM_SOURCE_DIR
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/include/openqrm-plugin-linuxcoe-functions
+
+LCOE_BASE_VERSION="4"
+LCOE_SUB_VERSION="3"
+LCOE_BASE="linuxcoe-sd-$LCOE_BASE_VERSION.$LCOE_SUB_VERSION.tar.gz"
+LCOE_DISTRIBUTIONS="centos debian ubuntu"
+LCOE_INSTALL_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/linuxcoe-sd"
+LCOE_INSTALL_TMP="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/lcoe-install"
+CURRENT_DIR=`pwd`
+
+
+
+function lcoe_install() {
+
+	linuxcoe_log "> Installing LinuxCOE"
+	# unpack
+	rm -rf $LCOE_INSTALL_TMP/install
+	mkdir -p $LCOE_INSTALL_TMP/install
+	if [ ! -d $LCOE_INSTALL_TMP/install/linuxcoe-sd-$LCOE_BASE_VERSION.$LCOE_SUB_VERSION ]; then
+		tar -C $LCOE_INSTALL_TMP/install -xzf $LCOE_INSTALL_TMP/packages/$LCOE_BASE
+	fi
+	for DIST in $LCOE_DISTRIBUTIONS; do
+		if [ ! -d $LCOE_INSTALL_TMP/install/linuxcoe-sd-data-$DIST-$LCOE_BASE_VERSION.$LCOE_SUB_VERSION ]; then
+			tar -C  $LCOE_INSTALL_TMP/install -xzf $LCOE_INSTALL_TMP/packages/linuxcoe-sd-data-$DIST-$LCOE_BASE_VERSION.$LCOE_SUB_VERSION.tar.gz
+		fi
+	done
+	# LinuxCOE installs well with the defaults on Debian/Ubuntu, for RH/Centos we have to set some configuration env
+	if [ -f /etc/debian_version ]; then
+		LCO_INSTALL_PARAMS=""
+	elif [ -f /etc/redhat-release ]; then
+		LCO_INSTALL_PARAMS="httpdcfgdir=/etc/httpd/conf.d httpd_user=apache httpd_group=apache"
+	elif [ -f /etc/SuSE-release ]; then
+		LCO_INSTALL_PARAMS="httpd_user=wwwrun httpd_group=www"
+	fi
+	cd $LCOE_INSTALL_TMP/install/linuxcoe-sd-$LCOE_BASE_VERSION.$LCOE_SUB_VERSION
+	if [ ! -f $LCOE_INSTALL_TMP/install/linuxcoe-sd-$LCOE_BASE_VERSION.$LCOE_SUB_VERSION/Makefile ]; then
+		./autogen.sh 1>/dev/null
+		export CONFIG_SITE="./config.site"
+		if ! ./configure --prefix=$LCOE_INSTALL_DIR $LCO_INSTALL_PARAMS; then
+			linuxcoe_log "! Error during configure of LinuxCOE. Please check the requirements !"
+			exit 1
+		fi
+	fi
+	make -s
+	make -s install
+	make -s integrate
+	for DIST in $LCOE_DISTRIBUTIONS; do
+		linuxcoe_log "> Installing linuxcoe-sd-data-$DIST"
+		cd $LCOE_INSTALL_TMP/install/linuxcoe-sd-data-$DIST-$LCOE_BASE_VERSION.$LCOE_SUB_VERSION
+		./configure --prefix=$LCOE_INSTALL_DIR $LCO_INSTALL_PARAMS
+		make -s
+		make -s install
+	done
+	# cp all additional iso.tar images
+	/bin/cp -f $LCOE_INSTALL_TMP/packages/*iso.tar $LCOE_INSTALL_DIR/images/
+	# post config
+	/bin/cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/etc/templates/data/* $LCOE_INSTALL_DIR/data/
+	/bin/cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/etc/templates/osvend.d/* $LCOE_INSTALL_DIR/osvend.d/
+	/bin/cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/etc/templates/depots/* $LCOE_INSTALL_DIR/depots/
+	# patches
+	# Centos 6 does not like langsupport in ks
+	if ! grep CentOS $LCOE_INSTALL_DIR/cgi-bin/nph-coe_image 1>/dev/null; then
+		linuxcoe_log "> Patching $LCOE_INSTALL_DIR/cgi-bin/nph-coe_image for CentOS"
+		cd $LCOE_INSTALL_DIR/
+		patch -p0 -i  $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/etc/templates/patches/nph-coe_image.diff
+		cp -af $LCOE_INSTALL_DIR/cgi-bin/nph-coe_image $LCOE_INSTALL_DIR/cgi-bin/nonph-coe_image
+		cd $CURRENT_DIR
+	fi
+	cd $CURRENT_DIR
+	linuxcoe_log "> Installation of LinuxCOE finished successfully"
+}
+
+
+function lcoe_uninstall() {
+	linuxcoe_log "> Un-installing LinuxCOE"
+	rm -f /etc/apache2/conf.d/LinuxCOE-SystemDesigner.conf
+	rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/linuxcoe-sd
+	rm -rf /etc/linuxcoe-sd
+	cd $CURRENT_DIR
+	linuxcoe_log "> Uninstallation of LinuxCOE finished successfully"
+}
+
+
+
+case "$1" in
+	install)
+		LOCK_TIME=`openqrm_lock_queue aquire linuxcoe`
+		trap "openqrm_lock_queue release linuxcoe $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		lcoe_uninstall
+		lcoe_install
+
+		openqrm_lock_queue release linuxcoe $LOCK_TIME
+		trap '' EXIT
+		;;
+	uninstall)
+		LOCK_TIME=`openqrm_lock_queue aquire linuxcoe`
+		trap "openqrm_lock_queue release linuxcoe $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		lcoe_uninstall
+
+		openqrm_lock_queue release linuxcoe $LOCK_TIME
+		trap '' EXIT
+		;;
+		*)
+		echo $"Usage: $0 {install|uninstall}"
+		exit 1
+		;;
+esac
+
+
+

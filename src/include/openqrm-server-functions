@@ -1,0 +1,861 @@
+#!/bin/bash
+# this is the server function file for openQRM
+# only server functions should go in here
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+export LANGUAGE=C
+export LANG=C
+export LC_ALL=C
+
+if [ "$OPENQRM_SERVER_BASE_DIR" == "" ]; then
+	echo "ERROR: Please export OPENQRM_SERVER_BASE_DIR before sourcing $0"
+	exit 1
+fi
+
+# source the server configuration
+OPENQRM_SERVER_CONF=$OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_CONF
+
+# some definitions
+#OPENQRM_UNWANTED_MODULES="cops.o ipddp.o ltpc.o hdlcdrv.o airo_cs.o aironet4500_cs.o airo.o axnet_cs.o fmvj18x_cs.o ibmtr_cs.o netwave_cs.o nmclan_cs.o pcnet_cs.o ray_cs.o smc91c92_cs.o wavelan_cs.o wvlan_cs.o xirc2ps_cs.o xircom_cb.o xircom_tulip_cb.o ppp_async.o ppp_deflate.o ppp_generic.o ppp_synctty.o wavelan.o wd.o winbond-840.o airo_cs.o airo.o hermes.o orinoco_cs.o orinoco.o orinoco_plx.o orinoco_old_cs.o cops.ko ipddp.ko ltpc.ko hdlcdrv.ko airo_cs.ko aironet4500_cs.ko airo.ko axnet_cs.ko fmvj18x_cs.ko ibmtr_cs.ko netwave_cs.ko nmclan_cs.ko pcnet_cs.ko ray_cs.ko smc91c92_cs.ko wavelan_cs.ko wvlan_cs.ko xirc2ps_cs.ko xircom_cb.ko xircom_tulip_cb.ko ppp_async.ko ppp_deflate.ko ppp_generic.ko ppp_synctty.ko wavelan.ko wd.ko winbond-840.ko airo_cs.ko airo.ko hermes.ko orinoco_cs.ko orinoco.ko orinoco_plx.ko orinoco_old_cs.ko de600.ko de620.ko defxx.ko depca.ko hp100.ko hp.ko hp-plus.ko ne3210.ko ne.ko netwave_cs.ko ipw2100.ko proteon.ko skisa.ko vga16fb.ko atyfb.ko xen-netfront.ko"
+OPENQRM_UNWANTED_MODULES="cops.o ipddp.o ltpc.o hdlcdrv.o airo_cs.o aironet4500_cs.o airo.o axnet_cs.o fmvj18x_cs.o ibmtr_cs.o netwave_cs.o nmclan_cs.o pcnet_cs.o ray_cs.o smc91c92_cs.o wavelan_cs.o wvlan_cs.o xirc2ps_cs.o xircom_cb.o xircom_tulip_cb.o ppp_async.o ppp_deflate.o ppp_generic.o ppp_synctty.o wavelan.o wd.o winbond-840.o airo_cs.o airo.o hermes.o orinoco_cs.o orinoco.o orinoco_plx.o orinoco_old_cs.o cops.ko ipddp.ko ltpc.ko hdlcdrv.ko airo_cs.ko aironet4500_cs.ko airo.ko axnet_cs.ko fmvj18x_cs.ko ibmtr_cs.ko netwave_cs.ko nmclan_cs.ko pcnet_cs.ko ray_cs.ko smc91c92_cs.ko wavelan_cs.ko wvlan_cs.ko xirc2ps_cs.ko xircom_cb.ko xircom_tulip_cb.ko ppp_async.ko ppp_deflate.ko ppp_generic.ko ppp_synctty.ko wavelan.ko wd.ko winbond-840.ko airo_cs.ko airo.ko hermes.ko orinoco_cs.ko orinoco.ko orinoco_plx.ko orinoco_old_cs.ko de600.ko de620.ko defxx.ko depca.ko hp100.ko hp.ko hp-plus.ko ne3210.ko ne.ko netwave_cs.ko ipw2100.ko proteon.ko skisa.ko atyfb.ko xen-netfront.ko"
+
+OPENQRM_DEFAULT_INITRD_TEMPLATE="$OPENQRM_SERVER_BASE_DIR/openqrm/etc/templates/openqrm-initrd-default.tgz"
+OPENQRM_SERVER_LINUXRC="$OPENQRM_SERVER_BASE_DIR/openqrm/etc/templates/openqrm-linuxrc"
+OPENQRM_MAX_INITRD_SIZE=512000
+OPENQRM_DEFAULT_RAM_DISK_BLOCK_SIZE=1024
+# static directory define for the server state backups
+OPENQRM_SERVER_STATE_DIR="/var/spool/openqrm-state"
+# which files/dirs to backup/restore (base only, plugin need to care about their bacukp/restore themselves)
+OPENQRM_SERVER_STATE_FILES="$OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+	$OPENQRM_SERVER_BASE_DIR/openqrm/etc/templates/openqrm-initrd-default.tgz	\
+	$OPENQRM_SERVER_BASE_DIR/openqrm/etc/templates/openqrm-linuxrc"
+OPENQRM_SERVER_STATE_DIRS="$OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/ \
+	$OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/	\
+	$OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/	\
+	$OPENQRM_SERVER_BASE_DIR/openqrm/web/base/plugins/"
+
+
+
+# translates cidr to subnet mask
+function cidr2subnet () {
+	if [ "$1" != "" ]; then
+		set -- $(( 5 - ($1 / 8) )) 255 255 255 255 $(( (255 << (8 - ($1 % 8))) & 255 )) 0 0 0
+		[ $1 -gt 1 ] && shift $1 || shift
+		echo ${1-0}.${2-0}.${3-0}.${4-0}
+	fi
+}
+
+
+# function to export all given configuration from the
+# main openQRM-server config file
+function openqrm_server_get_config() {
+	. $OPENQRM_SERVER_CONF
+	for VAR in `cat $OPENQRM_SERVER_CONF | grep -v ^# | grep OPENQRM | cut -d'=' -f1`; do
+		eval `export $VAR`
+	done
+
+	# make sure /sbin and /usr/sbin are in our PATH, because we might be running as the webserver user,
+	# in which case the ifconfig and route commands will fail, leaving the variables empty (bad!)
+	PATH=/sbin:/usr/sbin:$PATH
+	# get ip configuration
+	export OPENQRM_SERVER_IP_ADDRESS=`ip a s $OPENQRM_SERVER_INTERFACE 2>/dev/null | grep -w $OPENQRM_SERVER_INTERFACE$ | grep -w inet | awk '{ print $2 }' | cut -d'/' -f1`
+	export OPENQRM_SERVER_BROADCAST_ADDRESS=`ip a s $OPENQRM_SERVER_INTERFACE 2>/dev/null | grep -w $OPENQRM_SERVER_INTERFACE$ | grep -w inet | awk '{ print $4 }' | cut -d'/' -f1`
+	export OPENQRM_SERVER_CIDR=`ip a s $OPENQRM_SERVER_INTERFACE 2>/dev/null | grep -w $OPENQRM_SERVER_INTERFACE$ | grep -w inet | awk '{ print $2 }' | cut -d'/' -f2`
+	export OPENQRM_SERVER_SUBNET_MASK=`cidr2subnet $OPENQRM_SERVER_CIDR`
+	export OPENQRM_SERVER_DEFAULT_GATEWAY=`route -n | grep ^0.0.0.0 | head -n1 | awk {' print $2 '}`
+}
+# run immediatly
+openqrm_server_get_config
+
+# define wget to use with https
+if [ "$OPENQRM_WEB_PROTOCOL" == "https" ]; then
+	export WGET="wget --no-check-certificate"
+else
+	export WGET="wget"
+fi
+
+
+# --------------------------------------------------------------------
+# ------------------------- kernel functions -------------------------
+# --------------------------------------------------------------------
+
+
+
+# function resolve kernel module dependencies
+# param 1	: full path to kernel module
+function modresolvdeps() {
+	MODULE=$1
+	FMOD=`basename $MODULE`
+	FREST=`echo $MODULE | sed -e "s#.*\/kernel\/##g"`
+	DMOD=`echo $MODULE | sed -e "s#$FREST##g"`
+	DPENDLIST=`modinfo $MODULE | grep ^depends | cut -d':' -f2 | awk '{ print $1 }' | sed -e "s/,/ /g"`
+	if [ "$DPENDLIST" != "" ]; then
+		for MOD in `echo $DPENDLIST`; do
+			#echo $MOD
+			MODFULLPATH=`find $DMOD -name $MOD.ko`
+			echo $MODFULLPATH
+			modresolvdeps $MODFULLPATH
+		done
+	fi
+
+}
+
+
+#function to recreate openqrm-client after install
+function openqrm_server_create_client(){
+
+	#used in openqrm-server.conf for OPENQRM_BUILD_TMP_DIR
+	export OPENQRM_SOURCE_DIR="/usr/src/openqrm-src";
+
+	export OPENQRM_SERVER_CONF="/usr/share/openqrm/etc/openqrm-server.conf"
+
+	if [ -L "$OPENQRM_SOURCE_DIR" ] && [ -d "$OPENQRM_SOURCE_DIR" ]; then
+
+		echo "Creating the openqrm-client boot-service package"
+
+		#already have boot-service directory
+		#. "$OPENQRM_SERVER_CONF" && mkdir -p $$OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service
+
+		. "$OPENQRM_SERVER_CONF" && mkdir -p "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/bin
+		. "$OPENQRM_SERVER_CONF" && cp -a "$OPENQRM_RESOURCE_BASE_DIR"/openqrm/bin/openqrm-cmd "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/bin/
+		. "$OPENQRM_SERVER_CONF" && cp -a "$OPENQRM_RESOURCE_BASE_DIR"/openqrm/bin/openqrm-rabbitmq-cmd-queue-ctl "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/bin/
+		. "$OPENQRM_SERVER_CONF" && chmod +x "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/bin/*
+		. "$OPENQRM_SERVER_CONF" && mkdir -p "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/sbin
+		. "$OPENQRM_SERVER_CONF" && cp -a "$OPENQRM_RESOURCE_BASE_DIR"/openqrm/sbin/openqrm* "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/sbin/
+		. "$OPENQRM_SERVER_CONF" && chmod +x "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/sbin/*
+		. "$OPENQRM_SERVER_CONF" && mkdir -p "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/include
+		. "$OPENQRM_SERVER_CONF" && cp -a "$OPENQRM_RESOURCE_BASE_DIR"/openqrm/include/openqrm-functions "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/include/
+		. "$OPENQRM_SERVER_CONF" && cp -a "$OPENQRM_RESOURCE_BASE_DIR"/openqrm/include/openqrm-package-functions "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/include/
+		. "$OPENQRM_SERVER_CONF" && mkdir -p "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/etc/init.d/
+		. "$OPENQRM_SERVER_CONF" && cp -a "$OPENQRM_RESOURCE_BASE_DIR"/openqrm/etc/init.d/openqrm-client "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/etc/init.d/
+
+		#no systemd yet
+		#. "$OPENQRM_SERVER_CONF" && cp -a "$OPENQRM_RESOURCE_BASE_DIR"/openqrm/etc/systemd "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/etc/
+
+		. "$OPENQRM_SERVER_CONF" && chmod +x "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/"$OPENQRM_RESOURCE_BASE_DIR"/openqrm/etc/init.d/*
+		. "$OPENQRM_SERVER_CONF" && tar -C "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client/ -czf "$OPENQRM_SERVER_BASE_DIR"/openqrm/web/boot-service/openqrm-client.tgz `echo "$OPENQRM_RESOURCE_BASE_DIR" | cut -d'/' -f2-`
+		. "$OPENQRM_SERVER_CONF" && chmod 744 "$OPENQRM_SERVER_BASE_DIR"/openqrm/web/boot-service/openqrm-client.tgz
+		rm -rf "$OPENQRM_BUILD_TMP_DIR"/openqrm-build/openqrm-client
+
+	fi
+
+}
+
+
+# function to create kernels
+# param 1	: kernel name
+# param 2	: kernel-version
+# param 3	: path-to-kernel-files
+function openqrm_server_create_kernel() {
+
+	OPENQRM_SERVER_KERNEL_NAME=$1
+	OPENQRM_SERVER_KERNEL_VERSION=$2
+	OPENQRM_SERVER_KERNEL_LOCATION=$3
+
+	# OPENQRM_SERVER_KERNEL_TYPE can be "ext2" or "initramfs"
+	OPENQRM_SERVER_KERNEL_TYPE=$4
+	OPENQRM_SERVER_INITRD_TEMPLATE=$5
+	OPENQRM_SERVER_UNWANTED_MODULES=$6
+
+	if [ "$OPENQRM_SERVER_UNWANTED_MODULES" != "" ]; then
+		OPENQRM_SERVER_UNWANTED_MODULES_SPACES=`echo $OPENQRM_SERVER_UNWANTED_MODULES | sed -e "s/,/\.ko /g"`".ko"
+		OPENQRM_UNWANTED_MODULES="$OPENQRM_UNWANTED_MODULES $OPENQRM_SERVER_UNWANTED_MODULES_SPACES"
+		for MO in `echo $OPENQRM_SERVER_UNWANTED_MODULES_SPACES`; do
+			MODULES_EXCLUDE="$MODULES_EXCLUDE --exclude=$MO"
+		done
+	fi
+
+	if [ "$OPENQRM_SERVER_KERNEL_TYPE" == "" ]; then
+		export OPENQRM_SERVER_KERNEL_TYPE="initramfs"
+	fi
+	if [ "$OPENQRM_SERVER_INITRD_TEMPLATE" == "" ]; then
+#		case `openqrm_get_distro_name()` in
+#                	"centos")
+#                		OPENQRM_SERVER_INITRD_TEMPLATE="$OPENQRM_SERVER_BASE_DIR/openqrm/etc/templates/openqrm-initrd-template.centos.x86_64.tgz"
+#                		;;
+#                	"debian")
+#                		OPENQRM_SERVER_INITRD_TEMPLATE="$OPENQRM_SERVER_BASE_DIR/openqrm/etc/templates/openqrm-initrd-template.debian.x86_64.tgz"
+#                		;;
+#                	"ubuntu")
+#                		OPENQRM_SERVER_INITRD_TEMPLATE="$OPENQRM_SERVER_BASE_DIR/openqrm/etc/templates/openqrm-initrd-template.ubuntu.x86_64.tgz"
+#	                	;;
+#                esac
+#	
+#		if [ -f "$OPENQRM_SERVER_INITRD_TEMPLATE" ]; then
+#			export $OPENQRM_SERVER_INITRD_TEMPLATE
+#		else
+			export OPENQRM_SERVER_INITRD_TEMPLATE=$OPENQRM_DEFAULT_INITRD_TEMPLATE
+#		fi
+	fi
+
+
+	# kernel there ?
+	if [ ! -f "$OPENQRM_SERVER_KERNEL_LOCATION/boot/vmlinuz-$OPENQRM_SERVER_KERNEL_VERSION" ]; then
+		echo "ERROR: Cannot find kernel file at $OPENQRM_SERVER_KERNEL_LOCATION/boot/vmlinuz-$OPENQRM_SERVER_KERNEL_VERSION!"
+		return 1
+	fi
+	# system.map there ?
+	if [ ! -f "$OPENQRM_SERVER_KERNEL_LOCATION/boot/System.map-$OPENQRM_SERVER_KERNEL_VERSION" ]; then
+		echo "ERROR: Cannot find System.map at $OPENQRM_SERVER_KERNEL_LOCATION/boot/System.map-$OPENQRM_SERVER_KERNEL_VERSION!"
+		return 1
+	fi
+	# module dir there ?
+	if [ ! -d "$OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION" ]; then
+		echo "ERROR: Cannot find kernel module directory at $OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION!"
+		return 1
+	fi
+
+	## modules.pcimap there ?
+	#if [ ! -f "$OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION/modules.pcimap" ]; then
+	#	echo "WARNING: Cannot find modules.pcimap in kernel module directory at $OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION. Trying to create it ..."
+	#	if ! depmod -a -m -F $OPENQRM_SERVER_KERNEL_LOCATION/boot/System.map-$OPENQRM_SERVER_KERNEL_VERSION -b $OPENQRM_SERVER_KERNEL_LOCATION $OPENQRM_SERVER_KERNEL_VERSION; then
+	#		echo "WARNING: Could not create modules.pcimap in kernel module directory at $OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION! Trying to continue ..."
+	#	else
+	#		echo "NOTICE: Created modules.pcimap in kernel module directory at $OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION."
+	#	fi
+	#fi
+
+	echo "Creating kernel $OPENQRM_SERVER_KERNEL_NAME version $OPENQRM_SERVER_KERNEL_VERSION ($OPENQRM_SERVER_KERNEL_TYPE initrd)"
+
+	# copy kernel + System-map
+	mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot
+	cp -a $OPENQRM_SERVER_KERNEL_LOCATION/boot/vmlinuz-$OPENQRM_SERVER_KERNEL_VERSION $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/vmlinuz-$OPENQRM_SERVER_KERNEL_NAME
+	cp -a $OPENQRM_SERVER_KERNEL_LOCATION/boot/System.map-$OPENQRM_SERVER_KERNEL_VERSION $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/System.map-$OPENQRM_SERVER_KERNEL_NAME
+
+	# modules
+	#tar -C $OPENQRM_SERVER_KERNEL_LOCATION/ -czf $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/modules-$OPENQRM_SERVER_KERNEL_NAME.tgz lib/modules/$OPENQRM_SERVER_KERNEL_VERSION
+	tar -C $OPENQRM_SERVER_KERNEL_LOCATION/ -czf $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/modules-$OPENQRM_SERVER_KERNEL_NAME.tgz $MODULES_EXCLUDE lib/modules/$OPENQRM_SERVER_KERNEL_VERSION
+
+	# initrd
+	rm -rf $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME
+	mkdir -p $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME
+	mkdir -p $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/firmware
+
+	# all network modules, excluding wireless
+	for MODULE in `find $OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION/kernel/drivers/net -type f | grep -v wireless`; do
+		MODULE_NAME=`echo $MODULE | sed -e "s/.*\///"`
+		if ! echo $OPENQRM_UNWANTED_MODULES | grep $MODULE_NAME 1>/dev/null; then
+			/bin/cp -f $MODULE $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION
+			# resolve deps
+			for L in `modresolvdeps $MODULE`; do
+				DEPNAME=`basename $L`
+				echo "--- adding module dependency $MODULE_NAME -> $DEPNAME"
+				/bin/cp -f $L $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION
+			done
+		fi
+	done
+
+	# also need virtio* for kvm virtio pci network card
+	for MODULE in `find $OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION/kernel/drivers -type f -name virtio*`; do
+		MODULE_NAME=`echo $MODULE | sed -e "s/.*\///"`
+		if ! echo $OPENQRM_UNWANTED_MODULES | grep $MODULE_NAME 1>/dev/null; then
+			/bin/cp -f $MODULE $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION
+			# resolve deps
+			for L in `modresolvdeps $MODULE`; do
+				DEPNAME=`basename $L`
+				echo "--- adding module dependency $MODULE_NAME -> $DEPNAME"
+				/bin/cp -f $L $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION
+			done
+		fi
+	done
+	
+	# copy lib/firmware - do we want ~350MB in the initrd
+	/bin/cp -afL /lib/firmware/* $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/firmware/
+
+
+#	# also need igb for network cards
+#	for MODULE in `find $OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION/kernel/drivers -type f -name igb`; do
+#		MODULE_NAME=`echo $MODULE | sed -e "s/.*\///"`
+#		if ! echo $OPENQRM_UNWANTED_MODULES | grep $MODULE_NAME 1>/dev/null; then
+#			/bin/cp -f $MODULE $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION
+#		fi
+#	done
+
+#	# also need ixgbe for network cards
+#	for MODULE in `find $OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION/kernel/drivers -type f -name ixgbe`; do
+#		MODULE_NAME=`echo $MODULE | sed -e "s/.*\///"`
+#		if ! echo $OPENQRM_UNWANTED_MODULES | grep $MODULE_NAME 1>/dev/null; then
+#			/bin/cp -f $MODULE $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION
+#		fi
+#	done
+
+	# for networks support
+	for MODULE in `find  $OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION/ -type f | egrep 'mptbase|mptsas|mptscsih|scsi_transport_sas|jfs|crc32|cxgb4|bnx2|bnx2x|usbhid|hid|mdio|dca|virtio|i2c|dma|mfd|ptp|pps'`; do
+		MODULE_NAME=`echo $MODULE | sed -e "s/.*\///"`
+		if ! echo $OPENQRM_UNWANTED_MODULES | grep $MODULE_NAME 1>/dev/null; then
+			/bin/cp -f $MODULE $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION
+			# resolve deps
+			for L in `modresolvdeps $MODULE`; do
+				DEPNAME=`basename $L`
+				echo "--- adding module dependency $MODULE_NAME -> $DEPNAME"
+				/bin/cp -f $L $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION
+			done
+		fi
+	done
+
+	#no watchdog 
+	#/bin/cp -Rf $OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION/kernel/drivers/watchdog $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION/kernel/drivers/
+
+
+	# include firmware for 
+	rm -rf $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/firmware
+	mkdir -p $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/firmware/
+
+	# firmwares for bnx2*, cxgb*
+	for FIRMWARE in `find  $OPENQRM_SERVER_KERNEL_LOCATION/lib/firmware -type f | egrep 'bnx2*|cxgb*'`; do
+		DIRNAME=$(dirname "$FIRMWARE")
+		mkdir -p $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME""$DIRNAME
+		/bin/cp -afL $FIRMWARE $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME""$DIRNAME/
+	done
+	#end bnx2
+
+	#obsolete
+	# also we need to take the modules.pcimap for the hardware detection to work
+	#cp -a $OPENQRM_SERVER_KERNEL_LOCATION/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION/modules.* $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/modules/$OPENQRM_SERVER_KERNEL_VERSION/
+
+	# unpack the initrd-template
+	echo "-> using initrd-template from $OPENQRM_SERVER_INITRD_TEMPLATE"
+	tar -C $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME -xzf $OPENQRM_SERVER_INITRD_TEMPLATE
+
+	# check size
+	OPENQRM_INITRD_SIZE=`du -s $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/ | awk {' print $1 '}`
+	OPENQRM_INITRD_SIZE=$(( OPENQRM_INITRD_SIZE + 16000 ))
+	if (( $OPENQRM_INITRD_SIZE > $OPENQRM_MAX_INITRD_SIZE )); then
+		echo "ERROR: Initrd got too big"
+		return 1
+	fi
+
+	# take udev from kernel-location
+	rm -rf $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/etc/udev
+	cp -aR $OPENQRM_SERVER_KERNEL_LOCATION/etc/udev $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/etc/
+
+	# and /lib/udev
+	rm -rf $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/udev
+	cp -aR $OPENQRM_SERVER_KERNEL_LOCATION/lib/udev $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/lib/
+
+	# take the initial console device
+	cp -aR $OPENQRM_SERVER_KERNEL_LOCATION/dev/console $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/dev/
+
+	# create run/udev dir for binding udevd socket
+	mkdir -p $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/run/udev
+
+	# creating the initrd file
+	if [ "$OPENQRM_SERVER_KERNEL_TYPE" == "ext2" ]; then
+		echo "Creating the initrd as $OPENQRM_SERVER_KERNEL_TYPE"
+		dd if=/dev/zero of=$OPENQRM_TEMP_DIR/bootimage/initrd-$OPENQRM_SERVER_KERNEL_NAME.img bs=1k count=$OPENQRM_INITRD_SIZE
+		#get ram block size there is a problem in newer kernels with size 4096
+		if [ -f "$OPENQRM_SERVER_KERNEL_LOCATION/boot/config-$OPENQRM_SERVER_KERNEL_VERSION" ]; then
+			ram_block_size=`cat $OPENQRM_SERVER_KERNEL_LOCATION/boot/config-$OPENQRM_SERVER_KERNEL_VERSION | grep  CONFIG_BLK_DEV_RAM_BLOCKSIZE | awk -F= '{print $2}'`
+			if [ -z $ram_block_size ]; then
+				ram_block_size=$OPENQRM_DEFAULT_RAM_DISK_BLOCK_SIZE
+			fi
+		else
+			ram_block_size=$OPENQRM_DEFAULT_RAM_DISK_BLOCK_SIZE
+		fi
+		mkfs.ext2 -q -b $ram_block_size -F $OPENQRM_TEMP_DIR/bootimage/initrd-$OPENQRM_SERVER_KERNEL_NAME.img
+		tune2fs -c 0 -i 0 $OPENQRM_TEMP_DIR/bootimage/initrd-$OPENQRM_SERVER_KERNEL_NAME.img
+		mkdir -p $OPENQRM_TEMP_DIR/bootimage/mnt
+		mount -o loop $OPENQRM_TEMP_DIR/bootimage/initrd-$OPENQRM_SERVER_KERNEL_NAME.img $OPENQRM_TEMP_DIR/bootimage/mnt
+		mv $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/* $OPENQRM_TEMP_DIR/bootimage/mnt/
+		# add the openQRM-linuxrc
+		rm -f $OPENQRM_TEMP_DIR/bootimage/mnt/linuxrc
+		cp $OPENQRM_SERVER_LINUXRC $OPENQRM_TEMP_DIR/bootimage/mnt/linuxrc
+		chmod +x $OPENQRM_TEMP_DIR/bootimage/mnt/linuxrc
+		umount $OPENQRM_TEMP_DIR/bootimage/mnt
+		gzip $OPENQRM_TEMP_DIR/bootimage/initrd-$OPENQRM_SERVER_KERNEL_NAME.img
+		mv $OPENQRM_TEMP_DIR/bootimage/initrd-$OPENQRM_SERVER_KERNEL_NAME.img.gz $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/initrd-$OPENQRM_SERVER_KERNEL_NAME.img
+#		rm -rf $OPENQRM_TEMP_DIR/bootimage
+	elif [ "$OPENQRM_SERVER_KERNEL_TYPE" == "initramfs" ]; then
+		echo "Creating the initrd as $OPENQRM_SERVER_KERNEL_TYPE"
+		DIR_CURRENT=`pwd`
+		# add the openQRM-linuxrc as init
+		rm -f $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/linuxrc
+		rm -f $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/init
+		cp $OPENQRM_SERVER_LINUXRC $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/init
+		chmod +x $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/init
+		# pack with cpio
+		cd $OPENQRM_TEMP_DIR/bootimage/$OPENQRM_SERVER_KERNEL_NAME/
+		find . | cpio -o -H newc | gzip -9 > $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/initrd-$OPENQRM_SERVER_KERNEL_NAME.img
+		cd $DIR_CURRENT
+#		rm -rf $OPENQRM_TEMP_DIR/bootimage
+	else
+		echo "ERROR: Supported initrd types are ext2 and initramfs. type: " . $OPENQRM_SERVER_KERNEL_TYPE
+		return 1
+	fi
+	chmod 444 $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/initrd-$OPENQRM_SERVER_KERNEL_NAME.img
+	chmod 444 $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/vmlinuz-$OPENQRM_SERVER_KERNEL_NAME
+	chmod 444 $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/System.map-$OPENQRM_SERVER_KERNEL_NAME
+	chmod 444 $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/modules-$OPENQRM_SERVER_KERNEL_NAME.tgz
+
+	# hook for plugins
+	for OPENQRM_PLUGIN in `ls $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/`; do
+		if [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/include/openqrm-plugin-$OPENQRM_PLUGIN-kernel-hook ]; then
+			. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/include/openqrm-plugin-$OPENQRM_PLUGIN-kernel-hook
+			PLUGIN_FUNCTION_NAME=`echo $OPENQRM_PLUGIN | sed -e "s/-/_/g"`""_kernel_hook
+			$PLUGIN_FUNCTION_NAME $OPENQRM_SERVER_KERNEL_NAME $OPENQRM_SERVER_KERNEL_VERSION $OPENQRM_SERVER_KERNEL_LOCATION $OPENQRM_SERVER_KERNEL_TYPE
+		fi
+	done
+
+}
+
+
+
+# function to add/remove a kernel to the openQRM-server db
+# param 1	: add/remove
+# param 2	: user
+# param 3	: password
+# param 4	: kernel name
+# param 5	: kernel-version
+function openqrm_server_manage_kernel() {
+	OPENQRM_USER=$2
+	OPENQRM_USER_PASSWORD=$3
+	OPENQRM_SERVER_KERNEL_NAME=$4
+	OPENQRM_SERVER_KERNEL_VERSION=$5
+	if [ "$OPENQRM_SERVER_IP_ADDRESS" == "" ]; then
+		OPENQRM_SERVER_IP_ADDRESS="localhost"
+	fi
+	case "$1" in
+		add)
+			echo "openQRM-server: Adding kernel $OPENQRM_SERVER_KERNEL_NAME version $OPENQRM_SERVER_KERNEL_VERSION" | logger
+			if ! $WGET -O /dev/null --http-user=$OPENQRM_USER --http-password=$OPENQRM_USER_PASSWORD "$OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/base/server/kernel/kernel-action.php?kernel_command=new_kernel&kernel_name=$OPENQRM_SERVER_KERNEL_NAME&kernel_version=$OPENQRM_SERVER_KERNEL_VERSION"; then
+				echo "ERROR: Could not add kernel $OPENQRM_SERVER_KERNEL_NAME to the openQRM-server!" | logger
+				return 1
+			fi
+			return 0
+			;;
+		remove)
+			echo "openQRM-server: Removing kernel $OPENQRM_SERVER_KERNEL_NAME" | logger
+			if ! $WGET -O /dev/null --http-user=$OPENQRM_USER --http-password=$OPENQRM_USER_PASSWORD "$OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/base/server/kernel/kernel-action.php?kernel_command=remove_by_name&kernel_name=$OPENQRM_SERVER_KERNEL_NAME"; then
+				echo "ERROR: Could not remove kernel $OPENQRM_SERVER_KERNEL_NAME to the openQRM-server!" | logger
+				return 1
+			fi
+			return 0
+			;;
+	esac
+}
+
+
+# function to set the default kernel
+# param 1	: kernel-name
+function openqrm_server_set_default_kernel() {
+	OPENQRM_KERNEL_NAME=$1
+	echo "openQRM-server: Setting kernel $OPENQRM_KERNEL_NAME as default kernel" | logger
+	if [ "$OPENQRM_KERNEL_NAME" != "default" ]; then
+		cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/vmlinuz-$OPENQRM_KERNEL_NAME $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/vmlinuz-default
+		cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/System.map-$OPENQRM_KERNEL_NAME $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/System.map-default
+		cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/initrd-$OPENQRM_KERNEL_NAME.img $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/initrd-default.img
+		cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/modules-$OPENQRM_KERNEL_NAME.tgz $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/modules-default.tgz
+	fi
+}
+
+
+# --------------------------------------------------------------------
+# ------------------------- image functions --------------------------
+# --------------------------------------------------------------------
+
+
+# function to create a crypted password file for an image
+# param 1	: image id
+# param 2	: plain password
+function openqrm_server_set_image_password() {
+	OPENQRM_IMAGE_ID=$1
+	OPENQRM_IMAGE_PASSWORD=$2
+	echo "openQRM-server: Setting root-password for image $OPENQRM_IMAGE_ID" | logger
+	$OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-crypt $OPENQRM_IMAGE_PASSWORD > $OPENQRM_SERVER_BASE_DIR/openqrm/web/action/image-auth/iauth.$OPENQRM_IMAGE_ID.php
+	chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/web/action/image-auth/iauth.$OPENQRM_IMAGE_ID.php
+}
+
+
+
+
+
+# --------------------------------------------------------------------
+# ------------------------- deployments functions -------------------------
+# --------------------------------------------------------------------
+
+# function to add a deployment method to the openQRM-server db
+# this function is used by the init+uninstall functions of the deployment plugins
+# param 1	: username
+# param 2	: password
+# param 3	: deployment name
+# param 4	: deployment type
+# param 5	: deployment description
+# param 6	: deployment storagetype
+# param 7	: deployment storagetype description
+# param 8	: deployment mapping
+function openqrm_server_add_deployment_type() {
+	OPENQRM_USER=$1
+	OPENQRM_USER_PASSWORD=$2
+	OPENQRM_SERVER_DEPLOYMENT_NAME=$3
+	OPENQRM_SERVER_DEPLOYMENT_TYPE=$4
+	OPENQRM_SERVER_DEPLOYMENT_DESCRIPTION=$5
+	OPENQRM_SERVER_DEPLOYMENT_STORAGE_TYPE=$6
+	OPENQRM_SERVER_DEPLOYMENT_STORAGE_DESCRIPTION=$7
+	OPENQRM_SERVER_DEPLOYMENT_MAPPING=$8
+	if [ "$OPENQRM_SERVER_IP_ADDRESS" == "" ]; then
+		OPENQRM_SERVER_IP_ADDRESS="localhost"
+	fi
+	echo "openQRM-server: Adding deployment type $OPENQRM_SERVER_DEPLOYMENT_NAME  to the openQRM-server" | logger
+	if ! $WGET -O /dev/null -q --http-user=$OPENQRM_USER --http-password=$OPENQRM_USER_PASSWORD "$OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/base/server/image/image-action.php?image_command=add_deployment_type&deployment_name=$OPENQRM_SERVER_DEPLOYMENT_NAME&deployment_type=$OPENQRM_SERVER_DEPLOYMENT_TYPE&deployment_description=$OPENQRM_SERVER_DEPLOYMENT_DESCRIPTION&deployment_storagetype=$OPENQRM_SERVER_DEPLOYMENT_STORAGE_TYPE&deployment_storagedescription=$OPENQRM_SERVER_DEPLOYMENT_STORAGE_DESCRIPTION&deployment_mapping=$OPENQRM_SERVER_DEPLOYMENT_MAPPING"; then
+		echo "ERROR: Could not add deployment type $OPENQRM_SERVER_DEPLOYMENT_NAME to the openQRM-server!" | logger
+		return 1
+	fi
+	return 0
+}
+
+# function to remove a deployment method to the openQRM-server db
+# this function is used by the init+uninstall functions of the deployment plugins
+# param 1	: username
+# param 2	: password
+# param 3	: deployment name
+function openqrm_server_remove_deployment_type() {
+	OPENQRM_USER=$1
+	OPENQRM_USER_PASSWORD=$2
+	OPENQRM_SERVER_DEPLOYMENT_NAME=$3
+	if [ "$OPENQRM_SERVER_IP_ADDRESS" == "" ]; then
+		OPENQRM_SERVER_IP_ADDRESS="localhost"
+	fi
+	echo "openQRM-server: Removing deployment type $OPENQRM_SERVER_DEPLOYMENT_NAME  from the openQRM-server" | logger
+	if ! $WGET -O /dev/null -q --http-user=$OPENQRM_USER --http-password=$OPENQRM_USER_PASSWORD "$OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/base/server/image/image-action.php?image_command=remove_deployment_type&deployment_name=$OPENQRM_SERVER_DEPLOYMENT_NAME"; then
+		echo "ERROR: Could not remove deployment type $OPENQRM_SERVER_DEPLOYMENT_NAME from the openQRM-server!" | logger
+		return 1
+	fi
+	return 0
+}
+
+
+
+# --------------------------------------------------------------------
+# ------------------------- virtualization functions -------------------------
+# --------------------------------------------------------------------
+
+# function to add a virtualization method to the openQRM-server db
+# this function is used by the init+uninstall functions of the virtualization plugins
+# param 1	: username
+# param 2	: password
+# param 3	: virtualization type
+# param 4	: virtualization name
+function openqrm_server_add_virtualization_type() {
+	OPENQRM_USER=$1
+	OPENQRM_USER_PASSWORD=$2
+	OPENQRM_SERVER_VIRTUALIZATION_TYPE=$3
+	OPENQRM_SERVER_VIRTUALIZATION_NAME=$4
+	if [ "$OPENQRM_SERVER_IP_ADDRESS" == "" ]; then
+		OPENQRM_SERVER_IP_ADDRESS="localhost"
+	fi
+	echo "openQRM-server: Adding virtualization type $OPENQRM_SERVER_VIRTUALIZATION_TYPE  to the openQRM-server" | logger
+	if ! $WGET -O /dev/null -q --http-user=$OPENQRM_USER --http-password=$OPENQRM_USER_PASSWORD "$OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/base/server/resource/resource-action.php?resource_command=add_virtualization_type&virtualization_type=$OPENQRM_SERVER_VIRTUALIZATION_TYPE&virtualization_name=$OPENQRM_SERVER_VIRTUALIZATION_NAME"; then
+		echo "ERROR: Could not add virtualization type $OPENQRM_SERVER_VIRTUALIZATION_TYPE to the openQRM-server!" | logger
+		return 1
+	fi
+	return 0
+}
+
+# function to remove a virtualization method to the openQRM-server db
+# this function is used by the init+uninstall functions of the virtualization plugins
+# param 1	: username
+# param 2	: password
+# param 3	: virtualization type
+function openqrm_server_remove_virtualization_type() {
+	OPENQRM_USER=$1
+	OPENQRM_USER_PASSWORD=$2
+	OPENQRM_SERVER_VIRTUALIZATION_TYPE=$3
+	if [ "$OPENQRM_SERVER_IP_ADDRESS" == "" ]; then
+		OPENQRM_SERVER_IP_ADDRESS="localhost"
+	fi
+	echo "openQRM-server: Removing virtualization type $OPENQRM_SERVER_VIRTUALIZATION_TYPE  from the openQRM-server" | logger
+	if ! $WGET -O /dev/null -q --http-user=$OPENQRM_USER --http-password=$OPENQRM_USER_PASSWORD "$OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/base/server/resource/resource-action.php?resource_command=remove_virtualization_type&virtualization_type=$OPENQRM_SERVER_VIRTUALIZATION_TYPE"; then
+		echo "ERROR: Could not remove virtualization type $OPENQRM_SERVER_VIRTUALIZATION_TYPE from the openQRM-server!" | logger
+		return 1
+	fi
+	return 0
+}
+
+
+
+
+# --------------------------------------------------------------------
+# ------------------------- resource functions -----------------------
+# --------------------------------------------------------------------
+
+
+
+# function adding a new resource to the openQRM-server
+# param 1	: resource_id
+# param 2	: kernel name
+# param 3	: pxelinux.cfg filename
+function openqrm_server_create_pxe_config() {
+	local RESOURCE_ID=$1
+	local KERNEL_NAME=$2
+	local RESOURCE_PXELINUXCFG_FILE=$3
+	cat $OPENQRM_SERVER_BASE_DIR/openqrm/etc/templates/openqrm-pxelinux |	\
+		sed -e "s/OPENQRM_BOOTIMAGE_KERNEL/vmlinuz-$KERNEL_NAME/g" |	\
+		sed -e "s/OPENQRM_BOOTIMAGE_INITRD/initrd-$KERNEL_NAME.img/g" |	\
+		sed -e "s/OPENQRM_RESOURCE_ID/$RESOURCE_ID/g" |	\
+		sed -e "s/OPENQRM_SERVER_IP_ADDRESS/$OPENQRM_SERVER_IP_ADDRESS/g" \
+		> $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+	chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+
+	# allow plugin to re-write the pxe-config
+	for OPENQRM_PLUGIN in `ls $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/`; do
+		if [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/include/openqrm-plugin-$OPENQRM_PLUGIN-assign-hook ]; then
+			. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/include/openqrm-plugin-$OPENQRM_PLUGIN-assign-hook
+			OPENQRM_PLUGIN=`echo $OPENQRM_PLUGIN | sed -e "s/-/_/g"`
+			$OPENQRM_PLUGIN""_assign_hook $RESOURCE_ID $KERNEL_NAME $RESOURCE_PXELINUXCFG_FILE
+		fi
+	done
+}
+
+
+
+# function adding a new resource to the openQRM-server
+# param 1	: resource_id
+# param 2	: resource_mac
+# param 3	: resouce_ip
+function openqrm_server_add_resource() {
+	local RESOURCE_ID=$1
+	local RESOURCE_MAC=$2
+	local RESOURCE_IP_ADDRESS=$3
+	local RESOURCE_PXELINUXCFG_FILE=`echo 01-$RESOURCE_MAC | sed -e "s/:/-/g" | tr '[:upper:]' '[:lower:]'`
+	echo "openQRM-server: Adding resource $RESOURCE_ID $RESOURCE_MAC/$RESOURCE_IP_ADDRESS" | logger
+	openqrm_server_create_pxe_config $RESOURCE_ID default $RESOURCE_PXELINUXCFG_FILE
+}
+
+
+# function to remove a resource from the openQRM-server
+# param 1	: resource_id
+# param 2	: resource_mac
+function openqrm_remove_resource() {
+	local RESOURCE_ID=$1
+	local RESOURCE_MAC=$2
+	local RESOURCE_PXELINUXCFG_FILE=`echo 01-$RESOURCE_MAC | sed -e "s/:/-/g" | tr '[:upper:]' '[:lower:]'`
+	echo "openQRM-server: Removing resource $RESOURCE_ID $RESOURCE_MAC/$RESOURCE_IP_ADDRESS" | logger
+	rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+	rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE.idle
+}
+
+
+
+# function to set a resource net or local boot
+# param 1	: resource_id
+# param 2	: resource_mac
+# param 3	: resouce_ip
+function openqrm_server_set_boot() {
+	local RESOURCE_BOOT=$1
+	local RESOURCE_ID=$2
+	local RESOURCE_MAC=$3
+	local RESOURCE_IP_ADDRESS=$4
+	local RESOURCE_PXELINUXCFG_FILE=`echo 01-$RESOURCE_MAC | sed -e "s/:/-/g" | tr '[:upper:]' '[:lower:]'`
+	if [ "$RESOURCE_BOOT" == "net" ]; then
+		echo "openQRM-server: Setting resource $RESOURCE_ID $RESOURCE_MAC/$RESOURCE_IP_ADDRESS to netboot" | logger
+		openqrm_server_create_pxe_config $RESOURCE_ID default $RESOURCE_PXELINUXCFG_FILE
+	else
+		echo "openQRM-server: Setting resource $RESOURCE_ID $RESOURCE_MAC/$RESOURCE_IP_ADDRESS to localboot" | logger
+		sed -i -e "s/^default.*/default local/g" $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+		chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+	fi
+}
+
+
+
+
+# function to assign a kernel to a resource
+# param 1	: resource_id
+# param 2	: resource_mac
+# param 3	: resouce_ip
+function openqrm_assign_kernel() {
+	local RESOURCE_ID=$1
+	local RESOURCE_MAC=$2
+	local RESOURCE_KERNEL=$3
+	local RESOURCE_PXELINUXCFG_FILE=`echo 01-$RESOURCE_MAC | sed -e "s/:/-/g" | tr '[:upper:]' '[:lower:]'`
+	echo "openQRM-server: Assigning resource $RESOURCE_ID $RESOURCE_MAC to kernel $RESOURCE_KERNEL" | logger
+	openqrm_server_create_pxe_config $RESOURCE_ID $RESOURCE_KERNEL $RESOURCE_PXELINUXCFG_FILE
+}
+
+
+
+
+# function to get infos about a resource
+# param 1	: resource_mac
+function openqrm_get_resource_parameter() {
+	local mac=$1
+	if [ "$OPENQRM_SERVER_IP_ADDRESS" == "" ]; then
+		OPENQRM_SERVER_IP_ADDRESS="localhost"
+	fi
+	$WGET -q -O /tmp/$mac "$OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/action/resource-monitor.php?resource_command=get_parameter&resource_mac=$mac"
+	. /tmp/$mac
+	for param in `cat /tmp/$mac`; do
+		KEY=`echo $param | cut -d'=' -f1`
+		if [ "$KEY" != '"' ]; then
+			export $KEY 2>/dev/null
+		fi
+	done
+}
+
+
+
+
+# --------------------------------------------------------------------
+# ------------------------- plugin functions -------------------------
+# --------------------------------------------------------------------
+
+# function to run a plugin command
+# param 1	: plugin_name
+function openqrm_server_plugin_command() {
+	local PLUGIN_NAME=$1
+	local PLUGIN_COMMAND=$2
+	local PLUGIN_USER=$3
+	local PLUGIN_PASS=$4
+	local PLUGIN_INIT_SCRIPT="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/init.d/openqrm-plugin-$PLUGIN_NAME"
+	if [ -x $PLUGIN_INIT_SCRIPT ]; then
+		echo "openQRM-server: $PLUGIN_COMMAND openQRM plugin $PLUGIN_NAME user $PLUGIN_USER" | logger
+		$PLUGIN_INIT_SCRIPT $PLUGIN_COMMAND $PLUGIN_USER $PLUGIN_PASS &
+	else
+		echo "openQRM-server: $PLUGIN_NAME init script not found or not executable !" | logger
+	fi
+}
+
+
+
+
+
+
+# --------------------------------------------------------------------
+# ------------------------- state backup/restore functions -------------------------
+# --------------------------------------------------------------------
+
+# function to backup/restore a server-state
+# param 1	: <backup/restore/remove/list>
+# param 1	: [name]
+function openqrm_server_state() {
+	local CMD=$1
+	local NAME=$2
+	local NOW=`date +"%D_%T" | sed -e "s#/#-#g" | sed -e "s#:#.#g"`
+	local USAGE="Usage : openqrm_server_state backup/restore/remove/list [name]"
+	if [ ! -d $OPENQRM_SERVER_STATE_DIR ]; then
+		mkdir -p $OPENQRM_SERVER_STATE_DIR
+	fi
+	if [ "$CMD" == "" ]; then
+		echo $USAGE
+		return 1
+	fi
+	if [ "$CMD" != "list" ] && [ "$NAME" == "" ]; then
+		echo $USAGE
+		return 1
+	fi
+
+
+
+	case $CMD in
+		backup)
+				echo "openQRM-server: Creating backup of the server state $NAME-$NOW"
+				rm -rf $OPENQRM_SERVER_STATE_DIR/$NAME
+				mkdir -p $OPENQRM_SERVER_STATE_DIR/$NAME
+
+				# dirs
+				# adding the plugin-backup dirs to the dirlist
+				for OPENQRM_PLUGIN in `ls $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/`; do
+					if [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/openqrm-plugin-$OPENQRM_PLUGIN.conf ]; then
+						. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/openqrm-plugin-$OPENQRM_PLUGIN.conf
+						OPENQRM_SERVER_STATE_DIRS="$OPENQRM_SERVER_STATE_DIRS $OPENQRM_PLUGIN_STATE_DIRS"
+						unset OPENQRM_PLUGIN_STATE_DIRS
+					fi
+				done
+				# now the static dirs
+				for DIR in $OPENQRM_SERVER_STATE_DIRS; do
+					if [ -d "$DIR" ]; then
+						mkdir -p `dirname $OPENQRM_SERVER_STATE_DIR/$NAME/$DIR`
+						cp -aR $DIR `dirname $OPENQRM_SERVER_STATE_DIR/$NAME/$DIR`
+					fi
+				done
+
+				# files
+				# first add the enabled plugins state file
+				for RUNNING in `ls $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/plugins/`; do
+					if [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$RUNNING/web/.running ]; then
+						mkdir -p $OPENQRM_SERVER_STATE_DIR/$NAME/$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$RUNNING/web/
+						touch $OPENQRM_SERVER_STATE_DIR/$NAME/$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$RUNNING/web/.running
+					fi
+				done
+				# now adding the plugin-backup files to the filelist
+				for OPENQRM_PLUGIN in `ls $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/`; do
+					if [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/openqrm-plugin-$OPENQRM_PLUGIN.conf ]; then
+						. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/openqrm-plugin-$OPENQRM_PLUGIN.conf
+						OPENQRM_SERVER_STATE_FILES="$OPENQRM_SERVER_STATE_FILES $OPENQRM_PLUGIN_STATE_FILES"
+						unset OPENQRM_PLUGIN_STATE_FILES
+					fi
+				done
+				# now the static files
+				for FILE in $OPENQRM_SERVER_STATE_FILES; do
+					if [ -f "$FILE" ]; then
+						mkdir -p `dirname $OPENQRM_SERVER_STATE_DIR/$NAME/$FILE`
+						cp -af $FILE $OPENQRM_SERVER_STATE_DIR/$NAME/$FILE
+					fi
+				done
+
+				RELATIVE_OPENQRM_SERVER_BASE_DIR=`echo $OPENQRM_SERVER_BASE_DIR | sed -e s"#/##"`
+				# db
+				$OPENQRM_SERVER_BASE_DIR/openqrm/etc/db/$OPENQRM_DATABASE_TYPE/openqrm-$OPENQRM_DATABASE_TYPE-functions backup $OPENQRM_SERVER_STATE_DIR/$NAME/$RELATIVE_OPENQRM_SERVER_BASE_DIR/openqrm/database.sql
+
+				# package
+				tar -C $OPENQRM_SERVER_STATE_DIR/$NAME -czf $OPENQRM_SERVER_STATE_DIR/$NAME-$NOW.tgz $RELATIVE_OPENQRM_SERVER_BASE_DIR/openqrm
+				rm -rf $OPENQRM_SERVER_STATE_DIR/$NAME
+				;;
+
+		restore)
+				if [ -f $OPENQRM_SERVER_STATE_DIR/$NAME.tgz ]; then
+					echo "openQRM-server: Restoring server state from $OPENQRM_SERVER_STATE_DIR/$NAME.tgz"
+					# files + dirs
+					tar -C / -xzf $OPENQRM_SERVER_STATE_DIR/$NAME.tgz
+					# db
+					$OPENQRM_SERVER_BASE_DIR/openqrm/etc/db/$OPENQRM_DATABASE_TYPE/openqrm-$OPENQRM_DATABASE_TYPE-functions restore $OPENQRM_SERVER_BASE_DIR/openqrm/database.sql
+					rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/database.sql
+				else
+					echo "openQRM-server: No such sever state file $NAME"
+					return 1
+				fi
+				;;
+
+		remove)
+				if [ -f $OPENQRM_SERVER_STATE_DIR/$NAME.tgz ]; then
+					echo "openQRM-server: Removing server state $NAME-$NOW"
+					rm -f $OPENQRM_SERVER_STATE_DIR/$NAME.tgz
+				else
+					echo "openQRM-server: No such sever state file $NAME"
+					return 1
+				fi
+				;;
+		list)
+				ls $OPENQRM_SERVER_STATE_DIR | sed -s "s/\.tgz//g"
+				;;
+
+		*)
+				echo "openQRM-server: No such server-state command!"
+				return 1
+				;;
+
+
+
+	esac
+
+}
+
+
+# --------------------------------------------------------------------
+
+
+

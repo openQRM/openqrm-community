@@ -1,0 +1,104 @@
+#!/bin/bash
+# this script automatically manages the lvm volumes for the kvm virtual machines
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+if [ -f $OPENQRM_RESOURCE_PARAMETER_FILE ]; then
+	. $OPENQRM_RESOURCE_PARAMETER_FILE
+	eval appliance_capabilities
+	export RABBITMQ_SERVER="$resource_openqrmserver"
+	export RABBITMQ_PASSWORD="$RABBITMQ_PASSWORD"
+	export RABBITMQ_QUEUE_NAME="$resource_ip"
+	export OPENQRM_EXECUTION_LAYER=$openqrm_execution_layer
+elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+	openqrm_server_get_config
+	export RABBITMQ_SERVER="$OPENQRM_SERVER_IP_ADDRESS"
+	export RABBITMQ_PASSWORD="$OPENQRM_RABBITMQ_PASSWORD"
+	export RABBITMQ_QUEUE_NAME="$OPENQRM_SERVER_IP_ADDRESS"
+fi
+export LANG=C
+
+if [ -x /usr/bin/screen.real ]; then
+	RUNSCREEN="/usr/bin/screen.real"
+else
+	RUNSCREEN=`which screen`
+fi
+if [ "$RUNSCREEN" == "" ]; then
+	echo "ERROR: screen utility not installed! Please install screen"
+	exit 1
+fi
+if [ "$OPENQRM_EXECUTION_LAYER" != "rabbitmq" ]; then
+	echo "ERROR: Only useful for RabbitMQ command layer!"
+	exit 1
+fi
+if [ "$RABBITMQ_PASSWORD" == "" ]; then
+	echo "ERROR: RABBITMQ_PASSWORD not set!"
+	exit 1
+fi
+if [ "$RABBITMQ_SERVER" == "" ]; then
+	echo "ERROR: RABBITMQ_SERVER not set!"
+	exit 1
+fi
+if [ "$RABBITMQ_QUEUE_NAME" == "" ]; then
+	echo "ERROR: RABBITMQ_QUEUE_NAME not set!"
+	exit 1
+fi
+
+function openqrm_rabbitmq_client_start() {
+	$RUNSCREEN -dmS cmdqueue $OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-rabbitmq-cmd-queue
+	echo "Started openqrm-rabbitmq-cmd-queue client"
+}
+
+
+function openqrm_rabbitmq_client_stop() {
+	kill `ps ax | grep openqrm-rabbitmq-cmd-queue | grep python | awk '{ print $1 }'`
+	echo "Stopped openqrm-rabbitmq-cmd-queue client"
+}
+
+
+function openqrm_rabbitmq_client_status() {
+	if ps ax | grep -w openqrm-rabbitmq-cmd-queue | grep python 1>/dev/null; then
+		echo "openqrm-rabbitmq-cmd-queue client running"
+	else
+		echo "openqrm-rabbitmq-cmd-queue client stopped"
+	fi
+}
+
+
+
+case "$1" in
+	start)
+		openqrm_rabbitmq_client_start
+		;;
+	stop)
+		openqrm_rabbitmq_client_stop
+		;;
+	status)
+		openqrm_rabbitmq_client_status
+		;;
+	restart)
+		openqrm_rabbitmq_client_stop
+		sleep 1
+		openqrm_rabbitmq_client_start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|status|restart}"
+		exit 1
+
+esac

@@ -1,0 +1,85 @@
+#!/bin/bash
+# openQRM db2-specfic functions
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+if [ "$OPENQRM_SERVER_BASE_DIR" == "" ]; then
+	echo "ERROR: Please export OPENQRM_SERVER_BASE_DIR before sourcing $0"
+	exit 1
+fi
+
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+OPENQRM_DATABASE_INIT="$OPENQRM_SERVER_BASE_DIR/openqrm/etc/db/db2/openqrm-db2-init.sql"
+
+
+function initialize_database() {
+
+	if ! which db2 1>/dev/null 2>&1; then
+		echo "ERROR: DB2 client 'db2' not installed/found on this system"
+		return 1
+	else
+		DB2_CLIENT=`which db2`
+	fi
+
+	echo "Initializing the openQRM-database"
+	cat $OPENQRM_DATABASE_INIT |	\
+		sed -e "s/connect to OPENQRM_DB/connect to $OPENQRM_DATABASE_NAME/g" |	\
+		sed -e "s/OPENQRM_SERVER_IP_ADDRESS/$OPENQRM_SERVER_IP_ADDRESS/g"	\
+		> /tmp/openqrm-db2-init.sql
+	chmod 777 /tmp/openqrm-db2-init.sql
+	su - $OPENQRM_DATABASE_USER -c "$DB2_CLIENT -vf /tmp/openqrm-db2-init.sql"
+	rm -f /tmp/openqrm-db2-init.sql
+	# db2 client does not return good
+	return 0
+
+}
+
+
+function backup_database() {
+	local SQL=$1
+	echo "Creating backup of the openQRM-database at $SQL"
+	echo "NOTICE: Backup for DB2 databases not yet implemented"
+	return $RET
+
+}
+
+function restore_database() {
+	local SQL=$1
+	echo "Restoring the openQRM-database from $SQL"
+	echo "NOTICE: Restore for DB2 databases not yet implemented"
+	return $RET
+
+}
+
+function drop_database() {
+	echo "Dropping the openQRM-database"
+	echo "NOTICE: Drop for DB2 databases not yet implemented"
+	return $RET
+}
+
+case "$1" in
+	init)
+		initialize_database
+		;;
+	backup)
+		backup_database $2
+		;;
+	restore)
+		restore_database $2
+		;;
+	drop)
+		drop_database
+		;;
+esac

@@ -1,0 +1,10 @@
+
+# Examples (for supported versions of CentOS):
+# other sites listed at
+# http://www.centos.org/modules/tinycontent/index.php?id=13
+# the path (last component) must be the prefix
+# (but not include) the "CentOS/base" directory
+
+
+OSVEND ftp.halifax.rwth-aachen.de CentOS 6   x86_64 HTTP  /centos/6/os/x86_64
+

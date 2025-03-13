@@ -1,0 +1,20 @@
+[Unit]
+Description=openQRM is the next generation Linux Data Center management
+After=network-online.target
+Wants=network-online.target
+#After=network.target
+# chrony.service
+#Requires=network.target
+
+[Service]
+Type=oneshot
+#RemainAfterExit=yes
+ExecStart=/usr/share/openqrm/etc/init.d/openqrm-client start
+ExecStop=/usr/share/openqrm/etc/init.d/openqrm-client stop
+TimeoutSec=600
+#StandardOutput=tty
+
+[Install]
+Alias=openqrm-client.service
+WantedBy=multi-user.target
+##WantedBy=network.target

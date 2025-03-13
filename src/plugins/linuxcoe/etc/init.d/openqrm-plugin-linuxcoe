@@ -1,0 +1,177 @@
+#!/bin/bash
+# init script for the openQRM linuxcoe-plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/include/openqrm-plugin-linuxcoe-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/etc/openqrm-plugin-linuxcoe.conf
+# get the ip config
+openqrm_server_get_config
+export resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+export LANG=C
+# define wget to use with https
+if [ "$OPENQRM_WEB_PROTOCOL" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate"
+fi
+
+function openqrm_plugin_linuxcoe_start() {
+	echo "Starting the openQRM linuxcoe-plugin"
+	touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/linuxcoe/.running
+}
+
+
+function openqrm_plugin_linuxcoe_stop() {
+	echo "Stopping the openQRM linuxcoe-plugin"
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/linuxcoe/.running
+}
+
+function openqrm_plugin_linuxcoe_uninstall() {
+	local USERNAME=$1
+	local PASSWORD=$2
+	if [ "$USERNAME" == "" ] && [ "$PASSWORD" == "" ]; then
+		echo -n "linuxcoe: Please give a username to uninstall the plugin : "
+		read USERNAME
+		echo
+		echo -n "linuxcoe: Please give the password for user $USERNAME : "
+		read PASSWORD
+		echo
+	fi
+	echo "Uninstalling the openQRM linuxcoe-plugin"
+	openqrm_plugin_linuxcoe_stop
+	openqrm_server_remove_deployment_type $USERNAME $PASSWORD linuxcoe-deployment
+	# removing the tables
+	if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$USERNAME --http-password=$PASSWORD "$OPENQRM_WEB_PROTOCOL://localhost/openqrm/base/plugins/linuxcoe/linuxcoe-action.php?linuxcoe_command=uninstall"; then
+		linuxcoe_log init "ERROR: Could not remove the linuxcoe plugin tables in the database!"
+	fi
+	# uninstall linuxcoe
+	if ! $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/bin/openqrm-linuxcoe uninstall; then
+		linuxcoe_log init "ERROR: Could not uninstall LinuxCOE!"
+	fi
+
+
+	if [ -f /etc/debian_version ]; then
+		OPENQRM_WEBSERVER_CONFIG_DIR=/etc/apache2/conf.d
+	elif [ -f /etc/redhat-release ]; then
+		OPENQRM_WEBSERVER_CONFIG=/etc/httpd/conf.d
+	elif [ -f /etc/SuSE-release ]; then
+		OPENQRM_WEBSERVER_CONFIG_DIR=/etc/apache2/conf.d
+	fi
+
+	if [ -e $OPENQRM_WEBSERVER_CONFIG_DIR/LinuxCOE-SystemDesigner.conf ]; then
+		rm -f $OPENQRM_WEBSERVER_CONFIG_DIR/LinuxCOE-SystemDesigner.conf
+		openqrm_webserver reload
+	fi
+
+	rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/lock/install-lock
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/linuxcoe
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.linuxcoe-deployment.php
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/template.linuxcoe-deployment.php
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/boot-service-linuxcoe.tgz
+
+}
+
+function openqrm_plugin_linuxcoe_init() {
+	local USERNAME=$1
+	local PASSWORD=$2
+	if [ "$USERNAME" == "" ] && [ "$PASSWORD" == "" ]; then
+		echo -n "linuxcoe: Please give a username to init the plugin : "
+		read USERNAME
+		echo
+		echo -n "linuxcoe: Please give the password for user $USERNAME : "
+		read PASSWORD
+		echo
+	fi
+	echo "Initializing the openQRM linuxcoe-plugin"
+	openqrm_server_add_deployment_type $USERNAME $PASSWORD linuxcoe-deployment linuxcoe-deployment "Automatic Linux Installation (LinuxCOE)" linuxcoe "Physical local disk (LinuxCOE)"
+	# linking the web dir
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/linuxcoe
+	# creating the tables
+	if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$USERNAME --http-password=$PASSWORD "$OPENQRM_WEB_PROTOCOL://localhost/openqrm/base/plugins/linuxcoe/linuxcoe-action.php?linuxcoe_command=init"; then
+		linuxcoe_log init "ERROR: Could not create the linuxcoe plugin tables in the database!"
+		rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/linuxcoe
+		exit 1
+	fi
+	a2enmod cgi
+	openqrm_webserver reload
+	# install linuxcoe
+	if ! $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/bin/openqrm-linuxcoe install; then
+		linuxcoe_log init "ERROR: Could not install LinuxCOE!"
+	fi
+
+	# fix 1 for >= Ubuntu 14.04 - apache options
+	sed -i -e "s/Options ExecCGI -MultiViews SymLinksIfOwnerMatch/Options ExecCGI SymLinksIfOwnerMatch/g" $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/linuxcoe-sd/etc/includes/LinuxCOE-SystemDesigner.conf
+	openqrm_webserver reload
+
+	# fix 1 for >= Ubuntu 14.04 - coe_bootimage perl stricts errors
+	if ! $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/linuxcoe-sd/cgi-bin/coe_bootimage 2>/dev/null; then
+		if [ ! -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/linuxcoe-sd/cgi-bin/coe_bootimage.original ]; then
+			echo "- backing up $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/linuxcoe-sd/cgi-bin/coe_bootimage"
+			cp -af $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/linuxcoe-sd/cgi-bin/coe_bootimage $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/linuxcoe-sd/cgi-bin/coe_bootimage.original
+		fi
+		echo "- patching $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/linuxcoe-sd/cgi-bin/coe_bootimage"
+		tar -C $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/linuxcoe-sd/cgi-bin/ -xzvf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/etc/templates/coe_bootimage_4.3.pachted.tgz
+	fi
+
+	# link the image + template hooks
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/image.linuxcoe-deployment.php $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.linuxcoe-deployment.php
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/template.linuxcoe-deployment.php $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/template.linuxcoe-deployment.php
+	# creating place for autoinstall files
+	mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/bin/openqrm-linuxcoe-autoinstall-client $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe/openqrm-linuxcoe-autoinstall-client
+	# creating the dir for the linuxcoe profiles
+	mkdir -p $LINUXCOE_PROFILE_DIR
+	mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/stat/
+	chmod -R 777 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/stat/
+	echo "Order deny,allow" > $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/stat/.htaccess
+	echo "Deny from all" >> $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/stat/.htaccess
+
+}
+
+
+USER=$2
+PASS=$3
+
+case "$1" in
+	start)
+		openqrm_plugin_linuxcoe_start
+		;;
+	stop)
+		openqrm_plugin_linuxcoe_stop
+		;;
+	restart)
+		openqrm_plugin_linuxcoe_stop
+		sleep 1
+		openqrm_plugin_linuxcoe_start
+		;;
+	init)
+		openqrm_plugin_linuxcoe_init $USER $PASS
+		;;
+	uninstall)
+		openqrm_plugin_linuxcoe_uninstall $USER $PASS
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|init|uninstall}"
+		exit 1
+
+esac
+exit $?
+
+
+
+

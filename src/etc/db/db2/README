@@ -1,0 +1,19 @@
+openqrm-server.conf setup for db2 database :
+
+OPENQRM_DATABASE_TYPE="db2"                       # supported are : mysql, oracle, db2, postgres
+OPENQRM_DATABASE_SERVER="localhost"               # ip-address of the database server
+OPENQRM_DATABASE_NAME="openqrm"                   # database name
+OPENQRM_DATABASE_USER="db2inst1"                  # database user
+OPENQRM_DATABASE_PASSWORD=""                      # database password
+
+
+Hints to compile php + db2 support :
+
+# configure and compile php 
+./configure  i386-redhat-linux --prefix=/usr --exec-prefix=/usr --bindir=/usr/bin --sbindir=/usr/sbin --sysconfdir=/etc --datadir=/usr/share --includedir=/usr/include --libdir=/usr/lib --libexecdir=/usr/libexec --localstatedir=/var --sharedstatedir=/usr/com --mandir=/usr/share/man --infodir=/usr/share/info --with-config-file-path=/etc --enable-track-vars --with-apxs=/usr/sbin/apxs --with-ibm-db2=/home/db2inst1/sqllib/ --no-create --no-recursion
+make
+make install
+
+in db2cc create database e.g. "openqrm"
+add user apache to openqrm-database users, add shema db2inst1 to user apachhe, grant all, allow usage of all tablespaces.
+

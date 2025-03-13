@@ -1,0 +1,233 @@
+#!/bin/bash
+# this is the root-mount initrd-service
+# which proivdes function to mount/remount the remote
+# nfs-rootfs according to the image_deployment_parameters at /mnt
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+# lvm-nfs-storage
+# Required defines in the image_deploy_paramters
+#
+#
+# Optional parameters 
+#
+# IMAGE_INSTALL_FROM_NFS			- can be set to an (nfs) location from
+#									  which the image will be installed at
+#									  deployment time
+#									  syntax is : storage_id:ip_of_nfs-server:path_to_target_image
+#
+# IMAGE_TRANSFER_TO_NFS				- can be set to an (nfs) location from
+#									  which the image will be transfered to at
+#									  deployment time
+#									  syntax is : storage_id:ip_of_nfs-server:path_to_target_image
+#
+# IMAGE_INSTALL_FROM_LOCAL			- set to a local harddisk device (e.g. /dev/hda1) this
+#									  option will install the lvm-nfs-storage image on 
+#									  boot-time from the local-device
+#
+# IMAGE_TRANSFER_TO_LOCAL			- set to a local harddisk device (e.g. /dev/hda1) this option will transfrom
+#									  the lvm-nfs-storage image on boot-time to the local-device
+#
+#
+#
+# IMAGE_INSTALL_FROM_LOCAL_FS_TYPE	- set to a local harddisk device fs-type (e.g. ext3)
+#
+# IMAGE_TRANSFER_TO_LOCAL_FS_TYPE	- set to a local harddisk device fs-type (e.g. ext3)
+#
+# IMAGE_NFS_MOUNT_OPTIONS			- can be e.g. set to proto=tcp for the install/transform phase
+#
+# get the deployment parameters from openqrm.conf
+OPENQRM_RESOURCE_PARAMETER_FILE="/var/openqrm/openqrm-resource.conf"
+. $OPENQRM_RESOURCE_PARAMETER_FILE
+eval $image_deployment_parameter
+export OPENQRM_SERVER_BASE_DIR=$resource_basedir
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+
+if [ "$IMAGE_NFS_MOUNT_OPTIONS" != "" ]; then
+	IMAGE_NFS_MOUNT_OPTIONS=",$IMAGE_NFS_MOUNT_OPTIONS"
+fi
+# default to ext3
+if [ "$IMAGE_INSTALL_FROM_LOCAL_FS_TYPE" == "" ]; then
+	IMAGE_INSTALL_FROM_LOCAL_FS_TYPE="ext3"
+fi
+if [ "$IMAGE_TRANSFER_TO_LOCAL_FS_TYPE" == "" ]; then
+	IMAGE_TRANSFER_TO_LOCAL_FS_TYPE="ext3"
+fi
+
+# adapt the rootdevice parameters
+IMAGE_ROOT_DIR=$image_rootdevice
+
+#######################################################################
+# required functions ##################################################
+#######################################################################
+
+function mount_rootfs() {
+	modprobe sunrpc 1>/dev/null 2>&1
+	modprobe lockd 1>/dev/null 2>&1
+	modprobe nfs 1>/dev/null 2>&1
+	rm -rf /dev/null
+	mknod -m 666 /dev/null c 1 3
+	openqrm_portmap_start
+
+	if ! mount -t nfs -o rw,nolock$IMAGE_NFS_MOUNT_OPTIONS $image_storage_server_ip:$IMAGE_ROOT_DIR /mnt; then
+		echo "ERROR: Could not mount $image_storage_server_ip:$IMAGE_ROOT_DIR by nfs"
+		# give a shell for the admin
+		/bin/bash
+	else
+		echo "nfs-storage: Mounted $image_storage_server_ip:$IMAGE_ROOT_DIR rw"
+	fi
+
+	if  [ "$IMAGE_INSTALL_FROM_NFS" != "" ]; then
+		install_rootfs_from_nfs
+	else
+		echo "lvm-nfs-storage: Skipping install phase"
+	fi
+	if  [ "$IMAGE_TRANSFER_TO_NFS" != "" ]; then
+		transfer_rootfs_to_nfs
+	else
+		echo "lvm-nfs-storage: Skipping transfer-to-nfs phase"
+	fi
+	if  [ "$IMAGE_INSTALL_FROM_LOCAL" != "" ]; then
+		install_rootfs_from_local
+	else
+		echo "lvm-nfs-storage: Skipping install-from-local phase"
+	fi
+	if  [ "$IMAGE_TRANSFER_TO_LOCAL" != "" ]; then
+		transfer_rootfs_to_local
+	else
+		echo "lvm-nfs-storage: Skipping transfer-to-local phase"
+	fi
+}
+
+
+function remount_rootfs() {
+
+	# Debian/Ubuntu Systems want their nfs-rootfs in rw mode
+	if [ -f /mnt/etc/apt/sources.list ]; then
+		if grep ubuntu /mnt/etc/apt/sources.list >/remountlog; then
+			echo "lvm-nfs-storage: Skipping Re-mount $image_storage_server_ip:$IMAGE_ROOT_DIR ro"
+			rm -f /remountlog
+			return
+		fi
+	fi
+	# remont /mnt ro
+	while ! mount -t nfs -o ro,remount,nolock$IMAGE_NFS_MOUNT_OPTIONS $image_storage_server_ip:$IMAGE_ROOT_DIR /mnt; do
+		echo -n "."
+		sleep 1
+		REMOUNT_LOOP=$[ REMOUNT_LOOP + 1 ]
+		if [ "$REMOUNT_LOOP" == "10" ]; then
+			echo "ERROR: nfs-storage could not remount /mnt "
+			/bin/bash
+		fi
+	done
+	echo "nfs-storage: Re-mounted $image_storage_server_ip:$IMAGE_ROOT_DIR ro"
+	openqrm_portmap_stop
+
+}
+
+
+function create_fstab() {
+	rm -f $IMAGE_FSTAB
+	echo "$image_storage_server_ip:$IMAGE_ROOT_DIR   /   nfs  defaults   0 0" >> $IMAGE_FSTAB
+}
+
+
+#######################################################################
+# optional functions ##################################################
+#######################################################################
+
+function install_rootfs_from_nfs() {
+	modprobe sunrpc 1>/dev/null 2>&1
+	modprobe lockd 1>/dev/null 2>&1
+	modprobe nfs 1>/dev/null 2>&1
+	rm -rf /dev/null
+	mknod -m 666 /dev/null c 1 3
+	openqrm_portmap_start
+	STORAGE_ID=`echo $IMAGE_INSTALL_FROM_NFS | cut -d':' -f1`
+	IMAGE_INSTALL_FROM_NFS=`echo $IMAGE_INSTALL_FROM_NFS | cut -d':' -f2-`
+	echo "lvm-nfs-storage: Installing $resource_image from $IMAGE_INSTALL_FROM_NFS ($STORAGE_ID)"
+	mkdir -p /mnt2
+	if ! mount -t nfs -o ro$IMAGE_NFS_MOUNT_OPTIONS $IMAGE_INSTALL_FROM_NFS /mnt2; then
+		echo "ERROR: Could not mount $IMAGE_INSTALL_FROM_NFS by nfs"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	echo "lvm-nfs-storage: Starting install-from-nfs phase. This can take a while ...."
+	rsync -aq /mnt2/* /mnt/
+	echo "lvm-nfs-storage: Install-from-nfs phase finished. Continuing boot-up"
+	umount /mnt2
+	rmdir /mnt2
+	openqrm_portmap_stop
+}
+
+
+function transfer_rootfs_to_nfs() {
+	modprobe sunrpc 1>/dev/null 2>&1
+	modprobe lockd 1>/dev/null 2>&1
+	modprobe nfs 1>/dev/null 2>&1
+	rm -rf /dev/null
+	mknod -m 666 /dev/null c 1 3
+	openqrm_portmap_start
+	STORAGE_ID=`echo $IMAGE_TRANSFER_TO_NFS | cut -d':' -f1`
+	IMAGE_TRANSFER_TO_NFS=`echo $IMAGE_TRANSFER_TO_NFS | cut -d':' -f2-`
+	echo "lvm-nfs-storage: Transfering $resource_image to $IMAGE_TRANSFER_TO_NFS ($STORAGE_ID)"
+	mkdir -p /mnt2
+	if ! mount -t nfs -o rw$IMAGE_NFS_MOUNT_OPTIONS $IMAGE_TRANSFER_TO_NFS /mnt2; then
+		echo "ERROR: Could not mount $IMAGE_TRANSFER_TO_NFS by nfs"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	echo "lvm-nfs-storage: Starting transfer-to-nfs phase. This can take a while ...."
+	rsync -aq /mnt/* /mnt2/
+	echo "lvm-nfs-storage: Transfer-to-nfs phase finished. Continuing boot-up"
+	umount /mnt2
+	rmdir /mnt2
+	openqrm_portmap_stop
+}
+
+
+function install_rootfs_from_local() {
+	modprobe ext3 1>/dev/null 2>&1
+	mkdir -p /mnt2
+	if ! mount -t $IMAGE_INSTALL_FROM_LOCAL_FS_TYPE -o ro $IMAGE_INSTALL_FROM_LOCAL /mnt2; then
+		echo "ERROR: Could not mount $IMAGE_INSTALL_FROM_LOCAL / $IMAGE_INSTALL_FROM_LOCAL_FS_TYPE"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	echo "lvm-nfs-storage: Starting install-to-local phase. This can take a while ...."
+	rsync -aq /mnt2/* /mnt/
+	echo "lvm-nfs-storage: Install-to-local phase finished. Continuing boot-up"
+	umount /mnt2
+	rmdir /mnt2
+}
+
+
+function transfer_rootfs_to_local() {
+	modprobe ext3 1>/dev/null 2>&1
+	mkdir -p /mnt2
+	if ! mount -t $IMAGE_TRANSFER_TO_LOCAL_FS_TYPE -o rw $IMAGE_TRANSFER_TO_LOCAL /mnt2; then
+		echo "ERROR: Could not mount $IMAGE_TRANSFER_TO_LOCAL / $IMAGE_TRANSFER_TO_LOCAL_FS_TYPE"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	echo "lvm-nfs-storage: Starting transfer-to-local phase. This can take a while ...."
+	rsync -aq /mnt/* /mnt2/
+	echo "lvm-nfs-storage: Transfer-to-local phase finished. Continuing boot-up"
+	umount /mnt2
+	rmdir /mnt2
+}
+
+
+

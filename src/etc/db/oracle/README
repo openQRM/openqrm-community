@@ -1,0 +1,20 @@
+openqrm-server.conf setup for oracle database :
+
+OPENQRM_DATABASE_TYPE="oracle"                    # supported are : mysql, oracle, db2, postgres
+OPENQRM_DATABASE_SERVER="localhost"               # ip-address of the database server
+OPENQRM_DATABASE_NAME="oratest"                   # database name
+OPENQRM_DATABASE_USER="scott"                     # database user
+OPENQRM_DATABASE_PASSWORD="tiger"                 # database password
+
+
+Hints to compile php + oracle support :
+
+install oracle
+source /home/oracle/.bashrc  (add to /root/.bashrc)
+create database e.g. "oratest"
+
+configure + compile php with oracle/oci support :
+./configure  i386-redhat-linux --prefix=/usr --exec-prefix=/usr --bindir=/usr/bin --sbindir=/usr/sbin --sysconfdir=/etc --datadir=/usr/share --includedir=/usr/include --libdir=/usr/lib --libexecdir=/usr/libexec --localstatedir=/var --sharedstatedir=/usr/com --mandir=/usr/share/man --infodir=/usr/share/info --prefix=/usr --with-config-file-path=/etc --enable-force-cgi-redirect --disable-debug --with-oci8=/opt/oracle/product/9.2.0/ --with-oracle=/opt/oracle/product/9.2.0/ --with-mysql=shared,/usr --with-apxs=/usr/sbin/apxs --enable-sigchild --no-create --no-recursion
+make 
+make install
+

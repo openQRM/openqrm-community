@@ -1,0 +1,25 @@
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+#	Title
+#	Href
+#	Alt
+#	IMG
+#	Target
+..|LinuxCOE
+...|Create Templates|index.php?iframe=/systemdesigner-cgi-bin/coe_bootimage|Create new LinuxCOE Automatic-Installation Templates
+...|Image Manager|index.php?plugin=linuxcoe&controller=linuxcoe|Linuxcoe Image Manager
+...|Template Manager|index.php?plugin=linuxcoe&controller=linuxcoe-template|Manage LinuxCOE Automatic-Installation Templates
+...|About|index.php?plugin=linuxcoe&controller=linuxcoe-about|How to use
+...|Config|index.php?plugin=linuxcoe&controller=linuxcoe-about&linuxcoe_about_action=bootservice|LinuxCOE Boot-Service

@@ -1,0 +1,5 @@
+host DHCPD_RESOURCE_HOSTNAME {
+	hardware ethernet DHCPD_RESOURCE_MAC;
+	fixed-address DHCPD_RESOURCE_IP;
+	filename "/pxelinux.0";
+}

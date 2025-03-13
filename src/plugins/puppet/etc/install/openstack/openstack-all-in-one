@@ -1,0 +1,155 @@
+#!/bin/bash
+# this script automatically installs openstack all-in-one
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+echo "puppet: starting openstack all-in-one installation" | logger
+
+# static defines + defaults
+DEFAULT_NIC="eth0"
+DEFAULT_FLOAT_SUBNET=27
+DEFAULT_EXTERNAL_SUBNET="24"
+DEFAULT_EXTERNAL_NETWORK="10.11.12.0"
+DEFAULT_FIXED_EXTERNAL_NETWORK_SIZE="256"
+LOCALRC=/home/stack/devstack/localrc
+RELEASE="icehouse"
+DEFAULT_ADMIN_PASSWORD="openqrm"
+DEFAULT_MYSQL_PASSWORD="openqrm"
+DEFAULT_RABBIT_PASSWORD="openqrm"
+DEFAULT_SERVICE_PASSWORD="openqrm"
+DEFAULT_SERVICE_TOKEN="openqrm"
+
+OPENQRM_RESOURCE_PARAMETER_FILE="/var/openqrm/openqrm-resource.conf"
+if [ ! -f "$OPENQRM_RESOURCE_PARAMETER_FILE" ]; then
+	echo "WARNING: Could not find $OPENQRM_RESOURCE_PARAMETER_FILE configuration. Installing openstack with defaults!" | logger
+	FLAT_INTERFACE=$DEFAULT_NIC
+	HOST_IP=`ip a s $FLAT_INTERFACE | grep -w $FLAT_INTERFACE$ | grep -w inet | awk '{ print $2 }' | cut -d'/' -f1`
+	if [ "$HOST_IP" == "" ]; then
+		HOST_IP=`ip a s | grep "$FLAT_INTERFACE:oq" | awk '{ print $2 }' | cut -d'/' -f1`
+		if [ "$HOST_IP" == "" ]; then
+			echo "ERROR: Could not find out ip address of nic $FLAT_INTERFACE" | logger
+			exit 1
+		fi
+	fi
+	FLOAT_NET=`echo $HOST_IP | cut -d'.' -f1-3`
+	FLOAT_NET=$FLOAT_NET".0"
+	FLOATING_RANGE=$FLOAT_NET/$DEFAULT_FLOAT_SUBNET
+	FIXED_RANGE="$DEFAULT_EXTERNAL_NETWORK/$DEFAULT_EXTERNAL_SUBNET"
+	FIXED_NETWORK_SIZE=$DEFAULT_FIXED_EXTERNAL_NETWORK_SIZE
+	# openstack credentials
+	ADMIN_PASSWORD=$DEFAULT_ADMIN_PASSWORD
+	MYSQL_PASSWORD=$DEFAULT_MYSQL_PASSWORD
+	RABBIT_PASSWORD=$DEFAULT_RABBIT_PASSWORD
+	SERVICE_PASSWORD=$DEFAULT_SERVICE_PASSWORD
+	SERVICE_TOKEN=$DEFAULT_SERVICE_TOKEN
+else
+	echo "puppet: Found $OPENQRM_RESOURCE_PARAMETER_FILE" | logger
+	. $OPENQRM_RESOURCE_PARAMETER_FILE
+	eval $appliance_capabilities
+fi
+
+# check parameters
+
+
+if [ "$HOST_IP" == "" ]; then
+	HOST_IP=$resource_ip
+fi
+if [ "$FLOATING_RANGE" == "" ]; then
+	FLOAT_NET=`echo $HOST_IP | cut -d'.' -f1-3`
+	FLOAT_NET=$FLOAT_NET".0"
+	FLOATING_RANGE=$FLOAT_NET/$DEFAULT_FLOAT_SUBNET
+fi
+
+if [ "$FIXED_RANGE" == "" ]; then
+	FIXED_RANGE="$DEFAULT_EXTERNAL_NETWORK/$DEFAULT_EXTERNAL_SUBNET"
+fi
+if [ "$FIXED_NETWORK_SIZE" == "" ]; then
+	FIXED_NETWORK_SIZE=$DEFAULT_FIXED_EXTERNAL_NETWORK_SIZE
+fi
+if [ "$FLAT_INTERFACE" == "" ]; then
+	FLAT_INTERFACE=`ip a s | grep -B2 -w $HOST_IP | grep ^[0-9] | awk '{ print $2 }' | cut -d':' -f1`
+	if [ "$FLAT_INTERFACE" == "" ]; then
+		echo "ERROR: Could not find out interface for ip address $HOST_IP" | logger
+		exit 1
+	fi
+fi
+if [ "$ADMIN_PASSWORD" == "" ]; then
+	ADMIN_PASSWORD=$DEFAULT_ADMIN_PASSWORD
+fi
+if [ "$MYSQL_PASSWORD" == "" ]; then
+	MYSQL_PASSWORD=$DEFAULT_MYSQL_PASSWORD
+fi
+if [ "$RABBIT_PASSWORD" == "" ]; then
+	RABBIT_PASSWORD=$DEFAULT_RABBIT_PASSWORD
+fi
+if [ "$SERVICE_PASSWORD" == "" ]; then
+	SERVICE_PASSWORD=$DEFAULT_SERVICE_PASSWORD
+fi
+if [ "$SERVICE_TOKEN" == "" ]; then
+	SERVICE_TOKEN=$DEFAULT_SERVICE_TOKEN
+fi
+
+
+echo "puppet: Preparing environment for openstack installation" | logger
+
+# main
+if ! grep ^stack /etc/passwd 1>/dev/null; then
+	echo "adding user stack"
+	adduser --disabled-password --gecos "" stack
+fi
+if ! which sudo 1>/dev/null; then
+	apt-get install sudo -y
+fi
+if ! which git 1>/dev/null; then
+	apt-get install git -y
+fi
+if ! grep ^stack /etc/sudoers 1>/dev/null; then
+	echo "stack ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+fi
+
+echo "puppet: checking out openstack from git" | logger
+
+# checkout openstack
+echo "checking out devstack"
+su - stack -c "git clone https://github.com/openstack-dev/devstack.git"
+echo "switching to $RELEASE release"
+su - stack -c "cd devstack; git checkout stable/$RELEASE"
+# create localrc config
+echo "puppet: creating localrc for custom openstack installation" | logger
+> $LOCALRC
+echo "HOST_IP=$HOST_IP" >> $LOCALRC
+echo "FLOATING_RANGE=$FLOATING_RANGE" >> $LOCALRC
+echo "FIXED_RANGE=$FIXED_RANGE" >> $LOCALRC
+echo "FIXED_NETWORK_SIZE=$FIXED_NETWORK_SIZE" >> $LOCALRC
+echo "FLAT_INTERFACE=$FLAT_INTERFACE" >> $LOCALRC
+echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> $LOCALRC
+echo "MYSQL_PASSWORD=$MYSQL_PASSWORD" >> $LOCALRC
+echo "RABBIT_PASSWORD=$RABBIT_PASSWORD" >> $LOCALRC
+echo "SERVICE_PASSWORD=$SERVICE_PASSWORD" >> $LOCALRC
+echo "SERVICE_TOKEN=$SERVICE_TOKEN" >> $LOCALRC
+echo "LOGFILE=/home/stack/stack.sh.log" >> $LOCALRC
+chown stack:stack $LOCALRC
+# ran stack.sh
+echo "puppet: running openstack installation now" | logger
+su - stack -c "cd devstack; ./stack.sh"
+echo "puppet: finished setting up openstack"  | logger
+
+
+
+
+
+
+
+

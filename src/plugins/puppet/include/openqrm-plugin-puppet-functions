@@ -1,0 +1,96 @@
+#!/bin/bash
+# this is the functions file for the puppet-plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+################ common puppet functions
+
+# logs for puppet
+function puppet_manager_log() {
+	local COMPONENT=$1
+	shift
+	local MESSAGE=$@
+	logger -i -t "puppet plug-in" "$COMPONENT : $MESSAGE"
+}
+
+
+################ puppet functions
+
+function stop_puppet() {
+	if [ -x "/etc/init.d/puppet" ]; then
+		if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+			invoke-rc.d puppet stop 1>/dev/null 2>&1
+		else
+			/etc/init.d/puppet stop 1>/dev/null 2>&1
+		fi
+		sleep 2
+	fi
+	if [ -x "/etc/init.d/puppetqd" ]; then
+		if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+			invoke-rc.d puppetqd stop 1>/dev/null 2>&1
+		else
+			/etc/init.d/puppetqd stop 1>/dev/null 2>&1
+		fi
+		sleep 2
+	fi
+
+	kill `ps ax | grep puppetd | grep -v grep | awk {' print $1 '}` 2>/dev/null
+	kill `ps ax | grep "puppet agent" | grep -v grep | awk {' print $1 '}` 2>/dev/null
+	sleep 2
+	kill -9 `ps ax | grep puppetd | grep -v grep | awk {' print $1 '}` 2>/dev/null
+	kill -9 `ps ax | grep "puppet agent" | grep -v grep | awk {' print $1 '}` 2>/dev/null
+}
+
+function stop_puppet_master() {
+	if [ -x "/etc/init.d/puppetmaster" ]; then
+		if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+			invoke-rc.d puppetmaster stop 1>/dev/null 2>&1
+		else
+			/etc/init.d/puppetmaster stop 1>/dev/null 2>&1
+		fi
+		sleep 2
+	fi
+	kill `ps ax | grep puppetmaster | grep -v grep | awk {' print $1 '}` 2>/dev/null
+	kill `ps ax | grep "puppet master" | grep -v grep | awk {' print $1 '}` 2>/dev/null
+	sleep 2
+	kill -9 `ps ax | grep puppetmaster | grep -v grep | awk {' print $1 '}` 2>/dev/null
+	kill -9 `ps ax | grep "puppet master" | grep -v grep | awk {' print $1 '}` 2>/dev/null
+}
+
+function start_puppet() {
+	if which puppetd 1>/dev/null 2>&1; then
+		puppetd -v -d -D -l syslog
+	elif puppet help | grep agent 1>/dev/null 2>&1; then
+		puppet agent
+	else
+		echo "ERROR: Could not start Puppet agent"
+	fi
+}
+
+function start_puppet_master() {
+	if which puppetmasterd 1>/dev/null 2>&1; then
+		puppetmasterd -v -d -l syslog
+	elif puppet help | grep master 1>/dev/null 2>&1; then
+		puppet master
+	else
+		echo "ERROR: Could not start Puppet master"
+	fi
+}
+
+
+
+
+
+

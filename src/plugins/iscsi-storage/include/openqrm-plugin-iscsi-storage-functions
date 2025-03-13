@@ -1,0 +1,250 @@
+#!/bin/bash
+# this is the functions file for the iscsi-storage-plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+
+# iscsi-target config file
+IETDCONF=`find /etc/ -name ietd.conf -type f | head -n1`
+if [ "$IETDCONF" == "" ]; then
+	IETDCONF="/etc/ietd.conf"
+fi
+VBLADECONF=/etc/vblade.conf
+
+# some definitions
+DEFAULT_IMAGE_SIZE=5000
+ISCSI_TARGET_URL=http://iscsitarget.sourceforge.net/
+IMAGE_LUN=1
+
+################ common iscsi-storage functions
+
+# logs for iscsi_storage
+function iscsi_storage_log() {
+	local COMPONENT=$1
+	shift
+	local MESSAGE=$@
+	logger -i -t "iscsi-storage plug-in" "$COMPONENT : $MESSAGE"
+}
+
+################ iscsi-storage functions
+
+# deps function
+function check_iscsi_storage_deps() {
+	# check and fullfill dependencies
+	# screen
+	if ! openqrm_full_fill_os_dependency screen screen; then
+		return 1
+	fi
+	if [ -x /usr/bin/screen.real ]; then
+		export RUNSCREEN="/usr/bin/screen.real"
+	else
+		export RUNSCREEN=`which screen`
+	fi
+	# wget
+	if ! openqrm_full_fill_os_dependency wget wget; then
+		return 1
+	fi
+	# procmail for lockfile
+	if ! openqrm_full_fill_os_dependency lockfile procmail; then
+		return 1
+	fi
+	if [ -f /etc/debian_version ]; then
+		# open-iscsi
+		if ! openqrm_full_fill_os_dependency iscsid open-iscsi; then
+			return 1
+		fi
+		# open-iscsi-utils
+		if ! openqrm_full_fill_os_dependency iscsiadm open-iscsi-utils; then
+			return 1
+		fi
+		# ietd - needs dkms package on debian/ubuntu
+		if ! openqrm_full_fill_os_dependency ietd iscsitarget-dkms; then
+			return 1
+		fi
+		if ! openqrm_full_fill_os_dependency ietd iscsitarget; then
+			return 1
+		fi
+	elif [ -f /etc/redhat-release ]; then
+		# iscsi-initiator-utils
+		if ! openqrm_full_fill_os_dependency iscsid iscsi-initiator-utils; then
+			return 1
+		fi
+		# ietd
+		if ! openqrm_full_fill_os_dependency ietd iscsitarget; then
+			return 1
+		fi
+	elif [ -f /etc/SuSE-release ]; then
+		# open-iscsi
+		if ! openqrm_full_fill_os_dependency iscsid open-iscsi; then
+			return 1
+		fi
+		# ietd
+		if ! openqrm_full_fill_os_dependency ietd iscsitarget; then
+			return 1
+		fi
+	fi
+
+}
+
+
+
+function manage_iscsi() {
+
+	case "$1" in
+		add)
+			IMAGE_PASS=$3
+			# if password is empty we generate one
+			if [ "$IMAGE_PASS" == "" ]; then
+			    IMAGE_PASS=`cat /dev/urandom|tr -dc "a-zA-Z0-9-_\$\?"|fold -w 9|head -n1`
+			fi
+			# create the image file
+			if [ "$2" != "snap" ]; then
+				if ! dd if=/dev/zero of=$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME bs=1M seek=$ISCSI_IMAGE_SIZE count=1; then
+					openqrm_post_event 0 "add" 3 "iscsi-storage" "Could not create volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+					return 1
+				else
+					# create fs, currently static all ext3
+					if ! mkfs.ext3 -F $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME; then
+						openqrm_post_event 0 "add" 3 "iscsi-storage" "Could not create filesystem on volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+						return 1
+					fi
+
+				fi
+			fi
+			echo "Target $ISCSI_IMAGE_NAME" >> $IETDCONF
+			echo "	IncomingUser $ISCSI_IMAGE_NAME $IMAGE_PASS" >> $IETDCONF
+			echo "	Lun $IMAGE_LUN Path=$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME,Type=fileio" >> $IETDCONF
+			echo "	MaxConnections 1   # $ISCSI_IMAGE_NAME" >> $IETDCONF
+			echo "	MaxSessions 1    # $ISCSI_IMAGE_NAME" >> $IETDCONF
+			echo "	NOPInterval 3    # $ISCSI_IMAGE_NAME" >> $IETDCONF
+			echo "	NOPTimeout  3    # $ISCSI_IMAGE_NAME" >> $IETDCONF
+			# create config for keeping the size
+			echo "LUN_SIZE=$ISCSI_IMAGE_SIZE" > $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME.conf
+			LAST_TID=`grep tid: /proc/net/iet/volume | cut -d':' -f2 | awk {' print $1 '} | sort -g | tail -n1`
+			NEW_TID=$(( $LAST_TID + 1 ))
+			# dynamically add new target
+			if ! ietadm --op new --tid=$NEW_TID --params Name=$ISCSI_IMAGE_NAME; then
+				openqrm_post_event 0 "add" 3 "iscsi-storage" "Could not create target for volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+				return 1
+			fi
+			# set path to iscsi device in the new target
+			if ! ietadm --op new --tid=$NEW_TID --lun=$IMAGE_LUN --params Path=$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME; then
+				openqrm_post_event 0 "add" 3 "iscsi-storage" "Could not set target path for volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+				return 1
+			fi
+			# auth target
+			if ! ietadm --op new --tid=$NEW_TID --user --params IncomingUser=$ISCSI_IMAGE_NAME,Password=$IMAGE_PASS; then
+				openqrm_post_event 0 "add" 3 "iscsi-storage" "Could not set authentication for volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+				return 1
+			fi
+			;;
+		auth)
+			IMAGE_PASS=$2
+			# if password is empty we generate one
+			if [ "$IMAGE_PASS" == "" ]; then
+			    IMAGE_PASS=`cat /dev/urandom|tr -dc "a-zA-Z0-9-_\$\?"|fold -w 9|head -n1`
+			fi
+			IMAGE_AUTHNAME=`basename $ISCSI_IMAGE_ROOTDEVICE`
+			sed -i -e "s#IncomingUser $IMAGE_AUTHNAME .*#IncomingUser $IMAGE_AUTHNAME $IMAGE_PASS#g" $IETDCONF
+			sed -i '/^$/d' $IETDCONF
+			TID_TO_AUTH=`cat /proc/net/iet/volume | grep "name:$IMAGE_AUTHNAME$" | cut -d':' -f2 | awk {' print $1 '}`
+			if [ "$TID_TO_AUTH" == "" ]; then
+				openqrm_post_event 0 "auth" 3 "iscsi-storage" "Could not find target for volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$IMAGE_AUTHNAME."
+				return 1
+			fi
+			if ! ietadm --op new --tid=$TID_TO_AUTH --user --params IncomingUser=$IMAGE_AUTHNAME,Password=$IMAGE_PASS; then
+				openqrm_post_event 0 "auth" 3 "iscsi-storage" "Could not set authentication for volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$IMAGE_AUTHNAME."
+				return 1
+			fi
+			;;
+		adapt)
+			IMAGE_PASS=$2
+			# if password is empty we generate one
+			if [ "$IMAGE_PASS" == "" ]; then
+			    IMAGE_PASS=`cat /dev/urandom|tr -dc "a-zA-Z0-9-_\$\?"|fold -w 9|head -n1`
+			fi
+			if ! grep -w "$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME" $IETDCONF | grep Lun | grep -v '^#' 1>/dev/null; then
+				echo "Target $ISCSI_IMAGE_NAME" >> $IETDCONF
+				echo "	IncomingUser $ISCSI_IMAGE_NAME $IMAGE_PASS" >> $IETDCONF
+				echo "	Lun $IMAGE_LUN Path=$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME,Type=fileio" >> $IETDCONF
+				echo "	MaxConnections 1   # $ISCSI_IMAGE_NAME" >> $IETDCONF
+				echo "	MaxSessions 1    # $ISCSI_IMAGE_NAME" >> $IETDCONF
+				echo "	NOPInterval 3    # $ISCSI_IMAGE_NAME" >> $IETDCONF
+				echo "	NOPTimeout  3    # $ISCSI_IMAGE_NAME" >> $IETDCONF
+				# create config for keeping the size
+				ISCSI_IMAGE_SIZE=`ls --block-size=M -l $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME | awk '{ print $5 }' | sed -e "s/M//g"`
+				echo "LUN_SIZE=$ISCSI_IMAGE_SIZE" > $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME.conf
+				LAST_TID=`grep tid: /proc/net/iet/volume | cut -d':' -f2 | awk {' print $1 '} | sort -g | tail -n1`
+				NEW_TID=$(( $LAST_TID + 1 ))
+				# dynamically add new target
+				if ! ietadm --op new --tid=$NEW_TID --params Name=$ISCSI_IMAGE_NAME; then
+					openqrm_post_event 0 "adapt" 3 "iscsi-storage" "Could not create target for volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+					return 1
+				fi
+				# set path to iscsi device in the new target
+				if ! ietadm --op new --tid=$NEW_TID --lun=$IMAGE_LUN --params Path=$OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME; then
+					openqrm_post_event 0 "adapt" 3 "iscsi-storage" "Could not set target path for volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+					return 1
+				fi
+				# auth target
+				if ! ietadm --op new --tid=$NEW_TID --user --params IncomingUser=$ISCSI_IMAGE_NAME,Password=$IMAGE_PASS; then
+					openqrm_post_event 0 "adapt" 3 "iscsi-storage" "Could not set authentication for volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+					return 1
+				fi
+			fi
+			;;
+		remove)
+			# remove from config file
+			cat $IETDCONF | grep -v -w $ISCSI_IMAGE_NAME > $IETDCONF.tmp
+			mv -f $IETDCONF.tmp $IETDCONF
+			sed -i '/^$/d' $IETDCONF
+			TID_TO_REMOVE=`cat /proc/net/iet/volume | grep "name:$ISCSI_IMAGE_NAME$" | cut -d':' -f2 | awk {' print $1 '}`
+			OPEN_SESSION=`cat /proc/net/iet/session | grep -w ^tid:$TID_TO_REMOVE -A1 | grep sid: | cut -d':' -f2 | awk {' print $1 '}`
+			if [ "$OPEN_SESSION" != "" ]; then
+				# first remove active session
+				if ! ietadm --op delete --tid=$TID_TO_REMOVE --sid=$OPEN_SESSION --cid=0; then
+					openqrm_post_event 0 "remove" 3 "iscsi-storage" "Could not remove active session for volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+					return 1
+				fi
+			fi
+			# remove lun
+			if ! ietadm --op delete --tid=$TID_TO_REMOVE --lun=$IMAGE_LUN; then
+				openqrm_post_event 0 "remove" 3 "iscsi-storage" "Could not remove the lun for volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+				return 1
+			fi
+			# remove target dynamically
+			if ! ietadm --op delete --tid=$TID_TO_REMOVE; then
+				openqrm_post_event 0 "remove" 3 "iscsi-storage" "Could not remove the target for volume $OPENQRM_ISCSI_STORAGE_SERVER_IMAGE_DIRECTORY/$ISCSI_IMAGE_NAME."
+				return 1
+			fi
+			;;
+	esac
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

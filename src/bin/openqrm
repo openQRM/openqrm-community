@@ -1,0 +1,584 @@
+#!/bin/bash
+# this is the openQRM commandline client
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+if [ "$OPENQRM_SERVER_BASE_DIR" == "" ]; then
+	OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../..
+	OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+fi
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+# unblock starting command queue early for non-blocking + ui commands
+OPENQRM_COMMAND=$1
+if [ "$OPENQRM_COMMAND" == "license" ] || [ "$OPENQRM_COMMAND" == "boot-service" ]; then
+	openqrm_unblock_starting_queue $@
+	NON_BLOCKING=true
+fi
+
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+export OPENQRM_SERVER_BASE_DIR
+
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+
+function openqrm_usage() {
+	echo
+	echo "Usage:"
+	echo "`basename $0` help			- This help screen"
+	echo
+	echo "- openQRM Console -"
+	echo "`basename $0` console"
+	echo
+	echo "- Managing boot-images -"
+	echo "`basename $0` kernel add -n <name> -v <version> -u <username> -p <password> [-l <location> -i <initramfs/ext2> -t <path-to-initrd-template-file> -m <list of unwantd modules comma separated>]"
+	echo "`basename $0` kernel remove -n <name> -u <username> -p <password>"
+	echo
+	echo "- Managing server-states -"
+	echo "`basename $0` state backup -n <name>"
+	echo "`basename $0` state restore -n <name>"
+	echo "`basename $0` state remove -n <name>"
+	echo "`basename $0` state list"
+	echo
+	echo "- Managing server-configuration -"
+	echo "`basename $0` init_config [restore]"
+	echo
+	echo "- Managing Plugin Boot-Services -"
+	echo "`basename $0` boot-service configure -n <plugin-name> -a default -k <key> -v <value>"
+	echo "`basename $0` boot-service configure -n <plugin-name> -a <appliance-name> -k <key> -v <value>"
+	echo
+	echo "`basename $0` boot-service view -n <plugin-name> -a default"
+	echo "`basename $0` boot-service view -n <plugin-name> -a <appliance-name>"
+	echo
+	echo "- Login to resources -"
+	echo "`basename $0` login -i <resource-ip>"
+	echo
+	echo "- Managing Licenses -"
+	echo "`basename $0` license -l <path-to-license-file>"
+
+
+}
+
+# logs for init_config
+function init_config_log() {
+	local MESSAGE=$@
+	logger -i -t "openQRM init-config" "$MESSAGE"
+}
+
+
+
+# main
+case "$1" in
+	kernel)
+		shift
+		if [ $# == 0 ]; then
+			openqrm_usage
+			exit 0
+		fi
+
+		case "$1" in
+			add)
+				shift
+				if [ $# == 0 ]; then
+					openqrm_usage
+					exit 0
+				fi
+				while [ $# -ne 0 ]; do
+					case "$1" in
+						-n)
+							BOOT_IMAGE_NAME=$2
+							shift
+							;;
+						-v)
+							BOOT_IMAGE_VERSION=$2
+							shift
+							;;			
+						-l)
+							BOOT_IMAGE_LOCATION=$2
+							shift
+							;;
+						-i)
+							BOOT_IMAGE_INITRD_TYPE=$2
+							shift
+							;;
+						-t)
+							BOOT_IMAGE_INITRD_TEMPLATE=$2
+							shift
+							;;
+						-u)
+							OPENQRM_USERNAME=$2
+							shift
+							;;
+						-p)
+							OPENQRM_PASSWORD=$2
+							shift
+							;;
+						-m)
+							OPENQRM_UNWANTED_MODULES_PARAM=$2
+							shift
+							;;
+					esac
+					shift
+				done
+				if [ "$BOOT_IMAGE_NAME" == "" ] || [ "$BOOT_IMAGE_VERSION" == "" ] || [ "$OPENQRM_USERNAME" == "" ] || [ "$OPENQRM_PASSWORD" == "" ]; then
+					openqrm_usage
+					exit 1
+				fi
+				if [ "$BOOT_IMAGE_LOCATION" == "" ]; then
+					BOOT_IMAGE_LOCATION=/
+				fi
+				if [ "$BOOT_IMAGE_INITRD_TYPE" == "" ]; then
+					BOOT_IMAGE_INITRD_TYPE="initramfs"
+				fi
+				if [ "$BOOT_IMAGE_INITRD_TEMPLATE" == "" ]; then
+					BOOT_IMAGE_INITRD_TEMPLATE=$OPENQRM_DEFAULT_INITRD_TEMPLATE
+				fi
+				openqrm_server_create_kernel $BOOT_IMAGE_NAME $BOOT_IMAGE_VERSION $BOOT_IMAGE_LOCATION $BOOT_IMAGE_INITRD_TYPE $BOOT_IMAGE_INITRD_TEMPLATE $OPENQRM_UNWANTED_MODULES_PARAM
+				if ! openqrm_server_manage_kernel add $OPENQRM_USERNAME $OPENQRM_PASSWORD $BOOT_IMAGE_NAME $BOOT_IMAGE_VERSION; then
+					echo "WARNING: Could not add the kernel to the openQRM-server!"
+					exit -1
+				fi
+				;;
+
+			remove)
+				shift
+				if [ $# == 0 ]; then
+					openqrm_usage
+					exit 0
+				fi
+				while [ $# -ne 0 ]; do
+					case "$1" in
+						-n)
+							BOOT_IMAGE_NAME=$2
+							shift
+							;;
+						-u)
+							OPENQRM_USERNAME=$2
+							shift
+							;;
+						-p)
+							OPENQRM_PASSWORD=$2
+							shift
+							;;
+					esac
+					shift
+				done
+				if [ "$BOOT_IMAGE_NAME" == "" ] || [ "$OPENQRM_USERNAME" == "" ] || [ "$OPENQRM_PASSWORD" == "" ]; then
+					openqrm_usage
+					exit 1
+				fi
+				rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/vmlinuz-$BOOT_IMAGE_NAME
+				rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/System.map-$BOOT_IMAGE_NAME
+				rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/modules-$BOOT_IMAGE_NAME.tgz
+				rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/initrd-$BOOT_IMAGE_NAME.img
+				if ! openqrm_server_manage_kernel remove $OPENQRM_USERNAME $OPENQRM_PASSWORD $BOOT_IMAGE_NAME $BOOT_IMAGE_VERSION; then
+					echo "WARNING: Could not remove the kernel to the openQRM-server!"
+					exit -1
+				fi
+				;;
+
+		esac
+		;;
+
+
+	state)
+		shift
+		if [ $# == 0 ]; then
+			openqrm_usage
+			exit 0
+		fi
+		export OPENQRM_SERVER_BASE_DIR
+
+		case "$1" in
+			backup)
+				shift
+				if [ $# == 0 ]; then
+					openqrm_usage
+					exit 0
+				fi
+				while [ $# -ne 0 ]; do
+					case "$1" in
+						-n)
+							BACKUP_STATE_NAME=$2
+							shift
+							;;
+					esac
+					shift
+				done
+				if [ "$BACKUP_STATE_NAME" == "" ]; then
+					openqrm_usage
+					exit 1
+				fi
+				openqrm_server_state backup $BACKUP_STATE_NAME
+				;;
+
+			restore)
+				shift
+				if [ $# == 0 ]; then
+					openqrm_usage
+					exit 0
+				fi
+				while [ $# -ne 0 ]; do
+					case "$1" in
+						-n)
+							BACKUP_STATE_NAME=$2
+							shift
+							;;
+					esac
+					shift
+				done
+				if [ "$BACKUP_STATE_NAME" == "" ]; then
+					openqrm_usage
+					exit 1
+				fi
+				openqrm_server_state restore $BACKUP_STATE_NAME
+				;;
+
+			remove)
+				shift
+				if [ $# == 0 ]; then
+					openqrm_usage
+					exit 0
+				fi
+				while [ $# -ne 0 ]; do
+					case "$1" in
+						-n)
+							BACKUP_STATE_NAME=$2
+							shift
+							;;
+					esac
+					shift
+				done
+				if [ "$BACKUP_STATE_NAME" == "" ]; then
+					openqrm_usage
+					exit 1
+				fi
+				openqrm_server_state remove $BACKUP_STATE_NAME
+				;;
+
+			list)
+				openqrm_server_state list
+				;;
+		esac
+		;;
+
+
+	login)
+		shift
+		if [ $# == 0 ]; then
+			openqrm_usage
+			exit 0
+		fi
+		while [ $# -ne 0 ]; do
+			case "$1" in
+				-i)
+					RESOURCE_IP_ADDRESS=$2
+					shift
+					;;
+			esac
+			shift
+		done
+		if [ "$RESOURCE_IP_ADDRESS" == "" ]; then
+			openqrm_usage
+			exit 1
+		fi
+		echo "Login to resource $RESOURCE_IP_ADDRESS ..."
+		dbclient -K 10 -y -i $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/dropbear_rsa_host_key -p $OPENQRM_EXEC_PORT root@$RESOURCE_IP_ADDRESS
+		;;
+
+
+	license)
+		shift
+		if [ $# == 0 ]; then
+			openqrm_usage
+			exit 0
+		fi
+		while [ $# -ne 0 ]; do
+			case "$1" in
+				-l)
+					LICENSE_FILE=$2
+					shift
+					;;
+			esac
+			shift
+		done
+		if [ "$LICENSE_FILE" == "" ]; then
+			openqrm_usage
+			exit 1
+		fi
+		if [ ! -f "$LICENSE_FILE" ]; then
+			echo "ERROR: License file $LICENSE_FILE does not exist!"
+			exit 1
+		fi
+		if [ ! -d $OPENQRM_SERVER_BASE_DIR/openqrm/etc/license ]; then
+			mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/etc/license
+		fi
+		if /bin/cp -f $LICENSE_FILE $OPENQRM_SERVER_BASE_DIR/openqrm/etc/license/; then
+			echo "Activating License file $LICENSE_FILE"
+			rm -f $LICENSE_FILE
+		else
+			echo "ERROR: Could not activate License file $LICENSE_FILE"
+			rm -f $LICENSE_FILE
+			exit 1
+		fi
+
+		;;
+
+
+	console)
+		echo "starting the openQRM Console"
+		export OPENQRM_SOURCE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/"
+		. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+		export FORCE_INSTALL=true
+		openqrm_install_os_dependency lynx
+		lynx http://localhost/openqrm
+		;;
+
+
+	init_config)
+		shift
+		RESTORE_LAST_STATE=$1
+		INIT_CONFIG_LOCK="$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/running_init_config"
+		if [ -f $INIT_CONFIG_LOCK ]; then
+			init_config_log "init_config already running. Skipping re-init"
+			exit 0
+		fi
+		if [ -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/unconfigured ]; then
+
+			# setup traps, make sure we do not get stopped by timeout
+			trap "" HUP
+			trap "" INT
+			trap "" QUIT
+			trap "" KILL
+			trap "" TSTP
+			
+			# create lock
+			touch $INIT_CONFIG_LOCK
+			init_config_log "Initializing the openQRM Database"
+
+			# initialize the database
+			chmod +x $OPENQRM_SERVER_BASE_DIR/openqrm/etc/db/$OPENQRM_DATABASE_TYPE/openqrm-$OPENQRM_DATABASE_TYPE-functions
+			if ! $OPENQRM_SERVER_BASE_DIR/openqrm/etc/db/$OPENQRM_DATABASE_TYPE/openqrm-$OPENQRM_DATABASE_TYPE-functions init; then
+				init_config_log "ERROR: Initializing the openQRM Database failed !"
+				rm -f $INIT_CONFIG_LOCK
+				exit -1
+			fi
+
+			# check if we should restore the last state
+			if [ "$RESTORE_LAST_STATE" == "restore" ]; then
+				init_config_log "Restoring last openQRM state backup"
+				# check if backups are not locked
+				if [ ! -f $OPENQRM_SERVER_STATE_DIR/locked ]; then
+					if [ "$OPENQRM_RESTORE_STATE" != "false" ]; then
+						# check if there is a server state to restore
+						LAST_SERVER_STATE_BACKUP=`ls -tr $OPENQRM_SERVER_STATE_DIR/uninstall-* 2>/dev/null | tail -n1 | sed -s "s/\.tgz//g"`
+						if [ "$LAST_SERVER_STATE_BACKUP" != "" ]; then
+							LAST_SERVER_STATE_BACKUP=`basename $LAST_SERVER_STATE_BACKUP`
+							init_config_log "Found backup of last openQRM Server state $LAST_SERVER_STATE_BACKUP, restoring it"
+							openqrm_server_state restore $LAST_SERVER_STATE_BACKUP
+						fi
+					fi
+				else
+					init_config_log "Found openQRM Server state backups locked by $OPENQRM_SERVER_STATE_DIR/locked"
+				fi
+			fi
+
+			# create $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/default
+			init_config_log "Creating default PXE-configuration"
+			mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/
+			openqrm_server_create_pxe_config -1 default default
+
+			# add automatic startup to init
+			if [ -e /etc/init.d/openqrm-enterprise ]; then
+				openqrm_chkconfig add openqrm-enterprise
+			elif [ -e /etc/init.d/openqrm ]; then
+				openqrm_chkconfig add openqrm
+			fi
+
+			# here we create + add the default kernel+kernel-version to the openQRM Server
+			# via the kernel-action.form. If this returns bad something is wrong
+			DEFAULT_KERNEL_VERSION=`uname -r`
+			
+			IS_WSL=`uname -r | grep WSL`
+			#not a WSL environment
+			if [ -z "$IS_WSL" ]; then
+				init_config_log "Creating the default kernel version $DEFAULT_KERNEL_VERSION"
+				INITRD_TYPE="initramfs"
+
+				#openqrm_server_create_kernel default $DEFAULT_KERNEL_VERSION / $INITRD_TYPE
+				openqrm_server_create_kernel default $DEFAULT_KERNEL_VERSION / $INITRD_TYPE $OPENQRM_DEFAULT_INITRD_TEMPLATE "csiostor "
+
+				if ! openqrm_server_manage_kernel add openqrm openqrm default $DEFAULT_KERNEL_VERSION; then
+					init_config_log "Could not create/add the default kernel ! Initialization failed !"
+					exit 1
+					rm -f $INIT_CONFIG_LOCK
+				fi
+
+			fi
+
+			# remove configure lock
+			rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/unconfigured
+
+			# start monitoring subsystem and plugins
+			if [ -x /usr/bin/screen.real ]; then
+				RUNSCREEN="/usr/bin/screen.real"
+			else
+				RUNSCREEN=`which screen`
+			fi
+			SCREEN_NAME=`date +%T%x | sed -e "s/://g" | sed -e "s#/##g"`
+			$RUNSCREEN -dmS $SCREEN_NAME $OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-monitord
+			if [ -d $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/ ]; then
+				for OPENQRM_PLUGIN in `ls $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/`; do
+					if [ -x $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN ]; then
+						$RUNSCREEN -dmS $OPENQRM_PLUGIN $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN start
+					fi
+				done
+			fi
+			init_config_log "Successfully initialized and started the openQRM Server"
+			rm -f $INIT_CONFIG_LOCK
+			exit 0
+
+		else
+			init_config_log "This openQRM Server is already configured. Skipping re-init"
+			exit 0
+		fi
+		;;
+
+
+
+	boot-service)
+		shift
+		if [ $# == 0 ]; then
+			openqrm_usage
+			exit 0
+		fi
+		BOOT_SERVICE_COMMAND=$1
+		shift
+		while [ $# -ne 0 ]; do
+			case "$1" in
+				-a)
+					APPLIANCE_NAME=$2
+					shift
+					;;
+				-n)
+					PLUGIN_NAME=$2
+					shift
+					;;
+				-v)
+					BOOT_SERVICE_VALUE=$2
+					shift
+					;;
+				-k)
+					BOOT_SERVICE_KEY=$2
+					shift
+					;;
+			esac
+			shift
+		done
+
+		case "$BOOT_SERVICE_COMMAND" in
+			configure)
+				if [ "$APPLIANCE_NAME" == "" ] || [ "$PLUGIN_NAME" == "" ] || [ "$BOOT_SERVICE_VALUE" == "" ] || [ "$BOOT_SERVICE_KEY" == "" ]; then
+					openqrm_usage
+					exit 1
+				fi
+				# create empty value
+				if [ $BOOT_SERVICE_VALUE == "NoValue" ]; then
+					BOOT_SERVICE_VALUE=""
+				fi
+				if [ ! -f "$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/openqrm-plugin-$PLUGIN_NAME.conf" ]; then
+					echo "ERROR: Cannot find Boot-Service configuration of Plugin $PLUGIN_NAME!"
+					exit -1
+				fi
+				if ! grep -w ^$BOOT_SERVICE_KEY $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/openqrm-plugin-$PLUGIN_NAME.conf 2>&1 1>/dev/null; then
+					echo "ERROR: Cannot find key in Boot-Service configuration of Plugin $PLUGIN_NAME!"
+					exit -1
+				fi
+
+				if [ "$APPLIANCE_NAME" == "default" ]; then
+					echo "Setting up default Boot-Service Konfiguration of plugin $PLUGIN_NAME"
+					BOOT_SERVICE_CONFIG_FILE="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/openqrm-plugin-$PLUGIN_NAME.conf"
+					if [ -f "$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service-$PLUGIN_NAME.tgz" ]; then
+						# adjust the config in the boot-service.tgz file
+						echo "- adjusting boot-service of plugin $PLUGIN_NAME at $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service-$PLUGIN_NAME.tgz"
+						rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service.tmp
+						mkdir $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service.tmp
+						if ! tar -C $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service.tmp -xzf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service-$PLUGIN_NAME.tgz; then
+							echo "ERROR: Could not unpack boot-service of of Plugin $PLUGIN_NAME at $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service-$PLUGIN_NAME.tgz!"
+							exit -1
+						fi
+						if [ -f "$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service.tmp/etc/openqrm-plugin-$PLUGIN_NAME.conf" ]; then
+							sed -i -e "s#$BOOT_SERVICE_KEY.*#$BOOT_SERVICE_KEY=\"$BOOT_SERVICE_VALUE\"#g" $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service.tmp/etc/openqrm-plugin-$PLUGIN_NAME.conf
+							TIMESTAMP=`date +%s`
+							mv -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service-$PLUGIN_NAME.tgz $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service-$PLUGIN_NAME.tgz.$TIMESTAMP
+							cd $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service.tmp/ && tar -czf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service-$PLUGIN_NAME.tgz * && cd -
+							rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/web/boot-service.tmp
+						fi
+					fi
+				else
+					echo "Setting up custom Boot-Service Konfiguration of plugin $PLUGIN_NAME for Appliance $APPLIANCE_NAME"
+					if [ ! -f "$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/appliances/openqrm-plugin-$PLUGIN_NAME.$APPLIANCE_NAME.conf" ]; then
+						mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/appliances
+						/bin/cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/openqrm-plugin-$PLUGIN_NAME.conf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/appliances/openqrm-plugin-$PLUGIN_NAME.$APPLIANCE_NAME.conf
+					fi
+					mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/plugins
+					if [ ! -h $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/plugins/$PLUGIN_NAME ]; then
+						rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/plugins/$PLUGIN_NAME
+						ln -s $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/appliances $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/plugins/$PLUGIN_NAME
+					fi
+					BOOT_SERVICE_CONFIG_FILE="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/appliances/openqrm-plugin-$PLUGIN_NAME.$APPLIANCE_NAME.conf"
+				fi
+				sed -i -e "s#$BOOT_SERVICE_KEY.*#$BOOT_SERVICE_KEY=\"$BOOT_SERVICE_VALUE\"#g" $BOOT_SERVICE_CONFIG_FILE
+				;;
+
+
+			view)
+				if [ "$APPLIANCE_NAME" == "" ] || [ "$PLUGIN_NAME" == "" ]; then
+					openqrm_usage
+					exit 1
+				fi
+
+				if [ "$APPLIANCE_NAME" == "default" ]; then
+					if [ ! -f "$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/openqrm-plugin-$PLUGIN_NAME.conf" ]; then
+						echo "ERROR: Cannot find Boot-Service configuration of Plugin $PLUGIN_NAME!"
+						exit -1
+					fi
+					BOOT_SERVICE_CONFIG_FILE="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/openqrm-plugin-$PLUGIN_NAME.conf"
+				else
+					if [ ! -f "$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/appliances/openqrm-plugin-$PLUGIN_NAME.$APPLIANCE_NAME.conf" ]; then
+						echo "NOTCIE: Boot-Service configuration of Plugin $PLUGIN_NAME for Appliance $APPLIANCE_NAME not configured yet"
+						exit 0
+					fi
+					BOOT_SERVICE_CONFIG_FILE="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$PLUGIN_NAME/etc/appliances/openqrm-plugin-$PLUGIN_NAME.$APPLIANCE_NAME.conf"
+				fi
+				cat $BOOT_SERVICE_CONFIG_FILE
+				;;
+		esac
+		;;
+
+
+
+	*)
+		openqrm_usage
+		;;
+
+esac
+
+

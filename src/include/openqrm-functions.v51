@@ -1,0 +1,813 @@
+#!/bin/bash
+# this is the main function file for openQRM
+# only general + generic functions should go in here
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+if [ "$OPENQRM_SERVER_BASE_DIR" == "" ]; then
+	echo "ERROR: Please export OPENQRM_SERVER_BASE_DIR before sourcing $0"
+	exit 1
+fi
+# some static defines
+OPENQRM_RESOURCE_PARAMETER_FILE="/var/openqrm/openqrm-resource.conf"
+OPENQRM_CMD_QUEUE_STARTING_LOCK="/var/run/openqrm/starting-queue-command.lock"
+
+# be sure cmd output is english
+export LANGUAGE=C
+export LANG=C
+export LC_ALL=C
+
+# A more portable "chkconfig".
+# Uses chkconfig or rc.d-update as found, if not then "manual".
+function openqrm_chkconfig() {
+	action="$1"
+	service="$2"
+
+	if [ $action != "add" ] && [ $action != "del" ] ; then
+		echo "openqrm_chkconfig: action must be either \"add\" or \"del\""
+		return 1
+	fi
+	if [ -z "${service}" ] ; then
+		echo "openqrm_chkconfig: service must be valid service name"
+		return 1
+	fi
+
+
+
+#	# For systemd
+	if [ -x /bin/systemd ] || [ -x /usr/bin/systemd ] ; then
+
+		case $action in
+			add)
+				if [ ! -d /etc/systemd/system/ ] ; then
+					mkdir -p /etc/systemd/system/
+				fi
+				if [ "${service}" == "openqrm-client" ] ; then
+					cp $OPENQRM_SERVER_BASE_DIR/openqrm/etc/systemd/system/openqrm-client.service /etc/systemd/system/openqrm-client.service
+				fi
+				/bin/systemctl enable ${service} 
+				/bin/systemctl daemon-reload
+				;;
+			del)
+				/bin/systemctl disable ${service}
+				/bin/systemctl daemon-reload
+				;;
+		esac
+
+#	# For Redhat/SuSe
+	elif [ -x /sbin/chkconfig ] ; then
+		ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/etc/init.d/openqrm-client /etc/init.d/openqrm-client
+	
+		case $action in
+			add)
+				local do_chkconfig=1
+				# check if the init is not configured
+				chkconfig --list ${service} > /dev/null 2>&1 && do_chkconfig=
+
+				# maybe it is configured, but for our runlevel not (tam)
+				if [ -z "$do_chkconfig" ]; then
+					do_chkconfig=1
+					local runlevel=$(grep initdefault /etc/inittab | grep id |cut -d ':' -f2)
+					for f in /etc/rc${runlevel}.d/S??${service} /etc/init.d/rc${runlevel}.d/S??${service}; do
+						[ -e $f ] && do_chkconfig=
+					done
+				fi
+				if [ $do_chkconfig ]; then
+					chkconfig --add ${service}
+					if [ ! -f /etc/UnitedLinux-release ]; then
+						chkconfig ${service} on
+					else
+						chkconfig --add ${service}
+					fi
+				fi
+				;;
+			del)
+				#check if service exists
+				if chkconfig --list ${service} > /dev/null 2>&1 ; then
+					chkconfig --del ${service}
+				fi
+				;;
+
+		esac
+	# For Debian/Ubuntu
+	elif [ -x /usr/sbin/update-rc.d ] ; then
+		# according to manuals, update-rc.d does nothing if links already exist
+		
+		ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/etc/init.d/openqrm-client /etc/init.d/openqrm-client
+		
+		if [ $action == "add" ] ; then
+			# check for start + stop leven
+			start_l=`grep chkconfig /etc/init.d/${service} | grep ^'#' | awk {' print $4 '}`
+			stop_l=`grep chkconfig /etc/init.d/${service} | grep ^'#' | awk {' print $5 '}`
+			update-rc.d ${service}  defaults $start_l $stop_l
+			# check for upstart
+			if [ "$service" == "openqrm" ]; then
+				# debian 6 using insserv, be sure to start in rc 2
+				/bin/cp -a /etc/rc3.d/S*openqrm /etc/rc2.d/
+				if [ -d /etc/init/ ]; then
+					echo '# openQRM - starts openQRM' > /etc/init/openqrm.conf
+					echo 'description       "openQRM Server"' >> /etc/init/openqrm.conf
+					echo 'start on net-device-up' >> /etc/init/openqrm.conf
+					echo 'exec /etc/init.d/openqrm start' >> /etc/init/openqrm.conf
+				fi
+			fi
+			if [ "$service" == "openqrm-client" ]; then
+				# debian 6 using insserv, be sure to start in rc 2
+				/bin/cp -a /etc/rc3.d/S*openqrm-client /etc/rc2.d/
+				if [ -d /etc/init/ ]; then
+					echo '# openQRM Client - starts openQRM Client' > /etc/init/openqrm-client.conf
+					echo 'description       "openQRM Client"' >> /etc/init/openqrm-client.conf
+					echo 'start on net-device-up' >> /etc/init/openqrm-client.conf
+					echo 'exec /etc/init.d/openqrm-client start' >> /etc/init/openqrm-client.conf
+				fi
+			fi
+			if [ "$service" == "openqrm-local-vm-client" ]; then
+				# debian 6 using insserv, be sure to start in rc 2
+				/bin/cp -a /etc/rc3.d/S*openqrm-local-vm-client /etc/rc2.d/
+				if [ -d /etc/init/ ]; then
+					echo '# openQRM Client - starts openQRM Client' > /etc/init/openqrm-local-vm-client.conf
+					echo 'description       "openQRM Client"' >> /etc/init/openqrm-local-vm-client.conf
+					echo 'start on net-device-up' >> /etc/init/openqrm-local-vm-client.conf
+					echo 'exec /etc/init.d/openqrm-local-vm-client start' >> /etc/init/openqrm-local-vm-client.conf
+				fi
+			fi
+		elif [ $action == "del" ] ; then
+			update-rc.d -f ${service} remove 1>/dev/null 2>&1
+			# check for upstart
+			if [ "$service" == "openqrm-client" ]; then
+				# debian 6 using insserv, remove from rc 2
+				rm -f /etc/rc2.d/S*openqrm-client
+				if [ -e /etc/init/openqrm-client.conf ]; then
+					rm -f /etc/init/openqrm-client.conf
+				fi
+			fi
+			if [ "$service" == "openqrm" ]; then
+				rm -f /etc/rc2.d/S*openqrm
+				if [ -e /etc/init/openqrm.conf ]; then
+					rm -f /etc/init/openqrm.conf
+				fi
+			fi
+			if [ "$service" == "openqrm-local-vm-client" ]; then
+				rm -f /etc/rc2.d/S*openqrm-local-vm-client
+				if [ -e /etc/init/openqrm-local-vm-client.conf ]; then
+					rm -f /etc/init/openqrm-local-vm-client.conf
+				fi
+			fi
+		fi
+	# "Manual".  Uses S91 by default
+	else
+		ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/etc/init.d/openqrm-client /etc/init.d/openqrm-client
+	
+		# Get default runlevel
+		runlevel=$( grep default /etc/inittab | grep ^id: | cut -f 2 -d: )
+
+		# Find directory for script links
+		if [ -d /etc/rc.d/ ] ; then
+				rcdir=/etc/rc.d/rc${runlevel}.d
+		else
+				rcdir=/etc/rc${runlevel}.d
+		fi
+
+		if [ $action == "add" ] ; then
+			if [ ! -f $rcdir/S??${service} ] && [ -f /etc/init.d/${service} ] ; then
+				   ln -s /etc/init.d/${service} $rcdir/S91${service}
+			fi
+		elif [ $action == "del" ] ; then
+			if [ -f $rcdir/S??${service} ] ; then
+				   rm $rcdir/S??${service}
+			fi
+		fi
+	fi
+	return 0
+}
+
+
+
+# create short name for distro for the package stage
+function openqrm_get_distro() {
+	# find out which distribution it is
+	# find out which version it is
+	# give the ROOT_DIR as the first cmdline param
+	local ROOT_DIR=${1:-/}
+	if [ -f $ROOT_DIR/etc/fedora-release ]; then
+		RELEASE=$(cat $ROOT_DIR/etc/fedora-release | head -1)
+			case $RELEASE in
+				*Fedora*9*)
+					echo "fedora9"
+					;;
+				*Fedora*10*)
+					echo "fedora10"
+					;;
+				*)
+					echo "fedora"
+					;;
+			esac
+	elif [ -f $ROOT_DIR/etc/redhat-release ]; then
+		RELEASE=$(cat $ROOT_DIR/etc/redhat-release | head -1)
+		case $RELEASE in
+			*Werewolf*)
+				echo "fc8"
+				;;
+			*Moonshine*)
+				echo "fc7"
+				;;
+			*Zod*)
+				echo "fc6"
+				;;
+			*Bordeaux*)
+				echo "fc5"
+				;;
+			*Stentz*)
+				echo "fc4"
+				;;
+			*Nahant*)
+				echo "el4"
+				;;
+			*Shrike*)
+				echo "rh9"
+				;;
+			*Psyche*)
+				echo "rh8"
+				;;
+			*Valhalla*)
+				echo "rh73"
+				;;
+			*Taroon*)
+				echo "el3"
+				;;
+			*CentOS*5*)
+				echo "centos5"
+				;;
+			*CentOS*6*)
+				echo "centos6"
+				;;
+			*CentOS*7*)
+				echo "centos7"
+				;;
+			*)
+				echo "rh"
+				;;
+		esac
+	elif [ -f $ROOT_DIR/etc/UnitedLinux-release ]; then
+		RELEASE=$(cat $ROOT_DIR/etc/UnitedLinux-release | head -1)
+		case $RELEASE in
+			*UnitedLinux*)
+				echo "suse8"
+				;;
+			*)
+				echo "suse"
+				;;
+		esac
+	elif [ -f $ROOT_DIR/etc/SuSE-release ]; then
+		RELEASE=$(cat $ROOT_DIR/etc/SuSE-release | head -1)
+		case $RELEASE in
+			*openSUSE*10*)
+				echo "opensuse10"
+				;;
+			*SUSE*9*)
+				echo "suse9"
+				;;
+			*SUSE*10*)
+				echo "suse10"
+				;;
+			*SUSE*11*)
+				echo "suse11"
+				;;
+			*)
+				echo "suse"
+				;;
+		esac
+
+	elif [ -f $ROOT_DIR/etc/debian_version ]; then
+		RELEASE=$(cat $ROOT_DIR/etc/debian_version | head -1)
+		case $RELEASE in
+			*3.1*)
+				echo "debian31"
+				;;
+			*4.0*)
+				echo "debian40"
+				;;
+			*5.0*)
+				echo "debian50"
+				;;
+			*lenny/sid*)
+				if [ -f $ROOT_DIR/etc/lsb-release ]; then
+					if grep hardy $ROOT_DIR/etc/lsb-release 1>/dev/null; then
+						echo "ubuntu804"
+					elif grep intrepid $ROOT_DIR/etc/lsb-release 1>/dev/null; then
+						echo "ubuntu810"
+					else
+						echo "ubuntu804"
+					fi
+				else
+					echo "ubuntu804"
+				fi
+				;;
+			*)
+				echo "debian"
+				;;
+		esac
+	else
+		echo "generic"
+	fi
+}
+
+#
+# get the distribution name
+# $1:      root directory of the installation (optional; default is "/")
+# returns: one of fedora|rhel|suse|ubuntu|debian|unknown
+#
+function openqrm_get_distro_name() {
+	local ROOT_DIR=${1:-/}
+	if [-f "$ROOT_DIR/etc/fedora-release" ]; then
+		echo "fedora"
+	elif [ -f "$ROOT_DIR/etc/redhat-release" ]; then
+		# CentOS uses /etc/redhat-release, too
+		echo 'rhel';
+	elif [ -f "$ROOT_DIR/etc/UnitedLinux-release" ]; then
+		echo "suse"
+	elif [ -f "$ROOT_DIR/etc/SuSE-release" ]; then
+		echo "suse"
+	elif [ -f "$ROOT_DIR/etc/ubuntu_version" ]; then
+		echo "ubuntu"
+	elif [ -f "$ROOT_DIR/etc/debian_version" ]; then
+		echo "debian"
+	else
+		echo "unknown"
+	fi
+}
+
+#
+# get the distribution's version
+#
+# you can choose to get the result as integer or as string. Use the integer
+# output if you want to have a condition like distro_version > 100 (equals 10.0)
+# Use string output for user-visible display. Default is "string".
+#
+# Note one Debian specific feature: if testing/unstable is installed (there is no 
+# version number for these), "string" will return "testing/unstable", "integer" 
+# returns -1!
+# 
+# Note that old Redhat releases (before 2003, ending with Redhat 9) are NOT
+# supported. There is only RedHat Enterprise (RHEL) and Fedora.
+#
+# integer will return 
+# - version * 10 (e.g. 103 instead of 10.3) for Debian and SUSE
+# - version for RHEL/CentOS and Fedora
+#
+# FIXME: use lsb_release as soon as it is usable by many distributions 
+# (required since LSB 3.0, but not installed by default on RHEL/CentOS)
+# 
+#
+# $1:      string|integer return as integer or as string (optional; default is string)
+# $2:      root directory of the installation (optional; default is "/")
+# returns: the distribution's version number
+#
+function openqrm_get_distro_version() {
+	local RETURN_AS=$1
+	if [ "$1" == '' ]; then
+		RETURN_AS=string
+	fi
+
+	case `openqrm_get_distro_name()` in
+		"suse")
+			# tested with: openSUSE 10.3
+			# XXX: This is not tested for SLES/SLED yet
+			if [ $RETURN_AS == 'string' ]; then
+				local VERSION=$(cat "$ROOT_DIR/etc/SuSE-release" | tail -1 | sed 's/VERSION = \([0-9]\+\.[0-9]\)/\1/')
+				echo $VERSION
+			elif [ $RETURN_AS == 'integer' ]; then
+				local VERSION=$(cat "$ROOT_DIR/etc/SuSE-release" | tail -1 | sed 's/VERSION = \([0-9]\+\)\.\([0-9]\)/\1\2/')
+				echo $VERSION
+			fi
+		;;
+		"rhel")
+			# tested with: CentOS 5.1
+			# XXX: RHEL/CentOS does not give us the service release number (e.g. only 5 instead of 5.1)
+			local VERSION=$(cat "$ROOT_DIR/etc/redhat-release" | head -n1 | sed 's/.*release \([0-9]\+\).*/\1/')
+						echo $VERSION
+		;;
+		"fedora")
+			# tested with: Fedora Core 3, Fedora Core 6, Fedora 8
+						local VERSION=$(cat "$ROOT_DIR/etc/fedora-release" | head -n1 | sed 's/.*release \([0-9]\+\) .*/\1/')
+						echo $VERSION
+		;;
+		"debian")
+			# tested with: 4.0 (etch), unstable/testing
+			if [ $RETURN_AS == 'string' ]; then
+								local VERSION=$(cat "$ROOT_DIR/etc/debian_version")
+								echo $VERSION
+						elif [ $RETURN_AS == 'integer' ]; then
+				if [ `cat "$ROOT_DIR/etc/debian_version"` == 'testing/unstable' ]; then
+					echo -1
+				else
+									local VERSION=$(cat "$ROOT_DIR/etc/debian_version" | sed 's/\([0-9]\+\)\.\([0-9]\)/\1\2/')
+									echo $VERSION
+				fi
+			fi
+			;;
+			*)
+			echo 0
+			;;
+	esac
+}
+
+
+
+# function to send events to the openQRM-server
+# param 1 = resource_id
+# param 2 = event_name
+# param 3 = event_priority
+# param 4 = event_source
+# param 5 = event_description
+function openqrm_post_event() {
+	resource_id=`urlencodestring $1`
+	event_name=`urlencodestring $2`
+	event_priority=`urlencodestring $3`
+	event_source=`urlencodestring $4`
+	event_description=`urlencodestring $5`
+	# are we on the openQRM server or on a resource ?
+	if [ -f $OPENQRM_RESOURCE_PARAMETER_FILE ]; then
+		. $OPENQRM_RESOURCE_PARAMETER_FILE
+	elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+		. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+		. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+		openqrm_server_get_config
+		resource_id=0
+		resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+		openqrm_web_protocol=$OPENQRM_WEB_PROTOCOL
+	fi
+	# define wget to use with https
+	if [ "$openqrm_web_protocol" == "https" ]; then
+		WGET_NO_CERT_CHECK="--no-check-certificate"
+	fi
+	MESSAGEDATA="resource_id=$resource_id&event_name=$event_name&event_priority=$event_priority&event_source=$event_source&event_description=$event_description";
+	OPENQRM_RESOURCE_EVENT_URL="$openqrm_web_protocol://$resource_openqrmserver/openqrm/action/resource-monitor.php?resource_command=post_event&$MESSAGEDATA"
+	wget -q $WGET_NO_CERT_CHECK -O /dev/null --tries=200 --retry-connrefused -T 10 --random-wait --no-proxy "$OPENQRM_RESOURCE_EVENT_URL" &
+}
+
+
+
+# a generic function to start portmap
+# -> on some systems (e.g. fedora) we need to start rpcbind
+function openqrm_portmap_start() {
+	if which rpcbind 1>/dev/null; then
+		rpcbind
+		rpc.statd
+	else
+		portmap
+	fi
+}
+
+
+
+# a generic function to stop portmap
+# -> on some systems (e.g. fedora) we need to stop rpcbind
+function openqrm_portmap_stop() {
+	if which rpcbind 1>/dev/null; then
+		killall rpc.statd
+		killall rpcbind
+	else
+		killall portmap
+	fi
+}
+
+
+
+
+# a function to validate an ip address
+function openqrm_validate_ip() {
+	IP_A=$1
+	OLDIFS=$IFS
+	IFS=.
+	set -- $IP_A
+	if [ "$#" -ne "4" ]; then
+		IFS=$OLDIFS
+		return 1
+	fi
+
+	for oct in $1 $2 $3 $4; do
+		echo $oct | egrep "^[0-9]+$" >/dev/null 2>&1
+		if [ "$?" -ne "0" ]; then
+			IFS=$OLDIFS
+			return 1
+		else
+			if [ "$oct" -lt "0" -o "$oct" -gt "255" ]; then
+				IFS=$OLDIFS
+				return 1
+			fi
+		fi
+	done
+	echo "$IP_A" | grep "\.$" >/dev/null 2>&1
+	if [ "$?" -eq "0" ]; then
+		IFS=$OLDIFS
+		return 1
+	fi
+	IFS=$OLDIFS
+	return 0
+}
+
+
+
+
+# a generic function to get the LVM volumes paths
+# newer version of lvdisplay (>=2.02.95 in Ubuntu 12.10) output "LV Path"  instead of "LV Name"
+# https://github.com/stevenshiau/clonezilla/blob/master/sbin/ocs-lvm2-stop
+function openqrm_get_lvm_volume_paths() {
+	if lvdisplay | grep -E "LV Path" 1>/dev/null; then
+		LVM_VOLME_GREP="LV Path"
+	else
+		LVM_VOLME_GREP="LV Name"
+	fi
+	lvdisplay | grep "$LVM_VOLME_GREP" | awk {' print $3 '}
+}
+
+
+
+# reciever command queue locking function, one queue per <sub-section-name>
+# use like :
+# LOCK_TIME=`openqrm_lock_queue aquire <sub-section-name>`
+# run-locked-commands
+# openqrm_lock_queue release <sub-section-name> $LOCK_TIME
+#
+function openqrm_lock_queue() {
+	local COMMAND=$1
+	local SUBSECTION=$2
+	local OPENQRM_CMD_LOCK_FILE=/var/run/openqrm/lock-$SUBSECTION.lock
+	local OPENQRM_CMD_LOCK_DELAY=2
+	local OPENQRM_CMD_LOCK_RETRY=1200
+	local OPENQRM_CMD_LOCK_TIMEOUT=240
+	local OPENQRM_CMD_QUEUE_WARNING_1=30
+	local OPENQRM_CMD_QUEUE_WARNING_2=60
+	local OPENQRM_CMD_QUEUE_WARNING_3=90
+
+	local OPENQRM_CMD_QUEUE_WARNING_LIMIT_1=10
+	local OPENQRM_CMD_QUEUE_WARNING_LIMIT_2=50
+	local OPENQRM_CMD_QUEUE_WARNING_LIMIT_3=100
+
+	if [ -f "$OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions" ]; then
+		resource_id=0
+	else
+		. $OPENQRM_RESOURCE_PARAMETER_FILE
+	fi
+	local LOCK_FILE_DIR=`dirname $OPENQRM_CMD_LOCK_FILE`
+	if [ ! -d "$LOCK_FILE_DIR" ]; then
+		mkdir -p "$LOCK_FILE_DIR"
+	fi
+	case "$COMMAND" in
+		aquire)
+			local EXACTNOW=`date +%s%N`
+			trap "rm -f $OPENQRM_CMD_LOCK_FILE.$EXACTNOW" EXIT
+			lockfile -s $OPENQRM_CMD_LOCK_DELAY -r $OPENQRM_CMD_LOCK_RETRY -l $OPENQRM_CMD_LOCK_TIMEOUT $OPENQRM_CMD_LOCK_FILE.$EXACTNOW
+			echo $$ > $OPENQRM_CMD_LOCK_FILE.$EXACTNOW
+			local LOOP_TIMEOUT=0
+			local LOCK_TIMESTAMP_LAST=""
+			while (:); do
+				LOCK_TIMESTAMP_NEXT=`ls $OPENQRM_CMD_LOCK_FILE.* 2>/dev/null | cut -d '.' -f3 | sort -g | head -n1 2>/dev/null | grep -v $EXACTNOW`
+				if [ "$LOCK_TIMESTAMP_NEXT" == "" ]; then
+					openqrm_post_event $resource_id "aquire $SUBSECTION" 5 "openqrm_lock_queue" "NOTICE: Resource $resource_id running cmd $0 - $EXACTNOW" 1>/dev/null 2>&1
+					break
+				else
+					if [ "$EXACTNOW" == "$LOCK_TIMESTAMP_NEXT" ]; then
+						openqrm_post_event $resource_id "aquire $SUBSECTION" 5 "openqrm_lock_queue" "NOTICE: Resource $resource_id running cmd $0 running now - $EXACTNOW == $LOCK_TIMESTAMP_NEXT" 1>/dev/null 2>&1
+						break
+					else
+						# debug + reporting
+						if [ "$LOOP_TIMEOUT" == "$OPENQRM_CMD_QUEUE_WARNING_1" ] || [ "$LOOP_TIMEOUT" == "$OPENQRM_CMD_QUEUE_WARNING_2" ] || [ "$LOOP_TIMEOUT" == "$OPENQRM_CMD_QUEUE_WARNING_3" ]; then
+							BLOCK_PID=`cat $OPENQRM_CMD_LOCK_FILE.$LOCK_TIMESTAMP_NEXT 2>/dev/null`
+							openqrm_post_event $resource_id "aquire $SUBSECTION" 5 "openqrm_lock_queue" "NOTICE: Resource $resource_id cmd $0 waiting for PID $BLOCK_PID to finish - $EXACTNOW != $LOCK_TIMESTAMP_NEXT - $LOOP_TIMEOUT" 1>/dev/null 2>&1
+							WAITING_COMMANDS=`ls $OPENQRM_CMD_LOCK_FILE.* 2>/dev/null | wc -l`
+							if [ "$WAITING_COMMANDS" != "" ]; then
+								if [ $WAITING_COMMANDS -gt $OPENQRM_CMD_QUEUE_WARNING_LIMIT_3 ];  then
+									openqrm_post_event $resource_id "aquire $SUBSECTION" 9 "openqrm_lock_queue" "ERROR: Resource $resource_id cmd $0 reporting $WAITING_COMMANDS waiting commands in $SUBSECTION queue" 1>/dev/null 2>&1
+								elif [ $WAITING_COMMANDS -gt $OPENQRM_CMD_QUEUE_WARNING_LIMIT_2 ];  then
+									openqrm_post_event $resource_id "aquire $SUBSECTION" 9 "openqrm_lock_queue" "ERROR: Resource $resource_id cmd $0 reporting $WAITING_COMMANDS waiting commands in $SUBSECTION queue" 1>/dev/null 2>&1
+								elif [ $WAITING_COMMANDS -gt $OPENQRM_CMD_QUEUE_WARNING_LIMIT_1 ];  then
+									openqrm_post_event $resource_id "aquire $SUBSECTION" 9 "openqrm_lock_queue" "WARNING: Resource $resource_id cmd $0 reporting $WAITING_COMMANDS waiting commands in $SUBSECTION queue" 1>/dev/null 2>&1
+								else
+									openqrm_post_event $resource_id "aquire $SUBSECTION" 5 "openqrm_lock_queue" "NOTICE: Resource $resource_id cmd $0 reporting $WAITING_COMMANDS waiting commands in $SUBSECTION queue" 1>/dev/null 2>&1
+								fi
+							else
+								openqrm_post_event $resource_id "aquire $SUBSECTION" 5 "openqrm_lock_queue" "NOTICE: Resource $resource_id cmd $0 reporting no waiting commands in $SUBSECTION queue" 1>/dev/null 2>&1
+							fi
+						fi
+					fi
+				fi
+
+				if [ "$LOCK_TIMESTAMP_NEXT" == "$LOCK_TIMESTAMP_LAST" ]; then
+					LOOP_TIMEOUT=$(( LOOP_TIMEOUT + 1 ))
+				else
+					# new command, reset loop counter
+					LOOP_TIMEOUT=0
+				fi
+				if [ "$OPENQRM_CMD_LOCK_RETRY" == "$LOOP_TIMEOUT" ]; then
+					BLOCK_PID=`cat $OPENQRM_CMD_LOCK_FILE.$LOCK_TIMESTAMP_NEXT 2>/dev/null`
+					kill $BLOCK_PID 2>/dev/null
+					rm -f $OPENQRM_CMD_LOCK_FILE.$LOCK_TIMESTAMP_NEXT
+					LOCK_TIMESTAMP_LAST=$LOCK_TIMESTAMP_NEXT
+					openqrm_post_event $resource_id "aquire $SUBSECTION" 3 "openqrm_lock_queue" "ERROR: Resource $resource_id cmd $0 could not get lock after $OPENQRM_CMD_LOCK_RETRY retries!" 1>/dev/null 2>&1
+					openqrm_post_event $resource_id "aquire $SUBSECTION" 3 "openqrm_lock_queue" "ERROR: Resource $resource_id cmd $0 stopped blocking process $BLOCK_PID" 1>/dev/null 2>&1
+					openqrm_post_event $resource_id "aquire $SUBSECTION" 9 "openqrm_lock_queue" "WARNING: Resource $resource_id force removed lock $OPENQRM_CMD_LOCK_FILE.$LOCK_TIMESTAMP_NEXT" 1>/dev/null 2>&1
+					break
+				fi
+				LOCK_TIMESTAMP_LAST=$LOCK_TIMESTAMP_NEXT
+				sleep $OPENQRM_CMD_LOCK_DELAY
+			done
+			# output timestamp
+			echo $EXACTNOW
+			trap '' EXIT
+			return 0
+			;;
+		release)
+			local LOCKFILE_TIMESTAMP=$3
+			if [ "$LOCKFILE_TIMESTAMP" == "" ]; then
+				openqrm_post_event $resource_id "release $SUBSECTION" 3 "openqrm_lock_queue" "ERROR: Resource $resource_id cmd $0 lock parameter wrong" 1>/dev/null 2>&1
+				return 1
+			fi
+			if [ ! -f "$OPENQRM_CMD_LOCK_FILE.$LOCKFILE_TIMESTAMP" ]; then
+				return 1
+			fi
+			/bin/rm -f $OPENQRM_CMD_LOCK_FILE.$LOCKFILE_TIMESTAMP
+			openqrm_post_event $resource_id "release $SUBSECTION" 5 "openqrm_lock_queue" "NOTICE: Resource $resource_id cmd $0 released the lock $OPENQRM_CMD_LOCK_FILE.$LOCKFILE_TIMESTAMP" 1>/dev/null 2>&1
+			return 0
+			;;
+		*)
+			openqrm_post_event $resource_id "release $SUBSECTION" 3 "openqrm_lock_queue" "ERROR: Resource $resource_id cmd $0 command parameter wrong" 1>/dev/null 2>&1
+			return 1
+			;;
+	esac
+}
+
+
+# function to unblock the starting command queue
+function openqrm_unblock_starting_queue() {
+	if ! echo $@ | grep "\-\-openqrm\-internal\-cmd" 1>/dev/null; then
+		if echo $@ | grep "\-\-openqrm\-ui\-user" 1>/dev/null; then
+			rm -f /var/run/openqrm/starting-queue-command.lock.ui-cmd-queue
+		else
+			rm -f /var/run/openqrm/starting-queue-command.lock.bg-cmd-queue
+		fi
+	fi
+}
+
+
+
+function openqrm_format_error_msg() {
+	ERROR_MSG=$@
+	if [ ! -d /var/log/openqrm/ ]; then
+		mkdir -p /var/log/openqrm/
+	fi
+	echo "openQRM command error: "$ERROR_MSG | logger
+	echo $ERROR_MSG | cut -b1-200 > /var/log/openqrm/$$.log
+	sed -i -e "s/\"//g" /var/log/openqrm/$$.log
+	sed -i -e "s/\'//g" /var/log/openqrm/$$.log
+	sed -i -e "s/\`//g" /var/log/openqrm/$$.log
+	sed -i -e "s/'//g" /var/log/openqrm/$$.log
+	FORMAT_ERROR_MSG=`cat /var/log/openqrm/$$.log`
+	FORMAT_ERROR_MSG=`urlencodestring $FORMAT_ERROR_MSG`
+	rm -f /var/log/openqrm/$$.log
+	echo $FORMAT_ERROR_MSG
+}
+
+
+
+function openqrm_global_lock() {
+	local LOCK_CMD=$1
+	local SECTION=$2
+	local OPENQRM_USER=$3
+	local OPENQRM_PASSWORD=$4
+	local TOKEN=$5
+	local DESCRIPTION=`urlencodestring $6`
+	local GB_TIMEOUT=120
+	local GB_LOOP=0
+
+	# are we on the openQRM server or on a resource ?
+	if [ -f $OPENQRM_RESOURCE_PARAMETER_FILE ]; then
+		. $OPENQRM_RESOURCE_PARAMETER_FILE
+	elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+		. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+		. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+		openqrm_server_get_config
+		resource_id=0
+		resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+		openqrm_web_protocol=$OPENQRM_WEB_PROTOCOL
+	fi
+	# define wget to use with https
+	if [ "$openqrm_web_protocol" == "https" ]; then
+		WGET_NO_CERT_CHECK="--no-check-certificate"
+	fi
+	if [ "$LOCK_CMD" != "aquire" ] && [ "$LOCK_CMD" != "release" ]; then
+		openqrm_post_event $resource_id "lock" 3 "aquire_global_lock" "Wrong lock command parameter! Use aquire and release." 1>/dev/null 2>&1
+		return 1
+	fi
+
+	OPENQRM_GLOBAL_LOCK_URL="$openqrm_web_protocol://$resource_openqrmserver/openqrm/base/api.php?action=lock&lock=$LOCK_CMD&resource_id=$resource_id&section=$SECTION&token=$TOKEN&description=$DESCRIPTION"
+	while (:); do
+		unset GLOBAL_LOCK_ID
+		GLOBAL_LOCK_ID=`wget -q $WGET_NO_CERT_CHECK --http-user=$OPENQRM_USER --http-passwd=$OPENQRM_PASSWORD -O - "$OPENQRM_GLOBAL_LOCK_URL"`
+		if [ "$?" != 0 ]; then
+			echo "ERROR: Could not post global lock to the openQRM-server at $resource_openqrmserver !" | logger
+			return 1
+		fi
+		if [ "$GLOBAL_LOCK_ID" != "" ]; then
+			if [[ $GLOBAL_LOCK_ID = *[[:digit:]]* ]]; then
+				openqrm_post_event $resource_id "lock" 5 "aquire_global_lock" "$LOCK_CMD global lock $GLOBAL_LOCK_ID for section $SECTION." 1>/dev/null 2>&1
+				return 0
+			fi
+		else
+			if [ "$LOCK_CMD" == "release" ]; then
+				return 0
+			fi
+		fi
+		if [ "$GB_TIMEOUT" == "$GB_LOOP" ]; then
+			openqrm_post_event $resource_id "lock" 3 "aquire_global_lock" "Giving up $LOCK_CMD global lock $GLOBAL_LOCK_ID for section $SECTION after $GB_TIMEOUT secs." 1>/dev/null 2>&1
+			return 1
+		fi
+		sleep 1
+	done
+	return 0
+}
+
+
+
+
+function urlencodechar() {
+	# notice : "%", "*" and "\" are not supported
+	UCHAR=$1
+	UCHAR=${UCHAR/\~/%7E}
+	UCHAR=${UCHAR/\!/%21}
+	UCHAR=${UCHAR/\@/%40}
+	UCHAR=${UCHAR/\\#/%23}
+	UCHAR=${UCHAR/\\$/%24}
+	#UCHAR=${UCHAR/\%/%25}
+	UCHAR=${UCHAR/\^/%5E}
+	UCHAR=${UCHAR/\&/%26}
+	#UCHAR=${UCHAR/\\*/%2A}
+	UCHAR=${UCHAR/\(/%28}
+	UCHAR=${UCHAR/\)/%29}
+	UCHAR=${UCHAR/\+/%2B}
+	UCHAR=${UCHAR/\|/%7C}
+	UCHAR=${UCHAR/\{/%7B}
+	UCHAR=${UCHAR/\}/%7D}
+	UCHAR=${UCHAR/\:/%3A}
+	UCHAR=${UCHAR/\"/%22}
+	UCHAR=${UCHAR/\</%3C}
+	UCHAR=${UCHAR/\>/%3E}
+	UCHAR=${UCHAR/\\?/%3F}
+	UCHAR=${UCHAR/\`/%60}
+	UCHAR=${UCHAR/\=/%3D}
+	#UCHAR=${UCHAR/\\/%5C}
+	UCHAR=${UCHAR/\[/%5B}
+	UCHAR=${UCHAR/\]/%5D}
+	UCHAR=${UCHAR/\;/%3B}
+	UCHAR=${UCHAR/\'/%27}
+	UCHAR=${UCHAR/\,/%2C}
+	UCHAR=${UCHAR/\//%2F}
+	# whitespace
+	if [ -z $UCHAR ]; then
+			UCHAR=%20
+	fi
+	echo "$UCHAR"
+}
+
+
+function urlencodestring() {
+	USERINPUT=$@
+	LENGTH=${#USERINPUT}
+	for (( LOOP=0; LOOP<$LENGTH; LOOP++ )); do
+		TESTCHAR=`echo ${USERINPUT:$LOOP:1}`
+		TESTCHAR=`urlencodechar $TESTCHAR`
+		echo -n $TESTCHAR
+	done
+}
+
+
+# a generic function to manage the openQRM webserver
+function openqrm_webserver() {
+	local ACTION=$1
+	if [ -f /etc/debian_version ]; then
+		/etc/init.d/apache2 $ACTION
+	elif [ -f /etc/redhat-release ]; then
+		if [ -f /etc/centos-release ]; then
+			systemctl $ACTION httpd
+		else
+			/etc/init.d/httpd $ACTION
+		fi
+	elif [ -f /etc/SuSE-release ]; then
+		/etc/init.d/apache2 $ACTION
+	fi
+
+}
+

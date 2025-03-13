@@ -1,0 +1,57 @@
+# openQRM dhcpd-plugin default dhcpd.conf
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+allow booting;
+allow bootp;
+
+# Standard configuration directives...
+option subnet-mask OPENQRM_SERVER_SUBNET_MASK;
+option broadcast-address OPENQRM_SERVER_BROADCAST_ADDRESS;
+option routers OPENQRM_SERVER_DEFAULT_GATEWAY;
+option domain-name "OPENQRM_SERVER_DOMAIN";
+option domain-name-servers OPENQRM_SERVER_DNS;
+next-server OPENQRM_SERVER_IP_ADDRESS;
+
+# Group the PXE bootable hosts together
+group {
+	# PXE-specific configuration directives...
+	option vendor-encapsulated-options 09:0f:80:00:0c:4e:65:74:77:6f:72:6b:20:62:6f:6f:74:0a:07:00:50:72:6f:6d:70:74:06:01:02:08:03:80:00:00:47:04:80:00:00:00:ff;
+
+	subnet OPENQRM_SERVER_NETWORK netmask OPENQRM_SERVER_SUBNET_MASK {
+		default-lease-time 21600;
+		max-lease-time 43200;
+		
+		# the ip range to serve
+		range OPENQRM_PLUGIN_DHCPD_IP_RANGE_FIRST OPENQRM_PLUGIN_DHCPD_IP_RANGE_LAST;
+		filename "/pxelinux.0";
+
+
+# ! Please do NOT remove these lines ################
+# start_static_ips ##################################
+
+
+
+
+
+
+
+# end_static_ips ####################################
+
+	}
+}
+
+
+

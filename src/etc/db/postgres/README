@@ -1,0 +1,28 @@
+openqrm-server.conf setup for postgres database :
+
+OPENQRM_DATABASE_TYPE="postgres"                  # supported are : mysql, oracle, db2, ...
+OPENQRM_DATABASE_SERVER="localhost"               # ip-address of the database server
+OPENQRM_DATABASE_NAME="openqrm"                   # database name
+OPENQRM_DATABASE_USER="openqrm"                   # database user
+OPENQRM_DATABASE_PASSWORD="test"                  # database password
+
+
+Hints for compiling php + postgress support :
+
+Use the standart php with postgres support
+start postgres and create db by :
+
+su - postgres
+-bash-2.05b$ dropdb openqrm
+DROP DATABASE
+-bash-2.05b$ createdb openqrm
+CREATE DATABASE
+-bash-2.05b$ dropuser openqrm
+DROP USER
+-bash-2.05b$ createuser -a -D -P openqrm
+Enter password for user "openqrm":
+Enter it again:
+CREATE USER
+-bash-2.05b$
+
+

@@ -1,0 +1,193 @@
+#!/bin/bash
+# this is the openQRM command queue control utility
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+if [ "$OPENQRM_SERVER_BASE_DIR" == "" ]; then
+	OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../..
+	OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+fi
+export OPENQRM_SERVER_BASE_DIR
+export OPENQRM_SOURCE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/"
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+NEWLINE='
+'
+
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+
+function openqrm_cq_ctl_usage() {
+	echo
+	echo "Usage:"
+	echo "`basename $0` help			- This help screen"
+	echo
+	echo "- openQRM switch command queuing mechanism to Dropbear (default) -"
+	echo "`basename $0` command-queue dropbear"
+	echo
+	echo "- openQRM switch command queuing mechanism to RabbitMQ (enterprise) -"
+	echo "`basename $0` command-queue rabbitmq"
+	echo
+}
+
+
+
+
+# main
+case "$1" in
+	command-queue)
+		case "$2" in
+			dropbear)
+				echo "Switching openQRM command queue to dropbear"
+				sed -i -e 's/OPENQRM_EXECUTION_LAYER.*/OPENQRM_EXECUTION_LAYER="dropbear"/'g $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+				. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+				/etc/init.d/openqrm restart
+				;;
+
+
+			rabbitmq)
+
+				BASE_DIR=$(dirname $0)
+				BASE_DIR=$(pushd $BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+
+
+				echo "Switching openQRM command queue to rabbitmq"
+				echo "- installing RabbitMQ server"
+				if ! openqrm_full_fill_os_dependency rabbitmq-server rabbitmq-server; then
+					echo "ERROR: Failed to install RabbitMQ Server!"
+					exit 1
+				fi
+				echo "- installing python3 pip installer"
+				if ! openqrm_full_fill_os_dependency python3-pip; then
+					echo "ERROR: Failed to install python3-pip!"
+					exit 1
+				fi
+				echo "- installing python pika"
+				if ! pip install pika==0.9.8; then
+					echo "ERROR: Failed to install python pika!"
+					exit 1
+				fi
+				echo "-installing php-amqplib"
+				# install php-amqplib
+				# rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/php-amqplib
+				mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/php-amqplib
+				cd $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/php-amqplib
+				# install composer
+				if [ ! -x ./composer.phar ]; then
+					curl -sS https://getcomposer.org/installer | php
+				fi
+				echo "{$NEWLINE\"require\": {$NEWLINE\"videlalvaro/php-amqplib\": \"2.2.*\"$NEWLINE}$NEWLINE}" > $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/php-amqplib/composer.json
+				# install php-amqplib
+				./composer.phar install
+
+				. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/db/$OPENQRM_DATABASE_TYPE/openqrm-$OPENQRM_DATABASE_TYPE-functions
+				OPENQRM_PASSWORD=`run_sql "select user_password from user_info where user_name='openqrm'"`
+				if [ "$OPENQRM_PASSWORD" == "" ]; then
+					echo "ERROR: Could not gather openqrm user password to configure the rabbitmq-server"
+					exit 1
+				fi
+				rabbitmqctl delete_user openqrm 2>/dev/null
+				if ! rabbitmqctl add_user openqrm "$OPENQRM_PASSWORD"; then
+					echo "ERROR: Failed to add user openqrm!"
+					exit 1
+				fi
+				if ! rabbitmqctl set_user_tags openqrm administrator; then
+					echo "ERROR: Failed to set user openqrm as administrator!"
+					exit 1
+				fi
+				if ! rabbitmqctl set_permissions -p / openqrm ".*" ".*" ".*"; then
+					echo "ERROR: Failed to set permission for user openqrm!"
+					exit 1
+				fi
+				if ! rabbitmqctl list_user_permissions openqrm; then
+					echo "ERROR: Failed to list permissions!"
+					exit 1
+				fi
+				echo "enabling SSL"
+				mkdir -p /etc/rabbitmq/ssl
+
+				echo "generating SSL certificates"
+				rm -rf /tmp/rabbitmqssl/
+				mkdir -p /tmp/rabbitmqssl/
+				cd /tmp/rabbitmqssl/
+				cp $OPENQRM_SERVER_BASE_DIR/openqrm/etc/templates/openqrm-openssl-configuration openqrm-openssl.cnf
+				mkdir -p openqrmca/private
+				mkdir -p openqrmca/certs
+				touch openqrmca/index.txt
+				echo 01 > openqrmca/serial
+				cd openqrmca
+				openssl req -x509 -config ../openqrm-openssl.cnf -newkey rsa:2048 -days 40000 -out cacert.pem -outform PEM -subj /CN=openqrmca/ -nodes
+				openssl x509 -in cacert.pem -out cacert.cer -outform DER
+				cd ..
+				openssl genrsa -out server_key.pem 2048
+				openssl req -new -key server_key.pem -out server_req.pem -outform PEM -subj /CN=$(hostname)/O=server/ -nodes
+				cd openqrmca
+				openssl ca -config ../openqrm-openssl.cnf -in ../server_req.pem -out ../server_cert.pem -notext -batch -extensions server_ca_extensions
+				cd ..
+				openssl pkcs12 -export -out server_keycert.p12 -in server_cert.pem -inkey server_key.pem -passout pass:OpenQRMPass
+				openssl genrsa -out client_key.pem 2048
+				openssl req -new -key client_key.pem -out client_req.pem -outform PEM -subj /CN=$(hostname)/O=client/ -nodes
+				cd openqrmca
+				openssl ca -config ../openqrm-openssl.cnf -in ../client_req.pem -out ../client_cert.pem -notext -batch -extensions client_ca_extensions
+				cd ..
+				openssl pkcs12 -export -out client_keycert.p12 -in client_cert.pem -inkey client_key.pem -passout pass:OpenQRMPass
+
+				cp server_key.pem /etc/rabbitmq/ssl/
+				cp server_cert.pem /etc/rabbitmq/ssl/
+				cp openqrmca/cacert.pem /etc/rabbitmq/ssl/
+				cd $BASE_DIR
+				rm -rf /tmp/rabbitmqssl/
+
+				echo "adding SSL listener"
+				cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/templates/openqrm-rabbitmq-ssl-configuration /etc/rabbitmq/rabbitmq.config
+
+				if ! /etc/init.d/rabbitmq-server restart; then
+					echo "ERROR: Failed to enable SSL in the RabbitMQ server!"
+					exit 1
+				fi
+
+				echo "enabling rabbitmq management plugin"
+				/usr/lib/rabbitmq/bin/rabbitmq-plugins enable rabbitmq_management
+
+				echo "reconfiguring $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf"
+				sed -i -e 's/OPENQRM_EXECUTION_LAYER.*/OPENQRM_EXECUTION_LAYER="rabbitmq"/'g $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+				. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+
+				/etc/init.d/openqrm restart
+				;;
+
+			*)
+				openqrm_cq_ctl_usage
+				;;
+
+		esac
+		;;
+
+
+
+	*)
+		openqrm_cq_ctl_usage
+		;;
+
+esac
+
+

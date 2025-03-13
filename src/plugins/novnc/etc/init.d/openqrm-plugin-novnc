@@ -1,0 +1,122 @@
+#!/bin/bash
+# init script for the openQRM novnc plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/include/openqrm-plugin-novnc-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/etc/openqrm-plugin-novnc.conf
+# for the post-event to work
+openqrm_server_get_config
+OPENQRM_SERVER_IP=$OPENQRM_SERVER_IP_ADDRESS
+resource_id=0
+resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+# which screen binary to use
+if [ -x /usr/bin/screen.real ]; then
+	RUNSCREEN="/usr/bin/screen.real"
+else
+	RUNSCREEN=`which screen`
+fi
+
+
+function openqrm_plugin_novnc_start() {
+	echo "Starting the openQRM novnc-plugin"
+	local CURRENTDIR=`pwd`
+	openqrm_plugin_novnc_stop 1>/dev/null 2>&1
+
+	touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/novnc/.running
+	return 0
+}
+
+function openqrm_plugin_novnc_stop() {
+	echo "Stopping the openQRM novnc-plugin"
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/novnc/.running
+	return 0
+}
+
+
+function openqrm_plugin_novnc_init() {
+	echo "Initializing the openQRM novnc-plugin"
+	# linking the web dir
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/web $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/novnc
+	# link the boot-service
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/web/boot-service-novnc.tgz $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/boot-service-novnc.tgz
+	# link novnc client js files
+	mkdir -p $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/novnc/novncjs
+	for j in $(ls $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/vncclient/include | grep "[.|-]js"); do
+		ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/vncclient/include/$j $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/novnc/novncjs/$j
+	done
+	# link novnc client font files
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/vncclient/include/Orbitron700.ttf $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/novnc/novncjs/Orbitron700.ttf
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/vncclient/include/Orbitron700.woff $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/novnc/novncjs/Orbitron700.woff
+	# link novnc client image files
+	for i in $(ls $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/vncclient/images); do
+		ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/vncclient/images/$i $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/novnc/img/$i
+	done
+	##### cloud
+	if [ -d $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/cloud/cloud-portal/web ]; then
+		mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/cloud/cloud-portal/web/novncjs
+		for j in $(ls $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/vncclient/include | grep "[.|-]js"); do
+			ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/vncclient/include/$j $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/cloud/cloud-portal/web/novncjs/$j
+		done
+		ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/vncclient/include/Orbitron700.ttf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/cloud/cloud-portal/web/novncjs/Orbitron700.ttf
+		ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/vncclient/include/Orbitron700.woff $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/cloud/cloud-portal/web/novncjs/Orbitron700.woff
+	fi
+	return 0
+}
+
+
+function openqrm_plugin_novnc_uninstall() {
+	echo "Uninstalling the openQRM novnc-plugin"
+	openqrm_plugin_novnc_stop
+	# remove bootservice
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/boot-service-novnc.tgz
+	# unlinking the web dir
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/novnc
+	##### cloud
+	if [ -d $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/cloud/cloud-portal/web/novncjs ]; then
+		rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/cloud/cloud-portal/web/novncjs
+	fi
+}
+
+
+case "$1" in
+	start)
+		openqrm_plugin_novnc_start
+		;;
+	stop)
+		openqrm_plugin_novnc_stop
+		;;
+	restart)
+		openqrm_plugin_novnc_stop
+		sleep 1
+		openqrm_plugin_novnc_start
+		;;
+	init)
+		openqrm_plugin_novnc_init
+		;;
+	uninstall)
+		openqrm_plugin_novnc_uninstall
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|init|uninstall|createcert}"
+		exit 1
+
+esac
+exit $?
+
+

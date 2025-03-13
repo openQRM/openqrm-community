@@ -1,0 +1,308 @@
+#!/bin/bash
+# this is the root-mount initrd-service
+# which proivdes function to mount/remount the remote
+# lvm-aoe-rootfs according to the image_deployment_parameters at /mnt
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+# lvm-aoe-storage
+# Required defines in the image_deploy_paramters
+#
+#
+# Optional parameters 
+#
+# IMAGE_INSTALL_FROM_NFS			- can be set to an (nfs) location from
+#									  which the image will be installed at
+#									  deployment time
+#									  syntax is : storage_id:ip_of_nfs-server:path_to_target_image
+#
+# IMAGE_TRANSFER_TO_NFS				- can be set to an (nfs) location from
+#									  which the image will be transfered to at
+#									  deployment time
+#									  syntax is : storage_id:ip_of_nfs-server:path_to_target_image
+#
+# IMAGE_INSTALL_FROM_LOCAL			- set to a local harddisk device (e.g. /dev/hda1) this
+#									  option will install the lvm-aoe-storage image on 
+#									  boot-time from the local-device
+#
+# IMAGE_TRANSFER_TO_LOCAL			- set to a local harddisk device (e.g. /dev/hda1) this option will transfrom
+#									  the lvm-aoe-storage image on boot-time to the local-device
+#
+#
+#
+# IMAGE_INSTALL_FROM_LOCAL_FS_TYPE	- set to a local harddisk device fs-type (e.g. ext3)
+#
+# IMAGE_TRANSFER_TO_LOCAL_FS_TYPE	- set to a local harddisk device fs-type (e.g. ext3)
+#
+# IMAGE_NFS_MOUNT_OPTIONS			- can be e.g. set to proto=tcp for the install/transform phase
+#
+
+
+# get the deployment parameters from openqrm.conf
+OPENQRM_RESOURCE_PARAMETER_FILE="/var/openqrm/openqrm-resource.conf"
+. $OPENQRM_RESOURCE_PARAMETER_FILE
+eval $image_deployment_parameter
+export OPENQRM_SERVER_BASE_DIR=$resource_basedir
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+
+# nfs-options for the install+transform phase
+if [ "$IMAGE_NFS_MOUNT_OPTIONS" != "" ]; then
+	IMAGE_NFS_MOUNT_OPTIONS=",$IMAGE_NFS_MOUNT_OPTIONS"
+fi
+# default to ext3
+if [ "$IMAGE_INSTALL_FROM_LOCAL_FS_TYPE" == "" ]; then
+	IMAGE_INSTALL_FROM_LOCAL_FS_TYPE="ext3"
+fi
+if [ "$IMAGE_TRANSFER_TO_LOCAL_FS_TYPE" == "" ]; then
+	IMAGE_TRANSFER_TO_LOCAL_FS_TYPE="ext3"
+fi
+
+VOLUME_GROUP=`echo $image_rootdevice | cut -d':' -f1`
+IMAGE_NAME=`echo $image_rootdevice | cut -d':' -f2`
+IMAGE_ROOT_DEVICE=`echo $image_rootdevice | cut -d':' -f3`
+
+# define wget to use with https
+if [ "$openqrm_web_protocol" == "https" ]; then
+	export WGET="wget --no-check-certificate -q"
+else
+	export WGET="wget -q"
+fi
+
+#######################################################################
+# required functions ##################################################
+#######################################################################
+
+function mount_rootfs() {
+
+	# get aoe-interfaces via wget from the openQRM-servers boot-service dir
+	$WGET -O /sbin/aoe-interfaces $openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/aoe-interfaces
+	# get the aoe-discover via wget from the openQRM-servers boot-service dir
+	$WGET -O /sbin/aoe-discover $openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/aoe-discover
+	# get the aoe-stat via wget from the openQRM-servers boot-service dir
+	$WGET -O /sbin/aoe-stat $openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/aoe-stat
+	# get the aoe-mkdevs via wget from the openQRM-servers boot-service dir
+	$WGET -O /sbin/aoe-mkdevs $openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/aoe-mkdevs
+	# get the aoe-mkshelf via wget from the openQRM-servers boot-service dir
+	$WGET -O /sbin/aoe-mkshelf $openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/aoe-mkshelf
+	chmod +x /sbin/aoe*
+
+	# insert udev rule
+	mkdir -p /etc/udev
+	cat >> /etc/udev/rules.d/60-aoe.rules << EOF
+# aoe char devices
+SUBSYSTEM=="aoe", KERNEL=="discover", NAME="etherd/%k", GROUP="disk",
+MODE="0220"
+SUBSYSTEM=="aoe", KERNEL=="err", NAME="etherd/%k", GROUP="disk", MODE="0440"
+SUBSYSTEM=="aoe", KERNEL=="interfaces", NAME="etherd/%k", GROUP="disk",
+MODE="0220"
+SUBSYSTEM=="aoe", KERNEL=="revalidate", NAME="etherd/%k", GROUP="disk",
+MODE="0220"
+# aoe block devices
+KERNEL=="etherd*", NAME="%k", GROUP="disk"
+
+EOF
+
+	# load aoe related modules
+	mkdir /dev/etherd
+	modprobe aoe
+
+	# discover
+	RESOURCE_INTERFACE=`ip a s | grep ^[0-9] | cut -d':' -f2 | awk '{ print $1 }' | grep ":oq"`
+	echo "lvm-aoe-storage: Discoverying Aoe-target $image_storage_server_ip on $RESOURCE_INTERFACE"
+	aoe-interfaces $RESOURCE_INTERFACE
+	aoe-discover
+	aoe-stat
+
+	# let udev settle
+	sleep 4
+	# let udev settle
+	sleep 4
+	while (true); do
+		if [ -e "$IMAGE_ROOT_DEVICE" ]; then
+			echo "Udev created $IMAGE_ROOT_DEVICE"
+			break
+		else
+			echo -n "."
+		fi
+		sleep 1
+	done
+
+	# finallly mount
+	if ! mount -t $image_rootfstype $IMAGE_ROOT_DEVICE /mnt; then
+		# in case we install from nfs we create a fs since this should be a new lun
+		if  [ "$IMAGE_INSTALL_FROM_NFS" != "" ]; then
+			echo "NOTICE: Found install-from-nfs enabled but failed mounting the rootdevice"
+			echo "NOTICE: Assuming a new (unformatted) Lun -> creating $image_rootfstype filesystem on $IMAGE_ROOT_DEVICE"
+			mke2fs -F -j $IMAGE_ROOT_DEVICE
+			if ! mount -t $image_rootfstype $IMAGE_ROOT_DEVICE /mnt; then
+				echo "ERROR: Could not mount $IMAGE_ROOT_DEVICE via iscsi"
+				# give a shell for the admin
+				/bin/bash
+			else
+				echo "lvm-aoe-storage: Mounted $IMAGE_ROOT_DEVICE rw"
+			fi
+		else
+			echo "ERROR: Could not mount $IMAGE_ROOT_DEVICE via aoe"
+			# give a shell for the admin
+			/bin/bash
+		fi
+	else
+		echo "lvm-aoe-storage: Mounted $IMAGE_ROOT_DEVICE rw"
+	fi
+
+	if  [ "$IMAGE_INSTALL_FROM_NFS" != "" ]; then
+		install_rootfs_from_nfs
+	else
+		echo "lvm-aoe-storage: Skipping install-to-nfs phase"
+	fi
+	if  [ "$IMAGE_TRANSFER_TO_NFS" != "" ]; then
+		transfer_rootfs_to_nfs
+	else
+		echo "lvm-aoe-storage: Skipping transfer-to-nfs phase"
+	fi
+	if  [ "$IMAGE_INSTALL_FROM_LOCAL" != "" ]; then
+		install_rootfs_from_local
+	else
+		echo "lvm-aoe-storage: Skipping install-from-local phase"
+	fi
+	if  [ "$IMAGE_TRANSFER_TO_LOCAL" != "" ]; then
+		transfer_rootfs_to_local
+	else
+		echo "lvm-aoe-storage: Skipping transfer-to-local phase"
+	fi
+
+}
+
+
+function remount_rootfs() {
+	# Debian/Ubuntu Systems want their nfs-rootfs in rw mode
+	if [ -f /mnt/etc/apt/sources.list ]; then
+		if grep ubuntu /mnt/etc/apt/sources.list >/remountlog; then
+			echo "lvm-aoe-storage: Skipping Re-mount $IMAGE_ROOT_DEVICE ro"
+			rm -f /remountlog
+			return
+		fi
+	fi
+	REMOUNT_LOOP=0
+	# remont /mnt ro
+	while ! mount -t $image_rootfstype -o ro,remount $IMAGE_ROOT_DEVICE /mnt; do
+		echo -n "."
+		sleep 1
+		REMOUNT_LOOP=$[ REMOUNT_LOOP + 1 ]
+		if [ "$REMOUNT_LOOP" == "10" ]; then
+			echo "ERROR: lvm-aoe-storage could not remount /mnt "
+			/bin/bash
+		fi
+	done
+	echo "lvm-aoe-storage: Re-mounted $IMAGE_ROOT_DEVICE ro"
+
+}
+
+
+function create_fstab() {
+	rm -f $IMAGE_FSTAB
+	echo "$IMAGE_ROOT_DEVICE   /     $image_rootfstype  defaults   0 0" >> $IMAGE_FSTAB
+}
+
+
+#######################################################################
+# optional functions ##################################################
+#######################################################################
+
+function install_rootfs_from_nfs() {
+	modprobe sunrpc 1>/dev/null 2>&1
+	modprobe lockd 1>/dev/null 2>&1
+	modprobe nfs 1>/dev/null 2>&1
+	rm -rf /dev/null
+	mknod -m 666 /dev/null c 1 3
+	openqrm_portmap_start
+	STORAGE_ID=`echo $IMAGE_INSTALL_FROM_NFS | cut -d':' -f1`
+	IMAGE_INSTALL_FROM_NFS=`echo $IMAGE_INSTALL_FROM_NFS | cut -d':' -f2-`
+	echo "lvm-aoe-storage: Installing $resource_image from $IMAGE_INSTALL_FROM_NFS ($STORAGE_ID)"
+	mkdir -p /mnt2
+	if ! mount -t nfs -o ro$IMAGE_NFS_MOUNT_OPTIONS $IMAGE_INSTALL_FROM_NFS /mnt2; then
+		echo "ERROR: Could not mount $IMAGE_INSTALL_FROM_NFS by nfs"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	echo "lvm-aoe-storage: Starting install-from-nfs phase. This can take a while ...."
+	rsync -aq /mnt2/* /mnt/
+	echo "lvm-aoe-storage: Install-from-nfs phase finished. Continuing boot-up"
+	umount /mnt2
+	rmdir /mnt2
+	openqrm_portmap_stop
+}
+
+
+function transfer_rootfs_to_nfs() {
+	modprobe sunrpc 1>/dev/null 2>&1
+	modprobe lockd 1>/dev/null 2>&1
+	modprobe nfs 1>/dev/null 2>&1
+	rm -rf /dev/null
+	mknod -m 666 /dev/null c 1 3
+	openqrm_portmap_start
+	STORAGE_ID=`echo $IMAGE_TRANSFER_TO_NFS | cut -d':' -f1`
+	IMAGE_TRANSFER_TO_NFS=`echo $IMAGE_TRANSFER_TO_NFS | cut -d':' -f2-`
+	echo "lvm-aoe-storage: Transfering $resource_image to $IMAGE_TRANSFER_TO_NFS ($STORAGE_ID)"
+	mkdir -p /mnt2
+	if ! mount -t nfs -o rw$IMAGE_NFS_MOUNT_OPTIONS $IMAGE_TRANSFER_TO_NFS /mnt2; then
+		echo "ERROR: Could not mount $IMAGE_TRANSFER_TO_NFS by nfs"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	echo "lvm-aoe-storage: Starting transfer-to-nfs phase. This can take a while ...."
+	rsync -aq /mnt/* /mnt2/
+	echo "lvm-aoe-storage: Transfer-to-nfs phase finished. Continuing boot-up"
+	umount /mnt2
+	rmdir /mnt2
+	openqrm_portmap_stop
+}
+
+
+
+
+function install_rootfs_from_local() {
+	modprobe ext3 1>/dev/null 2>&1
+	mkdir -p /mnt2
+	if ! mount -t $IMAGE_INSTALL_FROM_LOCAL_FS_TYPE -o ro $IMAGE_INSTALL_FROM_LOCAL /mnt2; then
+		echo "ERROR: Could not mount $IMAGE_INSTALL_FROM_LOCAL / $IMAGE_INSTALL_FROM_LOCAL_FS_TYPE"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	echo "lvm-aoe-storage: Starting install-from-local phase. This can take a while ...."
+	rsync -aq /mnt2/* /mnt/
+	echo "lvm-aoe-storage: Install-from-local phase finished. Continuing boot-up"
+	umount /mnt2
+	rmdir /mnt2
+}
+
+
+function transfer_rootfs_to_local() {
+	modprobe ext3 1>/dev/null 2>&1
+	mkdir -p /mnt2
+	if ! mount -t $IMAGE_TRANSFER_TO_LOCAL_FS_TYPE -o rw $IMAGE_TRANSFER_TO_LOCAL /mnt2; then
+		echo "ERROR: Could not mount $IMAGE_TRANSFER_TO_LOCAL / $IMAGE_TRANSFER_TO_LOCAL_FS_TYPE"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	echo "lvm-aoe-storage: Starting transfer-to-local phase. This can take a while ...."
+	rsync -aq /mnt/* /mnt2/
+	echo "lvm-aoe-storage: Transfer-to-local phase finished. Continuing boot-up"
+	umount /mnt2
+	rmdir /mnt2
+}
+
+
+

@@ -1,0 +1,38 @@
+openQRM is the next generation, open-source Data-center management platform.
+Its fully pluggable architecture focuses on automatic, rapid- and appliance-based
+deployment, monitoring, high-availability and especially on supporting and
+conforming multiple virtualization technologies. 
+openQRM is a single-management console for the complete IT-infra structure and
+provides a well defined API which can be used to integrate third-party tools as
+additional plugins.
+
+Its goal is it to achieve the following specifications :
+
+- KIS (keep it simple)
+- run everywhere (support for every linux distribution, especially Debian+Ubuntu)
+- clean up (remove all not needed code)
+- reduce code base (less code = less bugs)
+- using existing components (instead of providing own binaries/libs)
+- better packaging and dependencies
+- enabling/disabling plugins via the GUI
+- support for multiple databases (db2, mysql, oracle, postgres)
+- porting from java to php
+- focusing on virtualization
+- removing the installer-stage, do the inititialization during firststart
+- ... and some more
+
+openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+
+All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+The latest version of this license can be found here: src/doc/LICENSE.txt
+By using this software, you acknowledge having read this license and agree to be bound thereby.
+
+            http://openqrm-enterprise.com
+
+
+
+
+
+
+

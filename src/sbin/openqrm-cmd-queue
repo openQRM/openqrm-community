@@ -1,0 +1,154 @@
+#!/bin/bash
+#  openQRM-cmd-queue read queued commands and runs them
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+if [ "$OPENQRM_SERVER_BASE_DIR" == "" ]; then
+	OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../..
+	OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+fi
+export OPENQRM_SERVER_BASE_DIR
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+OPENQRM_COMMAND_QUEUE="$OPENQRM_SERVER_BASE_DIR/openqrm/var/spool/"
+# get config for posting events
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+openqrm_server_get_config
+OPENQRM_SERVER_IP=$OPENQRM_SERVER_IP_ADDRESS
+resource_id=0
+resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+OPENQRM_QUEUEING_DELAY=0.5
+SEQ=1
+RETRY=3
+RETRY_DELAY=10
+# defines how long commands are allowed to run
+DEFAULT_CMD_TIMEOUT=$OPENQRM_DEFAULT_CMD_TIMEOUT
+
+function cmd_queue_log() {
+	local PRIO=$1
+	shift
+	local CQLOG=$@
+	echo "openQRM-cmd-queue $PRIO : $CQLOG" | logger
+}
+
+
+function cmd_timeout() {
+	[ $# -eq 2 ] || cmd_queue_log ERROR "cmd_timeout takes 2 arguments"
+	sleep_time=$1
+	command=$2
+	$command &
+	cmd_pid=$!
+	( sleep $sleep_time && kill $cmd_pid && cmd_queue_log ERROR "Killed $command due to timeout $sleep_time exceeded" ) &
+	killer_pid=$!
+	wait $cmd_pid &> /dev/null
+	wait_status=$?
+	if [ $wait_status == 0 ]; then
+		disown $killer_pid
+		kill $killer_pid &> /dev/null
+	else
+		kill `ps ax | grep dbclient | grep dropbear_rsa_host_key | awk {' print $1 '}` 2>/dev/null
+	fi
+	return $wait_status
+}
+
+# dir to store the failed cmds for the ui
+if [ ! -d "$OPENQRM_SERVER_BASE_DIR/openqrm/web/base/server/event/errors" ]; then
+	mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/server/event/errors
+	chmod -R 777 $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/server/event/errors
+fi
+
+cd $OPENQRM_COMMAND_QUEUE
+while (true); do
+	for OPENQRM_COMMAND_FILE in `ls -tr --time-style=full-iso openqrm-queue* 2>/dev/null`; do
+		chmod +x $OPENQRM_COMMAND_FILE
+		COMMAND_TOKEN=`echo $OPENQRM_COMMAND_FILE | cut -d'.' -f2`
+		TIMEOUT_TOKEN=`echo $OPENQRM_COMMAND_FILE | cut -d'.' -f3`
+		if [ "$TIMEOUT_TOKEN" == "" ]; then
+			CMD_TIMEOUT=$DEFAULT_CMD_TIMEOUT
+			cmd_queue_log NOTICE "Running $COMMAND_TOKEN with default cmd-timeout $CMD_TIMEOUT"
+		else
+			CMD_TIMEOUT=$TIMEOUT_TOKEN
+			cmd_queue_log NOTICE "Running $COMMAND_TOKEN with custom cmd-timeout $CMD_TIMEOUT"
+		fi
+		OPENQRM_COMMAND=`cat $OPENQRM_COMMAND_FILE | sed -e 's/-u [^ ]* /-u xxxxxxxx /g' -e 's/-p [^ ]*/-p xxxxxxxx /g'`
+		cmd_queue_log NOTICE "Running $COMMAND_TOKEN : $OPENQRM_COMMAND"
+		cmd_timeout $CMD_TIMEOUT ./$OPENQRM_COMMAND_FILE 2>ouput.$COMMAND_TOKEN
+		COMMAND_RES=$?
+		if [ "$COMMAND_RES" != "0" ]; then
+			# check if we should retry
+			if [ "$OPENQRM_CMD_QUEUE_RETRY" == "true" ]; then
+				# put it in the failed queue
+				mv -f $OPENQRM_COMMAND_FILE failed-cmd.1.$COMMAND_TOKEN
+				OPENQRM_COMMAND_OUTPUT=`cat ouput.$COMMAND_TOKEN`
+				cmd_queue_log WARNING "Command with token $FAILED_COMMAND_TOKEN failed : $OPENQRM_COMMAND  ----- $OPENQRM_COMMAND_OUTPUT"
+			else
+				cmd_queue_log ERROR "Command with token $COMMAND_TOKEN failed : $OPENQRM_COMMAND  ----- $OPENQRM_COMMAND_OUTPUT"
+				openqrm_post_event 0 "base-engine" 2 "openqrm-cmd-queue" "ERROR running token $COMMAND_TOKEN"
+				# move to event errors for debug
+				mv -f $OPENQRM_COMMAND_FILE $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/server/event/errors/$COMMAND_TOKEN.cmd
+				mv -f ouput.$COMMAND_TOKEN $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/server/event/errors/$COMMAND_TOKEN.out
+				chmod -R 777 $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/server/event/errors/$COMMAND_TOKEN.*
+			fi
+		else
+			rm -f $OPENQRM_COMMAND_FILE
+		fi
+		rm -f ouput.$COMMAND_TOKEN
+	done
+	SEQ=$(( SEQ + 1 ))
+
+	# check the failed queue
+	if [ "$SEQ" == "$RETRY_DELAY" ]; then
+		for FAILED_OPENQRM_COMMAND_FILE in `ls -tr --time-style=full-iso failed-cmd* 2>/dev/null`; do
+			chmod +x $FAILED_OPENQRM_COMMAND_FILE
+			FAILED_COMMAND_RETRY_COUNT=`echo $FAILED_OPENQRM_COMMAND_FILE | cut -d'.' -f2`
+			FAILED_COMMAND_TOKEN=`echo $FAILED_OPENQRM_COMMAND_FILE | cut -d'.' -f3`
+			FAILED_TIMEOUT_TOKEN=`echo $FAILED_OPENQRM_COMMAND_FILE | cut -d'.' -f4`
+			if [ "$FAILED_TIMEOUT_TOKEN" == "" ]; then
+				CMD_TIMEOUT=$DEFAULT_CMD_TIMEOUT
+				cmd_queue_log NOTICE "Running failed $COMMAND_TOKEN with default cmd-timeout $CMD_TIMEOUT"
+			else
+				CMD_TIMEOUT=$FAILED_TIMEOUT_TOKEN
+				cmd_queue_log NOTICE "Running failed $COMMAND_TOKEN with custom cmd-timeout $CMD_TIMEOUT"
+			fi
+			FAILED_OPENQRM_COMMAND=`cat $FAILED_OPENQRM_COMMAND_FILE | sed -e 's/-u [^ ]* /-u xxxxxxxx /g' -e 's/-p [^ ]*/-p xxxxxxxx /g'`
+			cmd_queue_log NOTICE "$FAILED_COMMAND_RETRY_COUNT. retry for Command $FAILED_COMMAND_TOKEN : $FAILED_OPENQRM_COMMAND"
+			cmd_timeout $CMD_TIMEOUT ./$FAILED_OPENQRM_COMMAND_FILE 2>ouput.$FAILED_COMMAND_TOKEN
+			FAILED_COMMAND_RES=$?
+			if [ "$FAILED_COMMAND_RES" != "0" ]; then
+				FAILED_OPENQRM_COMMAND_OUTPUT=`cat ouput.$FAILED_COMMAND_TOKEN`
+				if [ "$FAILED_COMMAND_RETRY_COUNT" == "$RETRY" ]; then
+					# too many retries, remove the cmd and log the error + debug
+					cmd_queue_log ERROR "Command $FAILED_COMMAND_TOKEN failed for $RETRY. retries : $FAILED_OPENQRM_COMMAND"
+					openqrm_post_event 0 "base-engine" 2 "openqrm-cmd-queue" "ERROR running token $FAILED_COMMAND_TOKEN"
+					# move to event errors for debug
+					mv -f $FAILED_OPENQRM_COMMAND_FILE $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/server/event/errors/$FAILED_COMMAND_TOKEN.cmd
+					mv -f ouput.$FAILED_COMMAND_TOKEN $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/server/event/errors/$FAILED_COMMAND_TOKEN.out
+					chmod -R 777 $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/server/event/errors/$FAILED_COMMAND_TOKEN.*
+				else
+					# put it in the failed queue again
+					NEXT_FAILED_COMMAND_RETRY_COUNT=$(( FAILED_COMMAND_RETRY_COUNT + 1 ))
+					mv -f $FAILED_OPENQRM_COMMAND_FILE failed-cmd.$NEXT_FAILED_COMMAND_RETRY_COUNT.$FAILED_COMMAND_TOKEN
+					cmd_queue_log WARNING "$FAILED_COMMAND_RETRY_COUNT. retry failed for Command $FAILED_COMMAND_TOKEN : $FAILED_OPENQRM_COMMAND ----- $FAILED_OPENQRM_COMMAND_OUTPUT"
+				fi
+			else
+				rm -f $FAILED_OPENQRM_COMMAND_FILE
+			fi
+			rm -f ouput.$FAILED_COMMAND_TOKEN
+		done
+		SEQ=1
+	fi
+	sleep $OPENQRM_QUEUEING_DELAY
+done
+

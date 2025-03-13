@@ -1,0 +1,140 @@
+#!/bin/bash
+# init script for the openQRM template-plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/template/include/openqrm-plugin-template-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/template/etc/openqrm-plugin-template.conf
+openqrm_server_get_config
+export LANG=C
+# define wget to use with https
+if [ "$OPENQRM_WEB_PROTOCOL" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate"
+fi
+
+
+function openqrm_plugin_template_start() {
+	echo "Starting the openQRM template-plugin"
+
+	# TODO: add your commands here for the Plugin start
+
+	touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/template/.running
+}
+
+
+function openqrm_plugin_template_stop() {
+	echo "Stopping the openQRM template-plugin"
+
+	# TODO: add your commands here for the Plugin stop
+
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/template/.running
+}
+
+function openqrm_plugin_template_uninstall() {
+	local USERNAME=$1
+	local PASSWORD=$2
+	if [ "$USERNAME" == "" ] && [ "$PASSWORD" == "" ]; then
+		echo -n "template: Please give a username to uninstall the plugin : "
+		read USERNAME
+		echo
+		echo -n "template: Please give the password for user $USERNAME : "
+		read PASSWORD
+		echo
+	fi
+	echo "Uninstalling the openQRM template-plugin"
+	openqrm_plugin_template_stop
+
+	# removing the template tables
+	if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$USERNAME --http-password=$PASSWORD "$OPENQRM_WEB_PROTOCOL://localhost/openqrm/base/plugins/template/template-action.php?template_command=uninstall"; then
+		template_manager_log uninstall "ERROR: Could not drop the template-plugin tables in the database!"
+		exit 1
+	fi
+
+	# TODO: add your commands here for the Plugin disable (uninstall)
+
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/boot-service-template.tgz
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/template
+}
+
+function openqrm_plugin_template_init() {
+	local USERNAME=$1
+	local PASSWORD=$2
+	if [ "$USERNAME" == "" ] && [ "$PASSWORD" == "" ]; then
+		echo -n "template: Please give a username to init the plugin : "
+		read USERNAME
+		echo
+		echo -n "template: Please give the password for user $USERNAME : "
+		read PASSWORD
+		echo
+	fi
+
+	echo "Initializing the openQRM template-plugin"
+	# linking the web dir
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/template/web $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/template
+	# link the boot-service
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/template/web/boot-service-template.tgz $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/boot-service-template.tgz
+
+	# creating the tables
+	if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$USERNAME --http-password=$PASSWORD "$OPENQRM_WEB_PROTOCOL://localhost/openqrm/base/plugins/template/template-action.php?template_command=init&template_domain=$OPENQRM_SERVER_DOMAIN"; then
+		template_manager_log init "ERROR: Could not create the template-plugin tables in the database!"
+		exit 1
+	fi
+
+	# TODO: add your commands here for the Plugin enable (init)
+
+
+}
+
+
+
+
+
+
+
+USER=$2
+PASS=$3
+
+case "$1" in
+	start)
+		openqrm_plugin_template_start
+		;;
+	stop)
+		openqrm_plugin_template_stop
+		;;
+	restart)
+		openqrm_plugin_template_stop
+		sleep 1
+		openqrm_plugin_template_start
+		;;
+	init)
+		openqrm_plugin_template_init $USER $PASS
+		;;
+	uninstall)
+		openqrm_plugin_template_uninstall $USER $PASS
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|init|uninstall}"
+		exit 1
+
+esac
+exit $?
+
+
+
+

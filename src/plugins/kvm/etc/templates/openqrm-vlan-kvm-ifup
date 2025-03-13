@@ -1,0 +1,124 @@
+#!/bin/bash
+# this is the ifup/ifdown kvm script to attach the vm nics to the bridge
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+export OPENQRM_SERVER_BASE_DIR=@@OPENQRM_SERVER_BASE_DIR@@
+export APP_NIC=@@OPENQRM_APP_NIC@@
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+export OPENQRM_SOURCE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/"
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/include/openqrm-plugin-kvm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/openqrm-plugin-kvm.conf
+if [ -f $OPENQRM_RESOURCE_PARAMETER_FILE ]; then
+	. $OPENQRM_RESOURCE_PARAMETER_FILE
+elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+	resource_id=0
+	openqrm_server_get_config
+	resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+	openqrm_web_protocol=$OPENQRM_WEB_PROTOCOL
+fi
+# define wget to use with https
+if [ "$openqrm_web_protocol" == "https" ]; then
+	WGET="wget -q --no-check-certificate"
+else
+	WGET="wget -q"
+fi
+
+# find out the name
+VM_BASE_DIR=$(pushd $(dirname $0) > /dev/null; echo $PWD; popd > /dev/null)
+VM_NAME=`basename $VM_BASE_DIR`
+# get the net config of the vm
+. $VM_BASE_DIR/net1
+
+# get vms resource parameters
+if ! $WGET -q -t 1 -T 4 -O $VM_BASE_DIR/openqrm-resource.conf "$openqrm_web_protocol://${resource_openqrmserver}/openqrm/action/resource-monitor.php?resource_command=get_parameter&resource_mac=$KVM_VM_MAC_1"; then
+	echo "ERROR: Could not refresh VMs resource-parameters!" | logger
+else
+	. $VM_BASE_DIR/openqrm-resource.conf
+fi
+# get ip config
+eval $appliance_capabilities
+if [ "$IPT" != "" ]; then
+	IP_TOKEN=`echo $IPT | cut -d'=' -f1`
+	echo "- getting network configuration for token $IP_TOKEN nic $APP_NIC" | logger
+	if ! $WGET -O $VM_BASE_DIR/openqrm-network.$APP_NIC.conf "$openqrm_web_protocol://${resource_openqrmserver}/openqrm/boot-service/ip-mgmt-appliance-config.php?ip_mgmt_command=get_config&appliance_id=$appliance_id&ip_mgmt_nic_id=$APP_NIC&ip_mgmt_token=$IP_TOKEN"; then
+		echo "ERROR: Could not get ip-configuration from openQRM-server at ${resource_openqrmserver}!" | logger
+		exit -1
+	fi
+	. $VM_BASE_DIR/openqrm-network.$APP_NIC.conf
+else
+	echo "NOTICE: No ip-configuration for VM available. Continuing with regular bridging ..." | logger
+fi
+
+if [ "$VLAN_ID" == "" ]; then
+	ifconfig $1 0.0.0.0 promisc up
+	brctl addif @@OPENQRM_PLUGIN_KVM_BRIDGE@@ $1
+	sleep 2
+else
+	echo "NOTICE: Got ip-configuration for VM -> $APP_NIC nic to $VLAN_ID ..." | logger
+	# find out which interface to use according to which bridge is used
+	# get the brigdge, get the phys ethx interface from the bridge
+	PHYS_MAC=`brctl showmacs @@OPENQRM_PLUGIN_KVM_BRIDGE@@ | grep yes | awk '{ print $2 }' | head -n1`
+	if [ "$PHYS_MAC" == "" ]; then
+		echo "ERROR: Could not find the mac address of the phys. interface of @@OPENQRM_PLUGIN_KVM_BRIDGE@@!" | logger
+		exit -1
+	fi
+	echo "NOTICE: Found phys. interface mac adress $PHYS_MAC belongs to @@OPENQRM_PLUGIN_KVM_BRIDGE@@!" | logger
+	PHYS_NIC=`ip a s | grep -A1 ^[0-9] | grep -v lo | grep -i -B1 $PHYS_MAC | grep ^[0-9] | head -n1 | awk {' print $2 '} | cut -d':' -f1`
+	if [ "$PHYS_NIC" == "" ]; then
+		echo "ERROR: Could not find the phys. interface of @@OPENQRM_PLUGIN_KVM_BRIDGE@@!" | logger
+		exit -1
+	fi
+
+	# add vlan dev
+	if ! ifconfig $PHYS_NIC.$VLAN_ID &>/dev/null; then
+		echo "NOTICE: adding vlan dev $VLAN_ID on $PHYS_NIC" | logger
+		vconfig add $PHYS_NIC $VLAN_ID 1>/dev/null
+		ifconfig $PHYS_NIC.$VLAN_ID up
+	else
+		echo "NOTICE: vlan dev $VLAN_ID on $PHYS_NIC already exists. Not re-creating it ..." | logger
+	fi
+
+	# add vlan bridge
+	if ! ifconfig brvlan$VLAN_ID &>/dev/null; then
+		echo "NOTICE: adding bridge brvlan$VLAN_ID" | logger
+		brctl addbr brvlan$VLAN_ID
+		# add vlan interface to bridge
+		echo "NOTICE: adding eth0.$VLAN_ID to brvlan$VLAN_ID" | logger
+		brctl addif brvlan$VLAN_ID $PHYS_NIC.$VLAN_ID
+		# enable stp
+		brctl stp brvlan$VLAN_ID on
+		# bring up the bridge
+		ifconfig brvlan$VLAN_ID up
+	else
+		echo "NOTICE: bridge brvlan$VLAN_ID already exists. Not re-creating it ..." | logger
+	fi
+
+	# add vms tap to vlan bridge
+	echo "NOTICE: adding VMs $1 to brvlan$VLAN_ID - $PHYS_NIC.$VLAN_ID" | logger
+	ifconfig $1 0.0.0.0 promisc up
+	brctl addif brvlan$VLAN_ID $1
+	sleep 2
+
+
+fi
+
+
+
+

@@ -1,0 +1,1651 @@
+#!/bin/bash
+# this script automatically manages the lvm volumes for the kvm virtual machines
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+# unblock starting command queue early for non-blocking + ui commands
+KVM_COMMAND=$1
+if [ "$KVM_COMMAND" == "post_lv" ] || [ "$KVM_COMMAND" == "post_vg" ] || [ "$KVM_COMMAND" == "post_identifier" ] || [ "$KVM_COMMAND" == "list" ] || [ "$KVM_COMMAND" == "auth" ] || [ "$KVM_COMMAND" == "post_sync_progress" ] || [ "$KVM_COMMAND" == "post_sync_finished" ]; then
+	openqrm_unblock_starting_queue $@
+	NON_BLOCKING=true
+fi
+export OPENQRM_SOURCE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/"
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/include/openqrm-plugin-kvm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/openqrm-plugin-kvm.conf
+OPENQRM_POSTENCODE="$OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-postencode"
+if [ -f $OPENQRM_RESOURCE_PARAMETER_FILE ]; then
+	. $OPENQRM_RESOURCE_PARAMETER_FILE
+	OPENQRM_SERVER_IP=$resource_openqrmserver
+	OPENQRM_EXEC_PORT=$resource_execdport
+elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+	openqrm_server_get_config
+	OPENQRM_SERVER_IP=$OPENQRM_SERVER_IP_ADDRESS
+	resource_ip=$OPENQRM_SERVER_IP_ADDRESS
+	resource_id=0
+	resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+	openqrm_web_protocol=$OPENQRM_WEB_PROTOCOL
+fi
+export LANG=C
+LINEBR='
+'
+# how long to wait for the volume authentication, each loop is 5 secs
+MAX_VOLUME_AUTHENTICATION_LOOP=1500
+export MAX_VOLUME_AUTHENTICATION_LOOP
+# set default deployment type to lvm
+OPENQRM_PLUGIN_KVM_FILE_BACKEND="false"
+# dir for progress stats
+SYNC_PROGRESS_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/lock"
+if [ ! -d "$SYNC_PROGRESS_DIR" ]; then
+	mkdir -p $SYNC_PROGRESS_DIR
+fi
+
+# define wget to use with https
+if [ "$openqrm_web_protocol" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate"
+fi
+
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+# make sure required deps are installed
+if ! check_kvm_deps; then
+	if [ "$NON_BLOCKING" != "true" ]; then
+		openqrm_unblock_starting_queue $@
+	fi
+	exit 1
+fi
+# in packages from newer distros qemu-img is named kvm-img
+KVM_QEMU_IMG=`which qemu-img`
+if [ "$KVM_QEMU_IMG" == "" ]; then
+	KVM_QEMU_IMG=`which kvm-img`
+	if [ "$KVM_QEMU_IMG" == "" ]; then
+		if [ "$NON_BLOCKING" != "true" ]; then
+			openqrm_unblock_starting_queue $@
+		fi
+		openqrm_post_event 0 "dependencies" 2 "openqrm-kvm" "qemu-img utility missing. Please install qemu-img on resource $resource_id!"
+		exit 1
+	fi
+fi
+
+
+function kvm_usage() {
+	echo "Usage : $0 add/remove/snap/list/resize/clone <-n image-name> <-v volume-group> [-t <kvm-bf-deployment/kvm-lvm-deployment>]"
+	echo "             [-m size in MB]"
+	echo "             [-s image-snapshot-name]"
+	echo "             [-o image-type e.g. raw, qcow2]"
+	echo "        $0 auth <-r image-rootdevice> <-i authidentifier> [-t <kvm-bf-deployment/kvm-lvm-deployment>]"
+	echo "        $0 post_vg <-u username> <-p password> [-t <kvm-bf-deployment/kvm-lvm-deployment>]"
+	echo "        $0 post_lv <-u username> <-p password> <-v volume-group> [-t <kvm-bf-deployment/kvm-lvm-deployment>]"
+	echo "        $0 post_identifier <-u username> <-p password> [-t <kvm-bf-deployment/kvm-lvm-deployment>]"
+	echo "        $0 post_sync_progress <-n image-name> <-s image-snapshot-name> <-v volume-group> <-t kvm-bf-deployment/kvm-lvm-deployment> <-u username> <-p password>"
+	echo "        $0 post_sync_finished <-n image-name> <-v volume-group> <-t kvm-bf-deployment/kvm-lvm-deployment> <-u username> <-p password>"
+	echo "        $0 purge_cache <-n image-name/all>"
+	echo "        $0 list_cache"
+	echo ""
+	echo "Optional parameters:"
+	echo "             [--openqrm-ui-user <username>]"
+	echo "             [--openqrm-internal-cmd <true/false>]"
+	echo "             [--openqrm-cmd-mode <regular/background/fork>]"
+	exit 1
+}
+
+
+
+
+FULL_COMMANDLINE="$0 $@"
+KVM_COMMAND=$1
+shift
+
+while [ $# -ne 0 ]; do
+	case "$1" in
+		-n)
+			KVM_IMAGE_NAME=$2
+			shift
+			;;
+		-m)
+			KVM_IMAGE_SIZE=$2
+			shift
+			;;
+		-s)
+			KVM_IMAGE_SNAPSHOT_NAME=$2
+			shift
+			;;
+		-i)
+			KVM_IMAGE_AUTH=$2
+			shift
+			;;
+		-r)
+			KVM_IMAGE_ROOTDEVICE=$2
+			shift
+			;;
+		-u)
+			KVM_OPENQRM_USERNAME=$2
+			shift
+			;;
+		-p)
+			KVM_OPENQRM_PASSWORD=$2
+			shift
+			;;
+		-v)
+			KVM_VOLUME_LOCATION=$2
+			shift
+			;;
+		-t)
+			KVM_DEPLOYMENT_TYPE=$2
+			shift
+			;;
+		-o)
+			KVM_IMAGE_TYPE=$2
+			shift
+			;;
+		--caching)
+			KVM_IMAGE_CACHE=$2
+			shift
+			;;
+		--openqrm-ui-user)
+			OPENQRM_UI_USER=$2
+			shift
+			;;
+		--openqrm-internal-cmd)
+			OPENQRM_INTERNAL_CMD=$2
+			shift
+			;;
+		--openqrm-cmd-mode)
+			OPENQRM_CMD_MODE=$2
+			shift
+			;;
+
+		*)
+			if [ "$NON_BLOCKING" != "true" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			fi
+			echo "ERROR: Free commandline arguments are not allowed"
+			kvm_usage
+			exit 6
+			;;
+	esac
+	shift
+done
+
+
+
+
+# main
+if [ "$KVM_COMMAND" == "" ]; then
+	openqrm_unblock_starting_queue $FULL_COMMANDLINE
+	kvm_usage
+fi
+if [ "$KVM_COMMAND" == "post_lv" ] || [ "$KVM_COMMAND" == "post_vg" ] || [ "$KVM_COMMAND" == "post_identifier" ]; then
+		if [ "$KVM_OPENQRM_USERNAME" == "" ]; then
+			kvm_usage
+		fi
+		if [ "$KVM_OPENQRM_PASSWORD" == "" ]; then
+			kvm_usage
+		fi
+		if [ "$KVM_COMMAND" == "post_lv" ]; then
+			if [ "$KVM_VOLUME_LOCATION" == "" ]; then
+				kvm_usage
+			fi
+		fi
+else
+	if [ "$KVM_COMMAND" != "list" ] && [ "$KVM_COMMAND" != "auth" ] && [ "$KVM_COMMAND" != "list_cache" ]; then
+		if [ "$KVM_IMAGE_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+
+		if [ "$KVM_COMMAND" != "purge_cache" ]; then
+			if [ "$KVM_VOLUME_LOCATION" == "" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+				kvm_usage
+			fi
+		fi
+	fi
+fi
+if [ "$KVM_DEPLOYMENT_TYPE" == "" ]; then
+	if [ "$KVM_COMMAND" != "purge_cache" ] && [ "$KVM_COMMAND" != "list_cache" ]; then
+		if [ "$NON_BLOCKING" != "true" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		fi
+		kvm_usage
+	fi
+elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-gluster-deployment" ]; then
+	if ! which gluster 1>/dev/null 2>&1; then
+		if [ "$NON_BLOCKING" != "true" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		fi
+		openqrm_post_event 0 "check" 2 "openqrm-kvm" "Gluster/Glusterfs is not installed on resource id $resource_id!"
+		exit 1
+	fi
+elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-ceph-deployment" ]; then
+	if ! which rbd 1>/dev/null 2>&1; then
+		if [ "$NON_BLOCKING" != "true" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		fi
+		openqrm_post_event 0 "check" 2 "openqrm-kvm" "Ceph (rbd) is not installed on resource id $resource_id!"
+		exit 1
+	fi
+fi
+
+if [ "$KVM_DEPLOYMENT_TYPE" == "kvm-lvm-deployment" ]; then
+	# load required lvm modules if needed
+	if ! grep dm_mod /proc/modules 1>/dev/null; then
+		modprobe dm-mod 1>/dev/null 2>&1
+		modprobe dm-snapshot 1>/dev/null 2>&1
+	fi
+	# check if volume group exists
+	if ! vgs --unbuffered $KVM_VOLUME_LOCATION 1>/dev/null 2>&1; then
+		openqrm_post_event 0 "check" 2 "openqrm-kvm" "Could not find volume group $KVM_VOLUME_LOCATION on the storage-server!"
+		echo "ERROR: Could not find volume-group $KVM_VOLUME_LOCATION on the storage-server!"
+		if [ "$NON_BLOCKING" != "true" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		fi
+		exit 1
+	fi
+fi
+# set some default if not given by cmdline params
+if [ "$KVM_IMAGE_TYPE" == "" ]; then
+	KVM_IMAGE_TYPE=$OPENQRM_PLUGIN_KVM_DEFAULT_IMAGE_TYPE
+fi
+if [ "$OPENQRM_UI_USER" != "" ]; then
+	OPENQRM_UI_USER_PARAMETER=" --openqrm-ui-user $OPENQRM_UI_USER"
+fi
+if [ "$KVM_IMAGE_CACHE" == "" ]; then
+	KVM_IMAGE_CACHE=true
+fi
+
+
+case "$KVM_COMMAND" in
+
+	add)
+		if [ "$KVM_DEPLOYMENT_TYPE" == "kvm-bf-deployment" ]; then
+			# check if already exists
+			FILE_BACKEND_DIR=`kvm_get_backend_dir $KVM_VOLUME_LOCATION`
+			if [ -e "$FILE_BACKEND_DIR/$KVM_IMAGE_NAME" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Volume $KVM_IMAGE_NAME already exists"
+				exit 1
+			fi
+			echo "Creating local blockfile $KVM_IMAGE_NAME size $KVM_IMAGE_SIZE MB using location $KVM_VOLUME_LOCATION"
+			if [ ! -d "$FILE_BACKEND_DIR" ]; then
+				mkdir -p $FILE_BACKEND_DIR
+			fi
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			# Convert MB to Bytes
+			IMGSIZE=$(( $KVM_IMAGE_SIZE * 1000 * 1000 ))
+
+			CMD_ERR=`$KVM_QEMU_IMG create -f $KVM_IMAGE_TYPE $FILE_BACKEND_DIR/$KVM_IMAGE_NAME $IMGSIZE 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Error creating volume $KVM_IMAGE_NAME! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-lvm-deployment" ]; then
+			# check if already exists
+			if [ -e /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Volume $KVM_IMAGE_NAME already exists"
+				exit 1
+			fi
+			echo "Creating logical volume $KVM_IMAGE_NAME size $KVM_IMAGE_SIZE MB using volume group $KVM_VOLUME_LOCATION"
+
+			# aquire lock for kvm
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			# aquire global lock for lvm operations
+			if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+				if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+					openqrm_global_lock aquire lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD $LOCK_TIME "Creating volume $KVM_IMAGE_NAME"
+				fi
+			fi
+
+			kvm_refresh_lvm
+			CMD_ERR=`lvcreate $OPENQRM_PLUGIN_KVM_LVCREATE_CUSTOM_PARAM -L$KVM_IMAGE_SIZE"M" -n$KVM_IMAGE_NAME $KVM_VOLUME_LOCATION 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Error creating volume $KVM_IMAGE_NAME! $CMD_ERR"
+
+				if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+					if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+						openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+					fi
+				fi
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+			# release global lock
+			if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+				if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+					openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+				fi
+			fi
+			# release lock for kvm
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-gluster-deployment" ]; then
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			CMD_ERR=`$KVM_QEMU_IMG create -f $KVM_IMAGE_TYPE gluster://$resource_ip/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME $KVM_IMAGE_SIZE"M" 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Error creating volume $KVM_IMAGE_NAME! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-ceph-deployment" ]; then
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			CMD_ERR=`rbd create $KVM_IMAGE_NAME --size $KVM_IMAGE_SIZE --pool $KVM_VOLUME_LOCATION --image-format 2 $OPENQRM_PLUGIN_KVM_CEPH_IMAGE_FEATURE 2>&1`
+#			CMD_ERR=`$KVM_QEMU_IMG create -f $KVM_IMAGE_TYPE rbd:$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME $KVM_IMAGE_SIZE"M" 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Error creating volume $KVM_IMAGE_NAME! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+		fi
+		# if we have an image name send size back to openQRM
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD "$openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?lvm_command=set_image_size&kvm_image_name=$KVM_IMAGE_NAME&kvm_image_size=$KVM_IMAGE_SIZE"; then
+			openqrm_post_event 0 "add" 2 "openqrm-kvm" "Could post size of volume $KVM_IMAGE_NAME!"
+		fi
+		# in case we have a username + password post the updated list to the openQRM-server
+		if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+			$0 post_lv -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD -v $KVM_VOLUME_LOCATION -t $KVM_DEPLOYMENT_TYPE $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+		fi
+		openqrm_post_event 0 "add" 5 "openqrm-kvm" "Created volume $KVM_IMAGE_NAME at $KVM_VOLUME_LOCATION."
+		;;
+
+	remove)
+		if [ "$KVM_DEPLOYMENT_TYPE" == "kvm-bf-deployment" ]; then
+			FILE_BACKEND_DIR=`kvm_get_backend_dir $KVM_VOLUME_LOCATION`
+			if [ ! -e "$FILE_BACKEND_DIR/$KVM_IMAGE_NAME" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+				openqrm_post_event 0 "remove" 5 "openqrm-kvm" "Volume $FILE_BACKEND_DIR/$KVM_IMAGE_NAME does not exists!"
+				exit 1
+			fi
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			CMD_ERR=`/bin/rm -f $FILE_BACKEND_DIR/$KVM_IMAGE_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Error removing volume $KVM_IMAGE_NAME! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-lvm-deployment" ]; then
+			# check that no snapshots existing with this volume as the origin
+			if lvs | awk '{ print $5 }' | grep -w $KVM_IMAGE_NAME 1>/dev/null; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+				openqrm_post_event 0 "remove" 3 "openqrm-kvm" "Snapshot exist from volume /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME. Not removing!"
+				exit 1
+			fi
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			# aquire global lock for lvm operations
+			if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+				if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+					openqrm_global_lock aquire lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD $LOCK_TIME "Removing volume $KVM_IMAGE_NAME"
+				fi
+			fi
+			kvm_refresh_lvm
+			# make sure no dev mappings keeping the volume busy
+			kvm_clean_dev_maps $KVM_IMAGE_NAME $KVM_VOLUME_LOCATION
+			lvchange -a n -y /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME
+			CMD_ERR=`lvremove -f /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				# try again, lvm sometimes is fancy
+				sleep 2
+				CMD_ERR=`lvremove -f /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME 2>&1`
+				if [ "$?" != 0 ]; then
+					sleep 2
+					if [ -e /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME ]; then
+						CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+						VOL_STATUS=`lvs /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME | tail -n1`
+						openqrm_post_event 0 "add" 3 "openqrm-kvm" "Error removing volume $KVM_IMAGE_NAME! $CMD_ERR"
+						openqrm_post_event 0 "add" 3 "openqrm-kvm" "Volume status $KVM_IMAGE_NAME: $VOL_STATUS"
+
+						# release global lock
+						if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+							if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+								openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+							fi
+						fi
+						openqrm_lock_queue release kvm $LOCK_TIME
+						trap '' EXIT
+
+						exit 1
+					fi
+				fi
+			fi
+
+			# release global lock
+			if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+				if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+					openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+				fi
+			fi
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-gluster-deployment" ]; then
+			# remove needs to be done through a glusterfs client, mount via nfs
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			GLUSTER_VOL_TMP_DIR="/tmp/kvm-gluster.$KVM_IMAGE_NAME"
+			mkdir -p $GLUSTER_VOL_TMP_DIR
+
+			# mount
+			CMD_ERR=`mount -t nfs $resource_ip:$KVM_VOLUME_LOCATION $GLUSTER_VOL_TMP_DIR 2>&1`
+			if [ "$?" != 0 ]; then
+				rmdir $GLUSTER_VOL_TMP_DIR
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Error mounting Gluster $resource_ip:$KVM_VOLUME_LOCATION! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+			# remove
+			CMD_ERR=`rm -f $GLUSTER_VOL_TMP_DIR/$KVM_IMAGE_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				rmdir $GLUSTER_VOL_TMP_DIR
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Error removing volume $KVM_IMAGE_NAME! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+			# umount
+			CMD_ERR=`umount $GLUSTER_VOL_TMP_DIR 2>&1`
+			if [ "$?" != 0 ]; then
+				rmdir $GLUSTER_VOL_TMP_DIR
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Error umounting Gluster $resource_ip:$KVM_VOLUME_LOCATION! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+			rmdir $GLUSTER_VOL_TMP_DIR
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-ceph-deployment" ]; then
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+
+			# remove - snap or origin?
+			if echo $KVM_IMAGE_NAME | grep '@' 1>/dev/null; then
+				CMD_ERR=`rbd snap rm $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME 2>&1`
+			else
+				CMD_ERR=`rbd rm $KVM_IMAGE_NAME -p $KVM_VOLUME_LOCATION 2>&1`
+			fi
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Error removing volume $KVM_IMAGE_NAME from pool $KVM_VOLUME_LOCATION! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+		fi
+		# in case we have a username + password post the updated list to the openQRM-server
+		if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+			$0 post_lv -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD -v $KVM_VOLUME_LOCATION -t $KVM_DEPLOYMENT_TYPE $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+		fi
+		openqrm_post_event 0 "remove" 5 "openqrm-kvm" "Removed volume $KVM_IMAGE_NAME from $KVM_VOLUME_LOCATION."
+		;;
+
+	snap)
+		if [ "$KVM_IMAGE_SNAPSHOT_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_DEPLOYMENT_TYPE" == "kvm-bf-deployment" ]; then
+			# check that source fs-images exist
+			# notice : here the kvm-volume-location comes from the cloud-hook and uses the dirname of the rootfs-ident
+			FILE_BACKEND_DIR=`kvm_get_backend_dir $KVM_VOLUME_LOCATION`
+			if [ ! -e "$FILE_BACKEND_DIR/$KVM_IMAGE_NAME" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+				openqrm_post_event 0 "snap" 2 "openqrm-kvm" "Could not find $FILE_BACKEND_DIR/$KVM_IMAGE_NAME on the storage-server!"
+				exit 1
+			fi
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			touch $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+
+			CMD_ERR=`$KVM_QEMU_IMG create -f qcow2 -b $FILE_BACKEND_DIR/$KVM_IMAGE_NAME $FILE_BACKEND_DIR/$KVM_IMAGE_SNAPSHOT_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "snap" 3 "openqrm-kvm" "Error creating snapshot $FILE_BACKEND_DIR/$KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+			# Get size of snaped image
+			KVM_IMAGE_SIZE=$($KVM_QEMU_IMG info $FILE_BACKEND_DIR/$KVM_IMAGE_SNAPSHOT_NAME | grep ^"virtual size" | awk {' print $4 '} | sed -e s/\(//)
+			KVM_IMAGE_SIZE=$(( $KVM_IMAGE_SIZE / 1000 / 1000 ))
+
+
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-lvm-deployment" ]; then
+			# check that source fs-images exist
+			if ! `lvdisplay /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME 1>/dev/null`; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+				openqrm_post_event 0 "snap" 2 "openqrm-kvm" "Could not find /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME on the storage-server!"
+				exit 1
+			fi
+			RESIZE_FILESYSTEM=false
+			ORIGIN_SIZE=`lvs --noheadings -o lv_size --units m --nosuffix /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME | awk '{ print $1 }' | cut -d'.' -f1`
+			if [ "$ORIGIN_SIZE" == "" ]; then
+			    openqrm_post_event 0 "snap" 2 "openqrm-kvm" "Could not find out origin volume size of /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME!"
+    			exit 1
+			fi
+			if [ "$KVM_IMAGE_SIZE" != "" ]; then
+				if (( $KVM_IMAGE_SIZE > $ORIGIN_SIZE )); then
+					openqrm_post_event 0 "snap" 2 "openqrm-kvm" "Snapshot size must not be bigger than the origin volume size! ( $KVM_IMAGE_SIZE > $ORIGIN_SIZE )"
+					exit 1
+				elif [ "$KVM_IMAGE_SIZE" == "$ORIGIN_SIZE" ]; then
+					RESIZE_FILESYSTEM=false
+				else
+					ORIGIN_SIZE=$KVM_IMAGE_SIZE
+					RESIZE_FILESYSTEM=true
+				fi
+			fi
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			# aquire global lock for lvm operations
+			if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+				if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+					openqrm_global_lock aquire lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD $LOCK_TIME "Snapshot volume $KVM_IMAGE_NAME tp $KVM_IMAGE_SNAPSHOT_NAME"
+				fi
+			fi
+			kvm_refresh_lvm
+			touch $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+			lvchange -ay -y /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME
+			CMD_ERR=`lvcreate $OPENQRM_PLUGIN_KVM_LVCREATE_CUSTOM_PARAM --size $ORIGIN_SIZE"M" --snapshot --name $KVM_IMAGE_SNAPSHOT_NAME /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "snap" 3 "openqrm-kvm" "Error creating snapshot $KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+
+				# release global lock
+				if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+					if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+						openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+					fi
+				fi
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+			# release global lock
+			if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+				if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+					openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+				fi
+			fi
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			if [ "$OPENQRM_PLUGIN_KVM_RESIZE_SNAPSHOTS_FILESYSTEM" == "true" ] && [ "$RESIZE_FILESYSTEM" == "true" ]; then
+				# find the rootfs and resize it
+				if ! kvm_resize_fs /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_SNAPSHOT_NAME; then
+					openqrm_post_event 0 "snap" 2 "openqrm-kvm" "Failed resizing volume /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_SNAPSHOT_NAME!"
+				fi
+			fi
+			rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-gluster-deployment" ]; then
+			FILE_BACKEND_DIR=`kvm_get_gluster_backend_dir $KVM_VOLUME_LOCATION`
+			if [ ! -e "$FILE_BACKEND_DIR/$KVM_IMAGE_NAME" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+				openqrm_post_event 0 "snap" 2 "openqrm-kvm" "Could not find $FILE_BACKEND_DIR/$KVM_IMAGE_NAME on the storage-server!"
+				exit 1
+			fi
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			touch $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+
+			CMD_ERR=`$KVM_QEMU_IMG create -f qcow2 -b $FILE_BACKEND_DIR/$KVM_IMAGE_NAME $FILE_BACKEND_DIR/$KVM_IMAGE_SNAPSHOT_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "snap" 3 "openqrm-kvm" "Error creating snapshot gluster:$resource_ip://$FILE_BACKEND_DIR/$KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+			if ! `kvm_trigger_gluster_replication $KVM_VOLUME_LOCATION $KVM_IMAGE_SNAPSHOT_NAME`; then
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				openqrm_post_event 0 "snap" 3 "openqrm-kvm" "Error triggering replication for gluster:$resource_ip://$FILE_BACKEND_DIR/$KVM_IMAGE_SNAPSHOT_NAME!"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-ceph-deployment" ]; then
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			CMD_ERR=`rbd snap create $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "snap" 3 "openqrm-kvm" "Error creating rbd snapshot $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+		fi
+		# in case we have a username + password post the updated list to the openQRM-server
+		if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+			# if we have an image name send size back to openQRM
+			if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD "$openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?lvm_command=set_image_size&kvm_image_name=$KVM_IMAGE_SNAPSHOT_NAME&kvm_image_size=$KVM_IMAGE_SIZE"; then
+				openqrm_post_event 0 "add" 2 "openqrm-kvm" "Could post size of volume $KVM_IMAGE_SNAPSHOT_NAME!"
+			fi
+			$0 post_lv -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD -v $KVM_VOLUME_LOCATION -t $KVM_DEPLOYMENT_TYPE $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+		fi
+		openqrm_post_event 0 "snap" 5 "openqrm-kvm" "Created snapshot from volume $KVM_IMAGE_NAME -> $KVM_IMAGE_SNAPSHOT_NAME."
+		;;
+
+	auth)
+		# this is just for starting auth, make sure the device is there, otherwise wait
+		if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ] && [ "$KVM_IMAGE_NAME" != "" ]; then
+			MAX_AUTH_LOOP=0
+			while (true); do
+
+# commented out, this is running during resize and changes the lvol meta data
+#				if [ "$KVM_DEPLOYMENT_TYPE" == "kvm-lvm-deployment" ]; then
+#					# aquire global lock for lvm operations
+#					if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+#						if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+#							openqrm_global_lock aquire lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD auth "Auth for volume $KVM_IMAGE_NAME"
+#						fi
+#					fi
+#					lvchange -ay -y $KVM_IMAGE_ROOTDEVICE
+#
+#					# release global lock
+#					if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+#						if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+#							openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+#						fi
+#					fi
+#				fi
+
+				if [ "$KVM_DEPLOYMENT_TYPE" == "kvm-lvm-deployment" ] || [ "$KVM_DEPLOYMENT_TYPE" == "kvm-bf-deployment" ]; then
+					if [ -e "$KVM_IMAGE_ROOTDEVICE" ]; then
+						# fs resize active ?
+						if [ ! -f "$SYNC_PROGRESS_DIR/$KVM_IMAGE_NAME" ]; then
+							break
+						fi
+					fi
+				elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-gluster-deployment" ]; then
+					# get the volume location from the image-root-devicev since it is not posted
+					VOLUME_LOCATION=`echo $KVM_IMAGE_ROOTDEVICE | cut -d':' -f3 | cut -d'/' -f3`
+					FILE_BACKEND_DIR=`kvm_get_gluster_backend_dir $VOLUME_LOCATION`
+					if [ -e "$FILE_BACKEND_DIR/$KVM_IMAGE_NAME" ]; then
+						# fs resize active ?
+						if [ ! -f "$SYNC_PROGRESS_DIR/$KVM_IMAGE_NAME" ]; then
+							break
+						fi
+					fi
+				elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-ceph-deployment" ]; then
+					VOLUME_LOCATION=`echo $KVM_IMAGE_ROOTDEVICE | cut -d':' -f2 | cut -d'/' -f1`
+					if rbd --image $KVM_IMAGE_NAME -p $VOLUME_LOCATION info 2>/dev/null 1>/dev/null; then
+						# fs resize active ?
+						if [ ! -f "$SYNC_PROGRESS_DIR/$KVM_IMAGE_NAME" ]; then
+							break
+						fi
+					fi
+				fi
+				sleep 5
+				if [ "$MAX_AUTH_LOOP" == "$MAX_VOLUME_AUTHENTICATION_LOOP" ]; then
+					openqrm_post_event 0 "auth" 2 "openqrm-kvm" "Volume volume $KVM_IMAGE_ROOTDEVICE does not exist! Auth to $KVM_IMAGE_AUTH failed!"
+					exit 1
+				fi
+				MAX_AUTH_LOOP=$(( MAX_AUTH_LOOP + 1 ))
+			done
+			# if we have an image name send back to openQRM that storage auth finished to remvoe the storage-auth-blocker
+			if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD "$openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?lvm_command=auth_finished&kvm_image_name=$KVM_IMAGE_NAME"; then
+				openqrm_post_event 0 "auth" 2 "openqrm-kvm" "Could not remove auth-blocker for volume $KVM_IMAGE_NAME!"
+			fi
+		fi
+		;;
+
+	list)
+		lvm lvs
+		;;
+	post_vg)
+		STORAGE_STATUS_TMP=$resource_id.vg.stat
+		#> $STORAGE_STATUS_TMP
+		if [ "$KVM_DEPLOYMENT_TYPE" == "kvm-bf-deployment" ]; then
+			for FILE_BACKEND in `echo $OPENQRM_PLUGIN_KVM_FILE_BACKEND_DIRECTORIES`; do
+				BACKEND_LOCATION_NAME=`echo $FILE_BACKEND | cut -d':' -f1`
+				FILE_BACKEND_DIR=`echo $FILE_BACKEND | cut -d':' -f2`
+				if [ ! -d "$FILE_BACKEND_DIR" ]; then
+					mkdir -p $FILE_BACKEND_DIR
+				fi
+				BACKEN_DIR_AVAIL_SPACE=`df --block-size MB -P $FILE_BACKEND_DIR | grep -v Used | awk '{ print $2 }'`
+				BACKEN_DIR_FREE_SPACE=`df --block-size MB -P $FILE_BACKEND_DIR | grep -v Used | awk '{ print $4 }'`
+				echo "$BACKEND_LOCATION_NAME@$FILE_BACKEND_DIR@-@-@-@"$BACKEN_DIR_AVAIL_SPACE"@"$BACKEN_DIR_FREE_SPACE"" >> $STORAGE_STATUS_TMP
+			done
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-lvm-deployment" ]; then
+			vgs --units m | grep -v VFree | sed -e "s/ \{1,\}//" > $STORAGE_STATUS_TMP
+			sed -i -e "s/ \{1,\}/@/g" $STORAGE_STATUS_TMP
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-gluster-deployment" ]; then
+			VOL_LOOP=0
+			for GLUSTER_VOL in `gluster volume list`; do
+				GLUSTER_VOL_TMP=`mktemp /tmp/kvm-gluster.XXXXXX`
+				gluster volume info $GLUSTER_VOL > $GLUSTER_VOL_TMP
+				G_TYPE=`grep -w ^Type $GLUSTER_VOL_TMP | awk '{ print $2 }'`
+				G_STATUS=`grep -w ^Status $GLUSTER_VOL_TMP | awk '{ print $2 }'`
+				G_BRICK_COUNT=`grep -w ^Number $GLUSTER_VOL_TMP | cut -d':' -f2 | sed -e "s/ \{1,\}//g"`
+				G_TRANSPORT=`grep ^Transport-type $GLUSTER_VOL_TMP | awk '{ print $2 }'`
+				for GLUSTER_BRICK in `grep -w "^Brick[0-9].*" $GLUSTER_VOL_TMP | awk '{ print $2 }'`; do
+					if [ "$VOL_LOOP" == 0 ]; then
+						G_BRICKS="$GLUSTER_BRICK"
+						# get size/free
+						GLUSTER_BRICK_BACKEND_DIR=`echo $GLUSTER_BRICK | cut -d':' -f2`
+						GLUSTER_BRICK_BACKEND_DIR=`dirname $GLUSTER_BRICK_BACKEND_DIR`
+						BACKEN_DIR_AVAIL_SPACE=`df --block-size MB -P $GLUSTER_BRICK_BACKEND_DIR | grep -v Used | awk '{ print $2 }'`
+						BACKEN_DIR_FREE_SPACE=`df --block-size MB -P $GLUSTER_BRICK_BACKEND_DIR | grep -v Used | awk '{ print $4 }'`
+					else
+						G_BRICKS="$G_BRICKS"",""$GLUSTER_BRICK"
+					fi
+					VOL_LOOP=$(( VOL_LOOP + 1 ))
+				done
+				echo $GLUSTER_VOL"@"$G_TYPE"@"$G_STATUS"@"$G_BRICK_COUNT"@"$G_TRANSPORT"@"$BACKEN_DIR_AVAIL_SPACE"@"$BACKEN_DIR_FREE_SPACE"@"$G_BRICKS"" >> $STORAGE_STATUS_TMP
+				rm -f $GLUSTER_VOL_TMP
+			done
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-ceph-deployment" ]; then
+			for CEPH_POOL in `rados lspools`; do
+				BACKEND_SUMMARY=`ceph df | grep ^" " | awk '{ print $1","$2","$3","$4","$5","$6 }' | grep -A 1000 -w ^NAME | grep -w ^$CEPH_POOL`
+				BACKEND_USED_SPACE_PERCENT=`echo $BACKEND_SUMMARY | cut -d',' -f4`
+				BACKEND_ID=`echo $BACKEND_SUMMARY | cut -d',' -f2`
+				BACKEND_OBJECTS=`echo $BACKEND_SUMMARY | cut -d',' -f6`
+				BACKEND_USED_SPACE=`echo $BACKEND_SUMMARY | cut -d',' -f3`
+				BACKEND_USED_SPACE=`ceph_inmb $BACKEND_USED_SPACE`
+				BACKEND_AVAIL_SPACE=`echo $BACKEND_SUMMARY | cut -d',' -f5`
+				BACKEND_AVAIL_SPACE=`ceph_inmb $BACKEND_AVAIL_SPACE`
+				echo "$CEPH_POOL@"$BACKEND_ID"@"$BACKEND_OBJECTS"@"$BACKEND_USED_SPACE_PERCENT"@"$BACKEND_USED_SPACE"@-@"$BACKEND_AVAIL_SPACE"" >> $STORAGE_STATUS_TMP
+			done
+		fi
+
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?lvm_command=get; then
+			openqrm_post_event 0 "post_vg" 2 "openqrm-kvm" "Could not post the volume group status to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $STORAGE_STATUS_TMP $STORAGE_STATUS_TMP.post
+		;;
+	post_lv)
+		STORAGE_STATUS_TMP=$resource_id.$KVM_VOLUME_LOCATION.lv.stat
+		> $STORAGE_STATUS_TMP
+		if [ "$KVM_DEPLOYMENT_TYPE" == "kvm-bf-deployment" ]; then
+			FILE_BACKEND_DIR=`kvm_get_backend_dir $KVM_VOLUME_LOCATION`
+			if [ -d "$FILE_BACKEND_DIR" ]; then
+				for FILE_BACKEND in `ls $FILE_BACKEND_DIR/*`; do
+					VOLUME_FILENAME=`basename $FILE_BACKEND`
+					VOLUME_FILE_SIZE=$($KVM_QEMU_IMG info $FILE_BACKEND_DIR/$VOLUME_FILENAME | grep ^"virtual size" | awk {' print $4 '} | sed -e s/\(//)
+					VOLUME_ORIGIN="x"
+					if [ -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$VOLUME_FILENAME.clone_in_progress" ]; then
+						echo "kvm-bf-deployment@$VOLUME_FILENAME@$FILE_BACKEND@file@clone_in_progress@x@x@" >> $STORAGE_STATUS_TMP
+					else
+						FT=`kvm_get_image_type $FILE_BACKEND`
+						if [ "$FT" == "snapshot" ]; then
+							VOLUME_ORIGIN=`file $FILE_BACKEND | sed -e "s/.*(path //g" | cut -d')' -f1`
+						fi
+						echo "kvm-bf-deployment@$VOLUME_FILENAME@$FILE_BACKEND@$FT@$VOLUME_FILE_SIZE@$VOLUME_ORIGIN@x@" >> $STORAGE_STATUS_TMP
+					fi
+				done
+			fi
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-lvm-deployment" ]; then
+			lvs $KVM_VOLUME_LOCATION --noheadings --units m -o lv_name,vg_name,lv_attr,lv_size,origin | sed -e "s/ \{1,\}//" > $STORAGE_STATUS_TMP.tmp
+			for LVOL in `cat $STORAGE_STATUS_TMP.tmp | awk {' print $1 '}`; do
+				# check for clone-in-progress
+				if [ -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$LVOL.clone_in_progress" ]; then
+				    echo "kvm-lvm-deployment@$LVOL@$KVM_VOLUME_LOCATION@-@clone_in_progress@@@" >> $STORAGE_STATUS_TMP
+				else
+				    echo -n "kvm-lvm-deployment " >> $STORAGE_STATUS_TMP
+					grep -w ^$LVOL $STORAGE_STATUS_TMP.tmp >> $STORAGE_STATUS_TMP
+				fi
+			done
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-gluster-deployment" ]; then
+			FILE_BACKEND_DIR=`kvm_get_gluster_backend_dir $KVM_VOLUME_LOCATION`
+			if [ -d "$FILE_BACKEND_DIR" ]; then
+				for FILE_BACKEND in `ls $FILE_BACKEND_DIR/*`; do
+					VOLUME_FILENAME=`basename $FILE_BACKEND`
+					VOLUME_FILE_SIZE=`ls -l $FILE_BACKEND | awk '{ print $5 }'`
+					VOLUME_ORIGIN="x"
+					if [ -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$VOLUME_FILENAME.clone_in_progress" ]; then
+					    echo "kvm-gluster-deployment@$VOLUME_FILENAME@$FILE_BACKEND@file@clone_in_progress@x@x@" >> $STORAGE_STATUS_TMP
+					else
+						FT=`kvm_get_image_type $FILE_BACKEND`
+						if [ "$FT" == "snapshot" ]; then
+							VOLUME_ORIGIN=`file $FILE_BACKEND | sed -e "s/.*(path //g" | cut -d')' -f1`
+							VOLUME_ORIGIN=`basename $VOLUME_ORIGIN`
+						fi
+					    echo "kvm-gluster-deployment@$VOLUME_FILENAME@$FILE_BACKEND@$FT@$VOLUME_FILE_SIZE@$VOLUME_ORIGIN@x@" >> $STORAGE_STATUS_TMP
+					fi
+				done
+			fi
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-ceph-deployment" ]; then
+
+			for CVOLUME in `rbd ls -l $KVM_VOLUME_LOCATION | sed '1d' | awk '{ print $1 }'`; do
+				# origin or snap
+				if echo $CVOLUME | grep '@' 1>/dev/null; then
+					CORIGIN=`echo $CVOLUME | cut -d'@' -f1`
+				else
+					CORIGIN=""
+				fi
+
+				CVOLINFO=`rbd info $KVM_VOLUME_LOCATION/$CVOLUME`
+				CVOLSIZE=`echo $CVOLINFO | sed -e "s#.*size ##" | awk '{ print $1 }'`
+				CVOLSIZETYPE=`echo $CVOLINFO | sed -e "s#.*size ##" | awk '{ print $2 }'`
+				case "$CVOLSIZETYPE" in
+					MiB)
+						CVOLSIZE=$CVOLSIZE"M"
+						;;
+					GiB)
+						CVOLSIZE=$CVOLSIZE"G"
+						;;
+					TiB)
+						CVOLSIZE=$CVOLSIZE"T"
+						;;
+				esac
+				CVOLSIZE=`ceph_inmb $CVOLSIZE`
+				CVOLORDER=`echo $CVOLINFO | sed -e "s#.*order ##" | awk '{ print $1 }'`
+				CVOLUME=`echo $CVOLUME | sed -e "s/@/%/g"`
+				CVOLROOT="rbd:$KVM_VOLUME_LOCATION/$CVOLUME"
+				echo "kvm-ceph-deployment@$CVOLUME@$CVOLROOT@@$CVOLSIZE@$CORIGIN@x@" >> $STORAGE_STATUS_TMP
+
+			done
+
+		fi
+		sed -i -e "s/ \{1,\}/@/g" $STORAGE_STATUS_TMP
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?lvm_command=get; then
+			openqrm_post_event 0 "post_lv" 2 "openqrm-kvm" "Could not post the volume status to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $STORAGE_STATUS_TMP $STORAGE_STATUS_TMP.post $STORAGE_STATUS_TMP.tmp
+		;;
+	post_identifier)
+		if [ "$KVM_DEPLOYMENT_TYPE" == "kvm-bf-deployment" ]; then
+			STORAGE_STATUS_TMP=$resource_id.lv.kvm-bf-deployment.ident
+			> $STORAGE_STATUS_TMP
+			for FILE_BACKEND in `echo $OPENQRM_PLUGIN_KVM_FILE_BACKEND_DIRECTORIES`; do
+				BACKEND_LOCATION_NAME=`echo $FILE_BACKEND | cut -d':' -f1`
+				FILE_BACKEND_DIR=`echo $FILE_BACKEND | cut -d':' -f2`
+				if [ -d "$FILE_BACKEND_DIR" ]; then
+					for FILE_BACKEND in `ls $FILE_BACKEND_DIR/*`; do
+						BACKEND_FILENAME=`basename $FILE_BACKEND`
+						echo "$BACKEND_LOCATION_NAME - $BACKEND_FILENAME:$FILE_BACKEND" >> $STORAGE_STATUS_TMP
+					done
+				fi
+			done
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-lvm-deployment" ]; then
+			STORAGE_STATUS_TMP=$resource_id.lv.kvm-lvm-deployment.ident
+			> $STORAGE_STATUS_TMP
+			for LVOL in `openqrm_get_lvm_volume_paths`; do
+				LVOL_SHORT=`basename $LVOL`
+				IMAGE_NAME=$LVOL_SHORT
+				VOLUME_GROUP=`echo $LVOL | cut -d'/' -f3`
+				echo "$IMAGE_NAME:/dev/$VOLUME_GROUP/$IMAGE_NAME" >> $STORAGE_STATUS_TMP
+
+			done
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-gluster-deployment" ]; then
+			STORAGE_STATUS_TMP=$resource_id.lv.kvm-gluster-deployment.ident
+			> $STORAGE_STATUS_TMP
+			for GLUSTER_VOL in `gluster volume list`; do
+				FILE_BACKEND_DIR=`kvm_get_gluster_backend_dir $GLUSTER_VOL`
+				if [ -d "$FILE_BACKEND_DIR" ]; then
+					for FILE_BACKEND in `ls $FILE_BACKEND_DIR/*`; do
+						VOLUME_FILENAME=`basename $FILE_BACKEND`
+						echo "$VOLUME_FILENAME:gluster:$resource_ip://$GLUSTER_VOL/$VOLUME_FILENAME" >> $STORAGE_STATUS_TMP
+					done
+				fi
+			done
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-ceph-deployment" ]; then
+			STORAGE_STATUS_TMP=$resource_id.lv.kvm-ceph-deployment.ident
+			> $STORAGE_STATUS_TMP
+			for CEPH_POOL in `ceph osd lspools`; do
+				for IMAGE_NAME in `rbd ls $CEPH_POOL`; do
+					echo "rbd:$CEPH_POOL/$IMAGE_NAME" >> $STORAGE_STATUS_TMP
+				done
+			done
+		fi
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?lvm_command=get_ident; then
+			openqrm_post_event 0 "post_identifier" 2 "openqrm-kvm" "Could not post the volume identifier to the openQRM-server at $OPENQRM_SERVER_IP!"
+		fi
+		rm -f $STORAGE_STATUS_TMP $STORAGE_STATUS_TMP.post
+		;;
+
+
+	resize)
+		if [ "$KVM_DEPLOYMENT_TYPE" == "kvm-bf-deployment" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "resize" 2 "openqrm-kvm" "Resize is not supported for local blockfile backends!"
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-lvm-deployment" ]; then
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			# aquire global lock for lvm operations
+			if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+				if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+					openqrm_global_lock aquire lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD $LOCK_TIME "Resize volume $KVM_IMAGE_NAME"
+				fi
+			fi
+			kvm_refresh_lvm
+			touch $SYNC_PROGRESS_DIR/$KVM_IMAGE_NAME
+			lvchange -ay -y /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME
+			CMD_ERR=`lvresize -L $KVM_IMAGE_SIZE /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Error lvm resisiging volume /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME! $CMD_ERR"
+
+				# release global lock
+				if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+					if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+						openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+					fi
+				fi
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+			# release global lock
+			if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+				if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+					openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+				fi
+			fi
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			if [ "$OPENQRM_PLUGIN_KVM_RESIZE_SNAPSHOTS_FILESYSTEM" == "true" ]; then
+				# resize partition and rootfs
+				if kvm_resize_fs /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME; then
+					openqrm_post_event 0 "resize" 5 "openqrm-kvm" "Resized logical volume $KVM_IMAGE_NAME on volume group $KVM_VOLUME_LOCATION."
+				else
+					openqrm_post_event 0 "resize" 2 "openqrm-kvm" "Failed resizing logical volume $KVM_IMAGE_NAME on volume group $KVM_VOLUME_LOCATION."
+				fi
+			fi
+			rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_NAME
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-gluster-deployment" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "resize" 2 "openqrm-kvm" "Resize is not supported for Gluster backends!"
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-ceph-deployment" ]; then
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			touch $SYNC_PROGRESS_DIR/$KVM_IMAGE_NAME
+
+			CMD_ERR=`rbd resize -p $KVM_VOLUME_LOCATION --image $KVM_IMAGE_NAME --size $KVM_IMAGE_SIZE --allow-shrink 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				openqrm_post_event 0 "add" 3 "openqrm-kvm" "Error resizing rbd volume rbd:$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME! $CMD_ERR"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+			fi
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			if [ "$OPENQRM_PLUGIN_KVM_RESIZE_SNAPSHOTS_FILESYSTEM" == "true" ]; then
+				kvm_resize_ceph_fs $KVM_IMAGE_NAME $KVM_VOLUME_LOCATION
+			fi
+			rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_NAME
+		fi
+		# in case we have a username + password post the updated list to the openQRM-server
+		if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+			# if we have an image name send size back to openQRM
+			if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD "$openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?lvm_command=set_image_size&kvm_image_name=$KVM_IMAGE_NAME&kvm_image_size=$KVM_IMAGE_SIZE"; then
+				openqrm_post_event 0 "add" 2 "openqrm-kvm" "Could post size of volume $KVM_IMAGE_NAME!"
+			fi
+			$0 post_lv -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD -v $KVM_VOLUME_LOCATION -t $KVM_DEPLOYMENT_TYPE $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+		fi
+		;;
+
+
+	clone)
+		# cloning is similar to snapshots but since lvm cannot (yet) create snapshots
+		# from snapshots we have to dd the origin (which may be a snapshot) to a
+		# new lvol.
+		if [ "$KVM_IMAGE_SNAPSHOT_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			kvm_usage
+		fi
+		if [ "$KVM_DEPLOYMENT_TYPE" == "kvm-bf-deployment" ]; then
+			# check that source fs-images exist
+			# notice : here the kvm-volume-location comes from the cloud-hook and uses the dirname of the rootfs-ident
+			FILE_BACKEND_DIR=`kvm_get_backend_dir $KVM_VOLUME_LOCATION`
+			if [ ! -e "$FILE_BACKEND_DIR/$KVM_IMAGE_NAME" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+				openqrm_post_event 0 "snap" 2 "openqrm-kvm" "Could not find $FILE_BACKEND_DIR/$KVM_IMAGE_NAME on the storage-server!"
+				exit 1
+			fi
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			# create locks for origin + snapshot
+			touch "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+			touch "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+			touch $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			# no plugin lock for copying
+			# we copy to a tmp name first, then move
+			# copying will take some time, as soon as we moved the auth-hook will succeed
+			# but not before copying has finished
+			# create long-term-action start event
+			openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 9 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+			# post exports early, we show the progress in the ui
+			if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+			    $0 post_sync_progress -n $KVM_IMAGE_SNAPSHOT_NAME -v $FILE_BACKEND_DIR -t kvm-bf-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true &
+			fi
+			# delay start sync
+			sleep 10
+
+			CMD_ERR=`/bin/cp -f $FILE_BACKEND_DIR/$KVM_IMAGE_NAME $FILE_BACKEND_DIR/$KVM_IMAGE_SNAPSHOT_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+			    openqrm_post_event 0 "clone" 2 "openqrm-kvm" "Could not copy target logical volume $KVM_IMAGE_NAME! $CMD_ERR"
+			    rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+			    rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+				openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+			    exit 1
+			fi
+			rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+			rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+			rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+			# stop sync-progress monitor and send sync-finished to openQRM
+			$0 post_sync_finished -n $KVM_IMAGE_SNAPSHOT_NAME -v $FILE_BACKEND_DIR -t kvm-bf-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+			# Get size of cloned image
+			ORIGIN_SIZE=$($KVM_QEMU_IMG info $FILE_BACKEND_DIR/$KVM_IMAGE_SNAPSHOT_NAME | grep ^"virtual size" | awk {' print $4 '} | sed -e s/\(//)
+			ORIGIN_SIZE=$(( $ORIGIN_SIZE / 1000 / 1000 ))
+
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-lvm-deployment" ]; then
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			RESIZE_FILESYSTEM=false
+			ORIGIN_SIZE=""
+			ORIGIN_VOLUME="/dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME"
+			# if source volume is a snapshot find out the size of the origin
+			VOLUME_IS_SNAPSHOT=`lvs --noheadings -o origin $ORIGIN_VOLUME | awk '{ print $1 }'`
+			if [ "$VOLUME_IS_SNAPSHOT" != "" ]; then
+				ORIGIN_VOLUME="/dev/$KVM_VOLUME_LOCATION/$VOLUME_IS_SNAPSHOT"
+			fi
+			ORIGIN_SIZE=`lvs --noheadings -o lv_size --units m --nosuffix $ORIGIN_VOLUME | awk '{ print $1 }' | cut -d'.' -f1`
+			if [ "$ORIGIN_SIZE" == "" ]; then
+			    openqrm_post_event 0 "clone" 2 "openqrm-kvm" "Could not find out origin volume size!"
+
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+    			exit 1
+			fi
+
+			# if the image size is set we clone and resize to the bigger image size
+			if [ "$KVM_IMAGE_SIZE" != "" ]; then
+				if (( $KVM_IMAGE_SIZE < $ORIGIN_SIZE )); then
+					openqrm_post_event 0 "clone" 2 "openqrm-kvm" "Clone size must not be smaller than the origin volume size! ( $KVM_IMAGE_SIZE > $ORIGIN_SIZE )"
+
+					openqrm_lock_queue release kvm $LOCK_TIME
+					trap '' EXIT
+
+					exit 1
+				elif [ "$KVM_IMAGE_SIZE" == "$ORIGIN_SIZE" ]; then
+					RESIZE_FILESYSTEM=false
+				else
+					ORIGIN_SIZE=$KVM_IMAGE_SIZE
+					RESIZE_FILESYSTEM=true
+				fi
+			fi
+
+			# create locks for origin + snapshot
+			touch "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+			touch "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+			touch $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+			# create long-term-action start event
+			openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 9 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+
+			# aquire global lock for lvm operations
+			if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+				if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+					openqrm_global_lock aquire lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD $LOCK_TIME "Cloning volume $KVM_IMAGE_NAME to $KVM_IMAGE_SNAPSHOT_NAME"
+				fi
+			fi
+			kvm_refresh_lvm
+			CMD_ERR=`lvcreate $OPENQRM_PLUGIN_KVM_LVCREATE_CUSTOM_PARAM -L$ORIGIN_SIZE""M -n$KVM_IMAGE_SNAPSHOT_NAME $KVM_VOLUME_LOCATION 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				openqrm_post_event 0 "clone" 2 "openqrm-kvm" "Could not create volume $KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+				openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+
+				# release global lock
+				if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+					if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+						openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+					fi
+				fi
+				openqrm_lock_queue release kvm $LOCK_TIME
+				trap '' EXIT
+
+    			exit 1
+			fi
+			lvchange -ay -y /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME
+			lvchange -ay -y /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_SNAPSHOT_NAME
+
+			# release global lock
+			if [ "$OPENQRM_PLUGIN_KVM_GLOBAL_LVM_LOCK" == "true" ]; then
+				if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+					openqrm_global_lock release lvm $KVM_OPENQRM_USERNAME $KVM_OPENQRM_PASSWORD
+				fi
+			fi
+
+			# post exports early, we show the progress in the ui
+			if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+				$0 post_sync_progress -n $KVM_IMAGE_SNAPSHOT_NAME -v $KVM_VOLUME_LOCATION -t kvm-lvm-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true &
+			fi
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+###### Caching start
+
+			IMAGE_CLONE_EXISTS=false
+			# check for the local cache dir
+			if [ "$OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE" != "" ] && [ "$KVM_IMAGE_CACHE" == "true" ]; then
+				if [ ! -d "$OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE" ]; then
+					mkdir -p "$OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE"
+				fi
+				# here we create a local zipped copy of the master image in the cache dir
+				if [ ! -f "$OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE/$KVM_IMAGE_NAME.gz" ]; then
+					openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 9 "kvm" "Caching volume $KVM_IMAGE_NAME on resource $resource_id"
+					CMD_ERR=`dd if=/dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME bs=64K | gzip -c  > $OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE/$KVM_IMAGE_NAME.gz`
+					if [ "$?" == 0 ] && [ -f "$OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE/$KVM_IMAGE_NAME.gz" ]; then
+						# copy from the local cloned master image
+						IMAGE_CLONE_EXISTS=true
+					else
+						CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+						# log error and copy directly from the master image
+						openqrm_post_event 0 "clone" 2 "openqrm-kvm" "Error caching volume $KVM_IMAGE_NAME! $CMD_ERR"
+						openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "Caching volume $KVM_IMAGE_NAME on resource $resource_id"
+					fi
+					openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "Caching volume $KVM_IMAGE_NAME on resource $resource_id"
+				else
+					# copy from the local cloned master image
+					GZ_SIZE=$(ls -l $OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE/$KVM_IMAGE_NAME.gz | awk '{ print $5 }')
+					sleep 2
+					while [ true ] ; do
+						CURRENT_SIZE=$(ls -l $OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE/$KVM_IMAGE_NAME.gz | awk '{ print $5 }')
+						if [ $CURRENT_SIZE == $GZ_SIZE ]; then
+							IMAGE_CLONE_EXISTS=true
+							break
+						else
+							GZ_SIZE=$CURRENT_SIZE
+							sleep 2
+						fi
+					done
+				fi
+			fi
+
+			sleep 2
+			if [ "$IMAGE_CLONE_EXISTS" == "true" ]; then
+				# copy content from cloned master
+				CMD_ERR=`nice --20 gunzip -c $OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE/$KVM_IMAGE_NAME.gz | dd of=/dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_SNAPSHOT_NAME bs=64K 2>&1`
+				if [ "$?" != 0 ]; then
+					CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+					rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+					openqrm_post_event 0 "clone" 2 "openqrm-kvm" "Error copying content for volume $KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+					rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+					rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+					openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+					exit 1
+				fi
+			else
+				# copy content directly from master
+				CMD_ERR=`nice --20 dd if=/dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME of=/dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_SNAPSHOT_NAME bs=64K 2>&1`
+				if [ "$?" != 0 ]; then
+					CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+					rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+					openqrm_post_event 0 "clone" 2 "openqrm-kvm" "Error cloning volume $KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+					rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+					rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+					openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+					exit 1
+				fi
+			fi
+
+###### Resize
+
+			if [ "$OPENQRM_PLUGIN_KVM_RESIZE_SNAPSHOTS_FILESYSTEM" == "true" ] && [ "$RESIZE_FILESYSTEM" == "true" ]; then
+				# resize partition and rootfs
+				if ! kvm_resize_fs /dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_SNAPSHOT_NAME; then
+					rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+					rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+					rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+					openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+				fi
+			fi
+
+			rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+			rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+			rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+			# stop sync-progress monitor and send sync-finished to openQRM
+			$0 post_sync_finished -n $KVM_IMAGE_SNAPSHOT_NAME -v $KVM_VOLUME_LOCATION -t kvm-lvm-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+
+
+
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-gluster-deployment" ]; then
+			FILE_BACKEND_DIR=`kvm_get_gluster_backend_dir $KVM_VOLUME_LOCATION`
+			if [ ! -e "$FILE_BACKEND_DIR/$KVM_IMAGE_NAME" ]; then
+				openqrm_unblock_starting_queue $FULL_COMMANDLINE
+				openqrm_post_event 0 "clone" 2 "openqrm-kvm" "Could not find $FILE_BACKEND_DIR/$KVM_IMAGE_NAME on the storage-server!"
+				exit 1
+			fi
+			# create locks for origin + snapshot
+			touch $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			touch "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+			touch "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+			# post exports early, we show the progress in the ui
+			openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 9 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+			if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+				$0 post_sync_progress -n $KVM_IMAGE_SNAPSHOT_NAME -v $KVM_VOLUME_LOCATION -t kvm-gluster-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true &
+			fi
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			CMD_ERR=`cp -af $FILE_BACKEND_DIR/$KVM_IMAGE_NAME $FILE_BACKEND_DIR/$KVM_IMAGE_SNAPSHOT_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				openqrm_post_event 0 "clone" 3 "openqrm-kvm" "Error cloning volume $FILE_BACKEND_DIR/$KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+				openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+				exit 1
+			fi
+			if ! `kvm_trigger_gluster_replication $KVM_VOLUME_LOCATION $KVM_IMAGE_SNAPSHOT_NAME`; then
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				openqrm_post_event 0 "clone" 3 "openqrm-kvm" "Error triggering replication for gluster:$resource_ip://$FILE_BACKEND_DIR/$KVM_IMAGE_SNAPSHOT_NAME!"
+				openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+				exit 1
+			fi
+			rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+			rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+
+			rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+			# stop sync-progress monitor and send sync-finished to openQRM
+			$0 post_sync_finished -n $KVM_IMAGE_SNAPSHOT_NAME -v $FILE_BACKEND_DIR -t kvm-gluster-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-ceph-deployment" ]; then
+
+			LOCK_TIME=`openqrm_lock_queue aquire kvm`
+			trap "openqrm_lock_queue release kvm $LOCK_TIME" EXIT
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+			# create locks for origin + snapshot
+			touch $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+			touch "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+			touch "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+			# post exports early, we show the progress in the ui
+			openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 9 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+			if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+				$0 post_sync_progress -n $KVM_IMAGE_SNAPSHOT_NAME -v $KVM_VOLUME_LOCATION -t kvm-ceph-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true &
+			fi
+
+			openqrm_lock_queue release kvm $LOCK_TIME
+			trap '' EXIT
+
+			# get volume size
+			CVOLINFO=`rbd info $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME`
+			ORIGIN_SIZE=`echo $CVOLINFO | sed -e "s#.*size ##" | awk '{ print $1 }'`
+
+			CMD_ERR=`rbd snap create $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				$0 post_sync_finished -n $KVM_IMAGE_SNAPSHOT_NAME -v $KVM_VOLUME_LOCATION -t kvm-ceph-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+				openqrm_post_event 0 "clone" 3 "openqrm-kvm" "Error creating snapshot for cloning volume $KVM_VOLUME_LOCATION/$KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+				openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+				exit 1
+			fi
+
+			CMD_ERR=`rbd snap protect $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				# try to cleanup first
+				rbd snap rm $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME 2>&1
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				$0 post_sync_finished -n $KVM_IMAGE_SNAPSHOT_NAME -v $KVM_VOLUME_LOCATION -t kvm-ceph-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+				openqrm_post_event 0 "clone" 3 "openqrm-kvm" "Error protecting snapshot volume $KVM_VOLUME_LOCATION/$KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+				openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+				exit 1
+			fi
+
+			CMD_ERR=`rbd clone $OPENQRM_PLUGIN_CEPH_IMAGE_FEATURE $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME $KVM_VOLUME_LOCATION/$KVM_IMAGE_SNAPSHOT_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				# try to cleanup first
+				rbd snap unprotect $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME 2>&1
+				rbd snap rm $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME 2>&1
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				$0 post_sync_finished -n $KVM_IMAGE_SNAPSHOT_NAME -v $KVM_VOLUME_LOCATION -t kvm-ceph-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+				openqrm_post_event 0 "clone" 3 "openqrm-kvm" "Error cloning volume $KVM_VOLUME_LOCATION/$KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+				openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+				exit 1
+			fi
+
+			CMD_ERR=`rbd flatten $KVM_VOLUME_LOCATION/$KVM_IMAGE_SNAPSHOT_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				# try to cleanup first
+				rbd snap unprotect $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME 2>&1
+				rbd snap rm $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME 2>&1
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				$0 post_sync_finished -n $KVM_IMAGE_SNAPSHOT_NAME -v $KVM_VOLUME_LOCATION -t kvm-ceph-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+				openqrm_post_event 0 "clone" 3 "openqrm-kvm" "Error syncing/flatten volume $KVM_VOLUME_LOCATION/$KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+				openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+				exit 1
+			fi
+
+			CMD_ERR=`rbd snap unprotect $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				$0 post_sync_finished -n $KVM_IMAGE_SNAPSHOT_NAME -v $KVM_VOLUME_LOCATION -t kvm-ceph-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+				openqrm_post_event 0 "clone" 3 "openqrm-kvm" "Error unprotecting snapshot $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+				openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+				exit 1
+			fi
+
+
+			CMD_ERR=`rbd snap rm $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME 2>&1`
+			if [ "$?" != 0 ]; then
+				CMD_ERR=`openqrm_format_error_msg $CMD_ERR`
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+				rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+				rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+				$0 post_sync_finished -n $KVM_IMAGE_SNAPSHOT_NAME -v $KVM_VOLUME_LOCATION -t kvm-ceph-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+				openqrm_post_event 0 "clone" 3 "openqrm-kvm" "Error removing snapshot $KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME@$KVM_IMAGE_SNAPSHOT_NAME! $CMD_ERR"
+				openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+				exit 1
+			fi
+
+
+			rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_NAME.sync_in_progress.$KVM_IMAGE_SNAPSHOT_NAME"
+			rm -f "$SYNC_PROGRESS_DIR/$KVM_VOLUME_LOCATION-$KVM_IMAGE_SNAPSHOT_NAME.clone_in_progress"
+			rm -f $SYNC_PROGRESS_DIR/$KVM_IMAGE_SNAPSHOT_NAME
+			# stop sync-progress monitor and send sync-finished to openQRM
+			$0 post_sync_finished -n $KVM_IMAGE_SNAPSHOT_NAME -v $KVM_VOLUME_LOCATION -t kvm-ceph-deployment -u $KVM_OPENQRM_USERNAME -p $KVM_OPENQRM_PASSWORD $OPENQRM_UI_USER_PARAMETER --openqrm-internal-cmd true
+		fi
+
+		# create long-term-action finished event
+		openqrm_post_event 0 "$KVM_IMAGE_SNAPSHOT_NAME" 10 "kvm" "Started to clone $KVM_IMAGE_SNAPSHOT_NAME from $KVM_IMAGE_NAME"
+
+		# here we notify openQRM that cloning has finished
+		# in case we have a username + password post the updated list to the openQRM-server
+		# and notify openQRM that cloning has finished
+		if [ "$KVM_OPENQRM_USERNAME" != "" ] && [ "$KVM_OPENQRM_PASSWORD" != "" ]; then
+			CLONE_FINISHED="$KVM_IMAGE_SNAPSHOT_NAME.clone"
+			touch $CLONE_FINISHED
+			if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD  --post-file=`$OPENQRM_POSTENCODE $CLONE_FINISHED` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?lvm_command=clone_finished; then
+				openqrm_post_event 0 "clone" 2 "openqrm-kvm" "Could not post clone-finished status to the openQRM-server at $OPENQRM_SERVER_IP!"
+			fi
+			# if we have an image name send size back to openQRM
+			if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD "$openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?lvm_command=set_image_size&kvm_image_name=$KVM_IMAGE_SNAPSHOT_NAME&kvm_image_size=$ORIGIN_SIZE"; then
+				openqrm_post_event 0 "add" 2 "openqrm-kvm" "Could post size of volume $KVM_IMAGE_SNAPSHOT_NAME!"
+			fi
+			rm -f $CLONE_FINISHED $CLONE_FINISHED.post
+		fi
+		openqrm_post_event 0 "clone" 5 "openqrm-kvm" "Cloned volume $KVM_IMAGE_NAME to $KVM_IMAGE_SNAPSHOT_NAME on volume group $KVM_VOLUME_LOCATION"
+		;;
+
+
+	post_sync_progress)
+		echo "Posting progress of the sync action for volume $KVM_IMAGE_NAME to the openQRM-server"
+		STORAGE_STATUS_TMP=$resource_id.lvm.$KVM_IMAGE_NAME.sync_progress
+		# posting also the root-device identifier once
+		VOLUME_ROOT_DEVICE_IDENTIFIER=$resource_id.$KVM_IMAGE_NAME.root_device
+		if [ "$KVM_DEPLOYMENT_TYPE" == "kvm-bf-deployment" ]; then
+			FILE_BACKEND_DIR=`kvm_get_backend_dir $KVM_VOLUME_LOCATION`
+			echo "$FILE_BACKEND_DIR/$KVM_IMAGE_NAME" > $VOLUME_ROOT_DEVICE_IDENTIFIER
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-lvm-deployment" ]; then
+			echo "/dev/$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME" > $VOLUME_ROOT_DEVICE_IDENTIFIER
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-gluster-deployment" ]; then
+			echo "gluster:$resource_ip://$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME" > $VOLUME_ROOT_DEVICE_IDENTIFIER
+		elif [ "$KVM_DEPLOYMENT_TYPE" == "kvm-ceph-deployment" ]; then
+			echo "rbd:$KVM_VOLUME_LOCATION/$KVM_IMAGE_NAME" > $VOLUME_ROOT_DEVICE_IDENTIFIER
+		fi
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD --post-file=`$OPENQRM_POSTENCODE $VOLUME_ROOT_DEVICE_IDENTIFIER` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?lvm_command=get_sync_progress; then
+			kvm_log "post_sync_progress" "Could not post the root-device ident for volume $KVM_IMAGE_NAME to openQRM at $OPENQRM_SERVER_IP."
+		fi
+		rm -f $VOLUME_ROOT_DEVICE_IDENTIFIER $VOLUME_ROOT_DEVICE_IDENTIFIER.post
+		# sync in progress
+		for SEQ in `seq 0 99`; do
+		    # check if we are finished already
+		    if [ -f "$STORAGE_STATUS_TMP" ]; then
+			CURRENT_PROGRESS=`cat $STORAGE_STATUS_TMP`
+			if [ "$CURRENT_PROGRESS" == "100" ]; then
+			    exit 0
+			fi
+		    fi
+		    echo "$SEQ" > $STORAGE_STATUS_TMP
+		    if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?lvm_command=get_sync_progress; then
+			    kvm_log "post_sync_progress" "Could not post the sync progress for volume $KVM_IMAGE_NAME to openQRM at $OPENQRM_SERVER_IP."
+		    fi
+		    rm -f $STORAGE_STATUS_TMP $STORAGE_STATUS_TMP.post
+		    sleep 2
+		done
+		;;
+
+
+	post_sync_finished)
+		echo "Posting finished for volume $KVM_IMAGE_NAME to the openQRM-server"
+		STORAGE_STATUS_TMP=$resource_id.lvm.$KVM_IMAGE_NAME.sync_progress
+		echo "100" > $STORAGE_STATUS_TMP
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$KVM_OPENQRM_USERNAME --http-password=$KVM_OPENQRM_PASSWORD --post-file=`$OPENQRM_POSTENCODE $STORAGE_STATUS_TMP` $openqrm_web_protocol://$OPENQRM_SERVER_IP/openqrm/base/plugins/kvm/kvm-action.php?lvm_command=get_sync_finished; then
+			kvm_log "post_sync_finished" "Could not post the sync progress for volume $KVM_IMAGE_NAME to openQRM at $OPENQRM_SERVER_IP."
+		fi
+		rm -f $STORAGE_STATUS_TMP $STORAGE_STATUS_TMP.post
+		;;
+
+
+	purge_cache)
+		if [ "$KVM_IMAGE_NAME" == "" ]; then
+			kvm_usage
+		fi
+		if [ "$OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE" == "" ]; then
+			echo "No LVM image cache configured"
+			exit 1
+		fi
+		if [ ! -d "$OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE" ]; then
+			echo "No LVM image cache existing"
+			exit 1
+		fi
+		if [ "$KVM_IMAGE_NAME" == "all" ]; then
+			rm -f $OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE/*.gz
+			echo "Purged LVM image cache"
+		else
+			if [ -e "$OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE/$KVM_IMAGE_NAME.gz" ]; then
+				rm -f $OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE/$KVM_IMAGE_NAME.gz
+				echo "Purged LVM volume $KVM_IMAGE_NAME from image cache"
+			else
+				echo "Volume $KVM_IMAGE_NAME does not exists in the image cache"
+			fi
+		fi
+		;;
+
+	list_cache)
+		if [ "$OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE" == "" ]; then
+			echo "No LVM image cache configured"
+			exit 1
+		fi
+		if [ ! -d "$OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE" ]; then
+			echo "No LVM image cache existing"
+			exit 1
+		fi
+		basename `ls $OPENQRM_PLUGIN_KVM_LOCAL_IMAGE_CACHE/*.gz 2>/dev/null | sed -e "s/\.gz//g"` 2>/dev/null
+		;;
+
+
+
+	*)
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		kvm_usage
+		;;
+
+
+esac
+

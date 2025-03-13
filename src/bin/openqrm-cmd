@@ -1,0 +1,219 @@
+#!/bin/bash
+# this is the openQRM commandline client
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+export PATH=$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/X11R6/bin
+
+if [ "$OPENQRM_SERVER_BASE_DIR" == "" ]; then
+	OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../..
+	OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+fi
+export OPENQRM_SERVER_BASE_DIR
+# check if running on the server or on a managed resource
+if [ -f "$OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions" ]; then
+	# we are running on the server
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+	openqrm_server_get_config
+	OPENQRM_SERVER_IP=$OPENQRM_SERVER_IP_ADDRESS
+	resource_id=0
+	resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+else
+	# we are running on a managed resource
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+	. $OPENQRM_RESOURCE_PARAMETER_FILE
+fi
+WHOAMI=`whoami`
+FULL_COMMAND=`echo $@ | sed -e 's/-u [^ ]* /-u xxxxxxxx /g' -e 's/-p [^ ]*/-p xxxxxxxx /g'`
+export LANGUAGE=C
+export LANG=C
+export LC_ALL=C
+
+function stop_openqrm_monitord() {
+	killall openqrm-monitord 1>/dev/null 2>&1
+	# in case we do not have killall (e.g. on debian-minimal install) be sure to stop the openqrm-agents anyway
+	for OPENQRM_PID in `ps ax 2>/dev/null | grep openqrm-monitord | grep -v grep | awk {' print $1 '}`; do
+		kill $OPENQRM_PID
+	done
+}
+
+
+
+# check which command queue to use
+# ui-queue : all commands running on behalf of a ui user
+# bg-queue : all commands initiated from the plugins or the base engine
+
+UI_CMD_QUEUE="ui-cmd-queue"
+BG_CMD_QUEUE="bg-cmd-queue"
+CMD_QUEUE=$BG_CMD_QUEUE
+if echo $@ | grep "\-\-openqrm\-ui\-user" 1>/dev/null; then
+	CMD_QUEUE=$UI_CMD_QUEUE
+fi
+
+# check the command mode to use
+# raw
+#    - shell command executed by the receiver in foreground
+#    - receiver queue waits until command finished
+#    - output is set to stdout
+#    - good for commands with a short execution time
+#
+# regular (or not set)
+#    - shell command executed by the receiver in foreground
+#    - receiver queue waits until command finished
+#    - good for commands with a short execution time
+#
+# background
+#    - shell command executed by the receiver in background (with &)
+#    - receiver queue does not wait until command finished
+#    - good for commands with a medium to long to execution time (and using screen themselves)
+#
+# fork
+#    - shell command executed by the receiver in background (with a detached screen)
+#    - receiver queue does not wait until command finished
+#    - good for commands with a medium to long to execution time (and not using screen themselves)
+
+CMD_EXEC_MODE_DEFAULT="regular"
+if echo $@ | grep "\-\-openqrm\-cmd\-mode" 1>/dev/null; then
+	CMD_MODE=`echo $@ | sed -e "s#.*--openqrm-cmd-mode##g" | awk '{ print $1 }' 2>/dev/null`
+	if [ "$CMD_MODE" == "" ]; then
+		CMD_MODE=$CMD_EXEC_MODE_DEFAULT
+	fi
+else
+	CMD_MODE=$CMD_EXEC_MODE_DEFAULT
+fi
+
+# aquire lock for the global receiver command bg queue
+LOCK_TIME=`openqrm_lock_queue aquire $CMD_QUEUE`
+trap "openqrm_lock_queue release $CMD_QUEUE $LOCK_TIME" EXIT
+# aquire global command-starting-lock, scripts have 10 sec. to
+# eventually fork and aquire a lock on their subsection
+lockfile -s 1 -r 1 -l 10 $OPENQRM_CMD_QUEUE_STARTING_LOCK.$CMD_QUEUE
+echo "$FULL_COMMAND" > $OPENQRM_CMD_QUEUE_STARTING_LOCK.$CMD_QUEUE
+echo "openQRM engine: Running exec mode $CMD_MODE: $FULL_COMMAND" | logger
+
+################################################################################
+# special handling for reboot + halt
+################################################################################
+case "$@" in
+	reboot)
+		rm -f $OPENQRM_CMD_QUEUE_STARTING_LOCK.$CMD_QUEUE
+		openqrm_lock_queue release $CMD_QUEUE $LOCK_TIME
+		trap '' EXIT
+		stop_openqrm_monitord
+		sleep 2 && /sbin/reboot &
+		exit 0
+		;;
+	halt)
+		rm -f $OPENQRM_CMD_QUEUE_STARTING_LOCK.$CMD_QUEUE
+		openqrm_lock_queue release $CMD_QUEUE $LOCK_TIME
+		trap '' EXIT
+		stop_openqrm_monitord
+		sleep 2 && /sbin/poweroff &
+		exit 0
+		;;
+esac
+
+
+################################################################################
+# run openqrm functions in foreground
+################################################################################
+if [ ! -x "$1" ]; then
+	CMD_OUTPUT=$($@ 2>&1)
+	CMD_RESULT=$?
+	sleep 0.5
+	# if we ran a function remove the starting lock now
+	rm -f $OPENQRM_CMD_QUEUE_STARTING_LOCK.$CMD_QUEUE
+
+else
+
+	################################################################################
+	# run commands according their exec-mode
+	################################################################################
+
+	case "$CMD_MODE" in
+		# regular mode
+		raw)
+			$@
+			CMD_RESULT=$?
+			sleep 0.5
+			;;
+
+		# regular mode
+		regular)
+			CMD_OUTPUT=$($@ 2>&1)
+			CMD_RESULT=$?
+			sleep 0.5
+			;;
+
+		# background mode
+		background)
+			$@ 1>/dev/null 2>/dev/null  &
+			CMD_OUTPUT=""
+			CMD_RESULT=0
+			sleep 0.5
+			;;
+
+		# fork mode
+		fork)
+			if [ -x /usr/bin/screen.real ]; then
+				RUNSCREEN="/usr/bin/screen.real"
+			else
+				RUNSCREEN=`which screen`
+			fi
+			SCREEN_NAME=`date +%s%N`
+			$RUNSCREEN -dmS $SCREEN_NAME "$@"
+			CMD_OUTPUT=""
+			CMD_RESULT=0
+			sleep 0.5
+			;;
+	esac
+
+fi
+
+################################################################################
+# releaselock for the global receiver command bg queue
+openqrm_lock_queue release $CMD_QUEUE $LOCK_TIME
+trap '' EXIT
+
+
+# error reporting
+if [ "$CMD_RESULT" != "0" ]; then
+	if [ ! -d /var/log/openqrm ]; then
+		mkdir -p /var/log/openqrm
+	fi
+	FORMAT_COMMAND=`echo $FULL_COMMAND | cut -b1-100`".."
+	FORMAT_COMMAND_OUTPUT=`openqrm_format_error_msg $CMD_OUTPUT`
+	rm -f /var/log/openqrm/$$.log
+	echo "ERROR: openqrm-cmd failed with $CMD_OUTPUT while running: $FULL_COMMAND" | logger
+	openqrm_post_event 0 "base-engine" 2 "openqrm-cmd" "ERROR $FORMAT_COMMAND_OUTPUT on resource $resource_id running: $FORMAT_COMMAND"
+	exit 1
+fi
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,81 @@
+#!/bin/bash
+# this is the boot-service init script for the linuxcoe resources
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+# for including the package functions
+export OPENQRM_SOURCE_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/"
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+. $OPENQRM_RESOURCE_PARAMETER_FILE
+OPENQRM_SERVER_IP=$resource_openqrmserver
+# define wget to use with https
+if [ "$openqrm_web_protocol" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate"
+fi
+# do not run on idle resources
+if [ "$resource_image" == "idle" ]; then
+	exit 0
+fi
+
+
+function linuxcoe_start() {
+	echo "Starting the openQRM linuxcoe-plugin"
+	linuxcoe_stop 1>/dev/null 2>&1
+	return 0
+}
+
+
+function linuxcoe_stop() {
+	echo "Stopping the openQRM linuxcoe-plugin"
+	return 0
+}
+
+
+
+
+
+case "$1" in
+	start)
+		linuxcoe_start
+		;;
+	stop)
+		linuxcoe_stop
+		;;
+	restart)
+		linuxcoe_stop
+		sleep 1
+		linuxcoe_start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+
+esac
+exit $?
+
+
+
+
+
+
+
+
+
+
+
+
+

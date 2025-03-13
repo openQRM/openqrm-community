@@ -1,0 +1,350 @@
+#!/bin/bash
+# init script for the openQRM lvm-storage-plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/include/openqrm-plugin-lvm-storage-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/etc/openqrm-plugin-lvm-storage.conf
+
+
+LINE_IFS='
+'
+
+function openqrm_plugin_lvm-storage_start() {
+	echo "Starting the openQRM lvm-storage-plugin"
+	touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/lvm-storage/.running
+
+	if [ "$LVM_AOE_STORAGE_AUTO_START" == "yes" ]; then
+	   # make sure vbladed is stopped, not using the init script here because this may exit 1
+		for VPID in `ps ax | grep vblade | grep -v grep | awk {' print $1 '}`; do
+			kill $VPID
+		done
+		killall vblade 1>/dev/null 2>&1
+		#openqrm_plugin_lvm-storage_stop 1>/dev/null 2>&1
+
+		# aoe
+		mkdir -p /var/run/vblade/
+		if [ -x "/etc/init.d/vblade" ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d vblade start
+			else
+				/etc/init.d/vblade start
+			fi
+		else
+			if [ -f $VBLADECONF ]; then
+				if which vbladed 1>/dev/null; then
+					echo "Starting vblades ..."
+					OLD_IFS=$IFS
+					IFS=$LINE_IFS
+					for VBLADE_L in `cat $VBLADECONF | grep -v '#' | sed '/^$/d'`; do
+						V_INTERFACE=`echo $VBLADE_L | awk {' print $1 '}`
+						V_SHELF=`echo $VBLADE_L | awk {' print $2 '}`
+						V_SLOT=`echo $VBLADE_L | awk {' print $3 '}`
+						V_IMAGE=`echo $VBLADE_L | awk {' print $4 '}`
+						V_ALLOWED_MAC=`echo $VBLADE_L | awk {' print $5 '}`
+						vbladed $V_SHELF $V_SLOT $V_INTERFACE $V_IMAGE
+					done
+					IFS=$OLD_IFS
+				fi
+			fi
+		fi
+	fi
+	if [ "$LVM_NFS_STORAGE_AUTO_START" == "yes" ]; then
+		if [ -x "/etc/init.d/nfs-kernel-server" ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d nfs-kernel-server start
+			else
+				/etc/init.d/nfs-kernel-server start
+			fi
+		fi
+		if [ -x "/etc/init.d/nfs" ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d nfs start
+			else
+				/etc/init.d/nfs start
+			fi
+		fi
+		if [ -x "/etc/init.d/nfslock" ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d nfslock start
+			else
+				/etc/init.d/nfslock start
+			fi
+		fi
+		# for Suse
+		if [ -x /etc/init.d/nfsserver ]; then
+			/etc/init.d/nfsserver start
+		fi
+	fi
+	if [ "$LVM_ISCSI_STORAGE_AUTO_START" == "yes" ]; then
+		if [ -x "/etc/init.d/iscsi-target" ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d iscsi-target start
+			else
+				/etc/init.d/iscsi-target start
+			fi
+		elif [ -x /etc/init.d/iscsitarget ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d iscsitarget start
+			else
+				/etc/init.d/iscsitarget start
+			fi
+		fi
+	fi
+
+}
+
+
+function openqrm_plugin_lvm-storage_stop() {
+	echo "Stopping the openQRM lvm-storage-plugin"
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/lvm-storage/.running
+
+	if [ "$LVM_AOE_STORAGE_AUTO_START" == "yes" ]; then
+		# aoe
+		if [ -x "/etc/init.d/vblade" ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d vblade stop
+			else
+				/etc/init.d/vblade stop
+				for VPID in `ps ax | grep vblade | grep -v grep | awk {' print $1 '}`; do
+					kill $VPID
+				done
+			fi
+		else
+			if [ -f $VBLADECONF ]; then
+				echo "Stopping vblades ..."
+				OLD_IFS=$IFS
+				IFS=$LINE_IFS
+				for VBLADE_L in `cat $VBLADECONF | grep -v '#' | sed '/^$/d'`; do
+					V_INTERFACE=`echo $VBLADE_L | awk {' print $1 '}`
+					V_SHELF=`echo $VBLADE_L | awk {' print $2 '}`
+					V_SLOT=`echo $VBLADE_L | awk {' print $3 '}`
+					V_IMAGE=`echo $VBLADE_L | awk {' print $4 '}`
+					V_ALLOWED_MAC=`echo $VBLADE_L | awk {' print $5 '}`
+					for VBLADE_PID in `ps ax | grep vblade | grep -w $V_IMAGE | awk {' print $1 '}`; do
+						kill $VBLADE_PID
+					done
+				done
+				IFS=$OLD_IFS
+			fi
+			killall vblade 1>/dev/null 2>&1
+		fi
+	fi
+
+	if [ "$LVM_NFS_STORAGE_AUTO_START" == "yes" ]; then
+		if [ -x "/etc/init.d/nfs-kernel-server" ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d nfs-kernel-server stop
+			else
+				/etc/init.d/nfs-kernel-server stop
+			fi
+		fi
+		if [ -x "/etc/init.d/nfs" ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d nfs stop
+			else
+				/etc/init.d/nfs stop
+			fi
+		fi
+		if [ -x "/etc/init.d/nfslock" ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d nfslock stop
+			else
+				/etc/init.d/nfslock stop
+			fi
+		fi
+		# for Suse
+		if [ -x /etc/init.d/nfsserver ]; then
+			/etc/init.d/nfsserver stop
+		fi
+	fi
+	if [ "$LVM_ISCSI_STORAGE_AUTO_START" == "yes" ]; then
+		if [ -x "/etc/init.d/iscsi-target" ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d iscsi-target stop
+			else
+				/etc/init.d/iscsi-target stop
+			fi
+		elif [ -x /etc/init.d/iscsitarget ]; then
+			if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+				invoke-rc.d iscsitarget stop
+			else
+				/etc/init.d/iscsitarget stop
+			fi
+		fi
+	fi
+}
+
+
+function openqrm_plugin_lvm-storage_uninstall() {
+	local USERNAME=$1
+	local PASSWORD=$2
+	if [ "$USERNAME" == "" ] && [ "$PASSWORD" == "" ]; then
+		echo -n "lvm-storage: Please give a username to uninstall the plugin : "
+		read USERNAME
+		echo
+		echo -n "lvm-storage: Please give the password for user $USERNAME : "
+		read PASSWORD
+		echo
+	fi
+	echo "Uninstalling the openQRM lvm-storage-plugin"
+	openqrm_plugin_lvm-storage_stop
+	openqrm_server_remove_deployment_type $USERNAME $PASSWORD lvm-aoe-deployment
+	openqrm_server_remove_deployment_type $USERNAME $PASSWORD lvm-iscsi-deployment
+	openqrm_server_remove_deployment_type $USERNAME $PASSWORD lvm-nfs-deployment
+	openqrm_server_remove_deployment_type $USERNAME $PASSWORD custom-iscsi-deployment
+	openqrm_server_remove_deployment_type $USERNAME $PASSWORD custom-nfs-deployment
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/lvm-storage
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/boot-service-lvm-storage.tgz
+
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.lvm-aoe-deployment
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.lvm-iscsi-deployment
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.custom-iscsi-deployment
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.custom-nfs-deployment
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.lvm-nfs-deployment
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.lvm-aoe-deployment.php
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.lvm-iscsi-deployment.php
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.custom-iscsi-deployment.php
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.custom-nfs-deployment.php
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.lvm-nfs-deployment.php
+
+	# remove only if nfs/iscsi/aoe is not enabled
+	if ! ls $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/plugins | grep iscsi-storage 1>/dev/null 2>&1; then
+		if ! ls $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/plugins | grep netapp-storage 1>/dev/null 2>&1; then
+			rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/iscsid
+			rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/iscsiadm
+		fi
+	fi
+	if ! ls $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/plugins | grep aoe-storage 1>/dev/null 2>&1; then
+		rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/aoe-interfaces
+		rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/aoe-discover
+		rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/aoe-stat
+		rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/aoe-mkdevs
+		rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/aoe-mkshelf
+	fi
+
+}
+
+function openqrm_plugin_lvm-storage_init() {
+	local USERNAME=$1
+	local PASSWORD=$2
+	if [ "$USERNAME" == "" ] && [ "$PASSWORD" == "" ]; then
+		echo -n "lvm-storage: Please give a username to init the plugin : "
+		read USERNAME
+		echo
+		echo -n "lvm-storage: Please give the password for user $USERNAME : "
+		read PASSWORD
+		echo
+	fi
+	echo "Initializing the openQRM lvm-storage-plugin"
+	openqrm_server_add_deployment_type $USERNAME $PASSWORD lvm-aoe-deployment lvm-aoe-deployment "Lvm Aoe-root deployment" lvm-storage "Lvm Storage Server (Aoe)"
+	openqrm_server_add_deployment_type $USERNAME $PASSWORD lvm-iscsi-deployment lvm-iscsi-deployment "Lvm Iscsi-root deployment" lvm-storage "Lvm Storage Server (Iscsi)"
+	openqrm_server_add_deployment_type $USERNAME $PASSWORD lvm-nfs-deployment lvm-nfs-deployment "Lvm Nfs-root deployment" lvm-storage "Lvm Storage Server (Nfs)"
+	openqrm_server_add_deployment_type $USERNAME $PASSWORD custom-iscsi-deployment custom-iscsi-deployment "Custom iSCSI-root deployment" lvm-storage "Custom Storage Server (iSCSI)"
+	openqrm_server_add_deployment_type $USERNAME $PASSWORD custom-nfs-deployment custom-nfs-deployment "Custom NFS-root deployment" lvm-storage "Custom Storage Server (NAS/NFS)"
+
+	# linking the web dir
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/lvm-storage
+	# link the boot-service
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/boot-service-lvm-storage.tgz $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/boot-service-lvm-storage.tgz
+	# linking the root mount hooks
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/root-mount.lvm-aoe-deployment $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.lvm-aoe-deployment
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/root-mount.lvm-iscsi-deployment $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.lvm-iscsi-deployment
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/root-mount.custom-iscsi-deployment $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.custom-iscsi-deployment
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/root-mount.custom-nfs-deployment $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.custom-nfs-deployment
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/root-mount.lvm-nfs-deployment $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/root-mount.lvm-nfs-deployment
+	# linking the image deployment parameters menu
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/image.lvm-aoe-deployment.php $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.lvm-aoe-deployment.php
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/image.lvm-iscsi-deployment.php $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.lvm-iscsi-deployment.php
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/image.custom-iscsi-deployment.php $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.custom-iscsi-deployment.php
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/image.custom-nfs-deployment.php $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.custom-nfs-deployment.php
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/image.lvm-nfs-deployment.php $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/image.lvm-nfs-deployment.php
+
+	# copying iscsid to boot-service dir
+	if [ ! -x $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/iscsid ]; then
+		cp -f `which iscsid` $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/
+	fi
+	# copying iscsiadm to boot-service dir
+	if [ ! -x $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/iscsiadm ]; then
+		cp -f `which iscsiadm` $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/
+	fi
+
+	# copying aoe-interfaces to boot-service dir
+	if [ ! -x $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/aoe-interfaces ]; then
+		cp -f `which aoe-interfaces` $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/
+	fi
+	# copying aoe-discover to boot-service dir
+	if [ ! -x $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/aoe-discover ]; then
+		cp -f `which aoe-discover` $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/
+	fi
+	# copying aoe-stat to boot-service dir
+	if [ ! -x $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/aoe-stat ]; then
+		cp -f `which aoe-stat` $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/
+	fi
+	# copying aoe-mkdevs to boot-service dir
+	if [ ! -x $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/aoe-mkdevs ]; then
+		cp -f `which aoe-mkdevs` $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/
+		# remove the axwwww from the ps cmd in aoe-mkdevs
+		sed -i -e "s/axwwww//g" $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/aoe-mkdevs
+	fi
+	# copying aoe-mkshelf to boot-service dir
+	if [ ! -x $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/aoe-mkshelf ]; then
+		cp -f `which aoe-mkshelf` $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/
+		# remove the axwwww from the ps cmd in aoe-mkshelf
+		sed -i -e "s/axwwww//g" $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/aoe-mkshelf
+	fi
+	# create storage dir for stat files
+	mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/storage
+	chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/storage
+	echo "Order deny,allow" > $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/storage/.htaccess
+	echo "Deny from all" >> $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/lvm-storage/web/storage/.htaccess
+
+}
+
+USER=$2
+PASS=$3
+
+case "$1" in
+	start)
+		openqrm_plugin_lvm-storage_start
+		;;
+	stop)
+		openqrm_plugin_lvm-storage_stop
+		;;
+	restart)
+		openqrm_plugin_lvm-storage_stop
+		sleep 1
+		openqrm_plugin_lvm-storage_start
+		;;
+	init)
+		openqrm_plugin_lvm-storage_init $USER $PASS
+		;;
+	uninstall)
+		openqrm_plugin_lvm-storage_uninstall $USER $PASS
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|init|uninstall}"
+		exit 1
+
+esac
+exit $?
+
+
+
+

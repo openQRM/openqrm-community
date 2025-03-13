@@ -1,0 +1,25 @@
+.htmlobject_table .appliance {
+	width: 350px;
+}
+.htmlobject_table .action {
+	width: 120px;
+	text-align: right;
+}
+
+
+
+
+
+#puppet_groups .htmlobject_box .left {
+	float: right;
+	text-align: left;
+	width: 600px;
+}
+#puppet_groups .htmlobject_box .right {
+	width: 30px;
+	float: right;
+	padding: 4px 0 0 0;
+}
+#buttons {
+	margin: 10px 0 0 0;
+}

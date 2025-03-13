@@ -1,0 +1,127 @@
+#!/bin/bash
+# init script for the openQRM sshterm plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/sshterm/include/openqrm-plugin-sshterm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/sshterm/etc/openqrm-plugin-sshterm.conf
+# for the post-event to work
+openqrm_server_get_config
+OPENQRM_SERVER_IP=$OPENQRM_SERVER_IP_ADDRESS
+resource_id=0
+resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+# which screen binary to use
+if [ -x /usr/bin/screen.real ]; then
+	RUNSCREEN="/usr/bin/screen.real"
+else
+	RUNSCREEN=`which screen`
+fi
+
+
+function openqrm_plugin_sshterm_start() {
+	echo "Starting the openQRM sshterm-plugin"
+	local CURRENTDIR=`pwd`
+	openqrm_plugin_sshterm_stop 1>/dev/null 2>&1
+	# generate cert
+	cd $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/sshterm/ajaxterm/
+
+	if [ ! -f /root/.ajaxterm/ajaxterm.pem ]; then
+		umask 077
+		mkdir -p /root/.ajaxterm/
+		openssl req  -config "make_certificate.cfg" -keyout "/root/.ajaxterm/ajaxterm.pem" -newkey rsa:1024 -nodes -x509 -days 365 -out "/root/.ajaxterm/ajaxterm.pem"
+	fi
+	# patch SocketServer.py for python 2.7
+	# webshell/python bug http://code.google.com/p/web-shell/issues/detail?id=67&q=2.7
+	if [ -f /usr/lib/python2.7/SocketServer.py ]; then
+		if [ ! -f /usr/lib/python2.7/SocketServer.py.openqrm-backup ]; then
+			cp -f /usr/lib/python2.7/SocketServer.py /usr/lib/python2.7/SocketServer.py.openqrm-backup
+		fi
+		# pls preserve the line breaks in the following sed command
+		if ! grep openQRM /usr/lib/python2.7/SocketServer.py 1>/dev/null; then
+			sed -i -e 's/request.shutdown(socket.SHUT_WR)/request.shutdown(socket.SHUT_WR)\
+		# openQRM: fix for webshell in combination with python 2\.7\
+        except TypeError:\
+            request.shutdown()\
+/' /usr/lib/python2.7/SocketServer.py
+		fi
+	fi
+	# start the ajaxterm
+	SCREEN_NAME=`date +%T%x | sed -e "s/://g" | sed -e "s#/##g"`
+	$RUNSCREEN -dmS $SCREEN_NAME ./ajaxterm.py --host=0.0.0.0 --port=$OPENQRM_PLUGIN_WEBSHELL_PORT  --cert=/root/.ajaxterm/ajaxterm.pem
+	cd $CURRENTDIR
+	touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/sshterm/.running
+	return 0
+}
+
+function openqrm_plugin_sshterm_stop() {
+	echo "Stopping the openQRM sshterm-plugin"
+	AJAXTERM_PID=`ps ax | grep ajaxterm.py | grep -v grep | awk {' print $1 '}`
+	for PID in $AJAXTERM_PID; do
+		kill $PID
+	done
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/sshterm/.running
+	return 0
+}
+
+
+function openqrm_plugin_sshterm_init() {
+	echo "Initializing the openQRM sshterm-plugin"
+	# linking the web dir
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/sshterm/web $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/sshterm
+	# link the boot-service
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/sshterm/web/boot-service-sshterm.tgz $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/boot-service-sshterm.tgz
+	return 0
+}
+
+
+function openqrm_plugin_sshterm_uninstall() {
+	echo "Uninstalling the openQRM sshterm-plugin"
+	openqrm_plugin_sshterm_stop
+	# remove bootservice
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/boot-service-sshterm.tgz
+	# unlinking the web dir
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/sshterm
+}
+
+
+case "$1" in
+	start)
+		openqrm_plugin_sshterm_start
+		;;
+	stop)
+		openqrm_plugin_sshterm_stop
+		;;
+	restart)
+		openqrm_plugin_sshterm_stop
+		sleep 1
+		openqrm_plugin_sshterm_start
+		;;
+	init)
+		openqrm_plugin_sshterm_init
+		;;
+	uninstall)
+		openqrm_plugin_sshterm_uninstall
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|init|uninstall|createcert}"
+		exit 1
+
+esac
+exit $?
+
+

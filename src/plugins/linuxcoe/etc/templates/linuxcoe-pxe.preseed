@@ -1,0 +1,12 @@
+default linux
+
+label linux
+kernel boot/@@OPENQRM_BOOTIMAGE_KERNEL@@
+append ramdisk_size=131072 initrd=boot/@@OPENQRM_BOOTIMAGE_INITRD@@ locale=en_US console-setup/layoutcode=en_US languagechooser/language-name=@@LINUXCOE_INSTALL_LANGUAGE@@ interface=eth0 auto=true preseed/locale=en_US kbd-chooser/method=us preseed/url=http://@@OPENQRM_SERVER_IP_ADDRESS@@/openqrm/boot-service/lcoe/preseed.@@OPENQRM_RESOURCE_ID@@-@@LINUXCOE_PROFILE_NAME@@.cfg root=/dev/ram rw debconf/priority=critical debian-installer/framebuffer=false
+ipappend 3
+
+
+label local
+LOCALBOOT 0
+
+

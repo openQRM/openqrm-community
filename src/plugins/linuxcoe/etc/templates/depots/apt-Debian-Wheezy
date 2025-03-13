@@ -1,0 +1,7 @@
+
+deb @METHOD@ftp.de.debian.org/debian wheezy main contrib non-free
+#deb-src deb @METHOD@ftp.us.debian.org/debian wheezy main contrib non-free
+
+deb @METHOD@security.debian.org/ wheezy/updates main contrib non-free
+#deb-src @METHOD@security.debian.org/ wheezy/updates main contrib non-free
+

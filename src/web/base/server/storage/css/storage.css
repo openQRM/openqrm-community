@@ -1,0 +1,32 @@
+.htmlobject_td.storage_state {
+	text-align:center;
+	width:25px;
+}
+
+.htmlobject_th.storage_edit,
+.htmlobject_td.storage_edit {
+	text-align:center;
+	width:100px;
+}
+.htmlobject_table .htmlobject_td.storage_edit a{
+	display: block;
+	text-align: left;
+}
+
+.htmlobject_td.head {
+	border: 0px none;
+}
+
+.htmlobject_box textarea {
+	width: 600px;
+	height: 50px;
+}
+
+fieldset {
+	border: 1px solid #91A7B4;
+	padding: 5px 10px;
+}
+fieldset legend {
+	padding: 5px;
+	font-weight: bold;
+}

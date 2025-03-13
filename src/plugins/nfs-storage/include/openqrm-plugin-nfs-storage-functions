@@ -1,0 +1,142 @@
+#!/bin/bash
+# this is the functions file for the nfs-storage-plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+# some definitions
+DEFAULT_IMAGE_SIZE=5000
+NFSEXPORTS="/etc/exports"
+
+################ common nfs-storage functions
+
+# logs for nfs_storage
+function nfs_storage_log() {
+	local COMPONENT=$1
+	shift
+	local MESSAGE=$@
+	logger -i -t "nfs-storage plug-in" "$COMPONENT : $MESSAGE"
+}
+
+################ nfs-storage functions
+
+
+# deps function
+function check_nfs_storage_deps() {
+	# check and fullfill dependencies
+	# screen
+	if ! openqrm_full_fill_os_dependency screen screen; then
+		return 1
+	fi
+	if [ -x /usr/bin/screen.real ]; then
+		export RUNSCREEN="/usr/bin/screen.real"
+	else
+		export RUNSCREEN=`which screen`
+	fi
+	# wget
+	if ! openqrm_full_fill_os_dependency wget wget; then
+		return 1
+	fi
+	# procmail for lockfile
+	if ! openqrm_full_fill_os_dependency lockfile procmail; then
+		return 1
+	fi
+	# rsync
+	if ! openqrm_full_fill_os_dependency rsync rsync; then
+		return 1
+	fi
+	if [ -f /etc/debian_version ]; then
+		# nfs-kernel-server
+		if ! openqrm_full_fill_os_dependency exportfs nfs-kernel-server; then
+			return 1
+		fi
+		# nfs-common
+		if ! openqrm_full_fill_os_dependency mount.nfs nfs-common; then
+			return 1
+		fi
+	elif [ -f /etc/redhat-release ]; then
+		# nfs-utils
+		if ! openqrm_full_fill_os_dependency mount.nfs nfs-utils; then
+			return 1
+		fi
+	elif [ -f /etc/SuSE-release ]; then
+		# nfs-client
+		if ! openqrm_full_fill_os_dependency mount.nfs nfs-client; then
+			return 1
+		fi
+		# nfs-kernel-server
+		if ! openqrm_full_fill_os_dependency exportfs nfs-kernel-server; then
+			return 1
+		fi
+	fi
+
+}
+
+
+function restart_nfs() {
+	if [ -x /etc/init.d/nfs ]; then
+		/etc/init.d/nfs reload
+	elif [ -x /etc/init.d/nfs-kernel-server ]; then
+		/etc/init.d/nfs-kernel-server reload
+	elif [ -x /etc/init.d/nfsserver ]; then
+		/etc/init.d/nfsserver reload
+	else
+		exportfs -r
+	fi
+}
+
+
+
+function manage_nfs() {
+	case "$1" in
+		add)
+			OPENQRM_SERVER=$2
+			mkdir -p $OPENQRM_NFS_STORAGE_SERVER_IMAGE_DIRECTORY/$NFS_IMAGE_NAME
+			echo "$OPENQRM_NFS_STORAGE_SERVER_IMAGE_DIRECTORY/$NFS_IMAGE_NAME	$OPENQRM_SERVER(rw,insecure,no_root_squash,async,no_subtree_check)" >> $NFSEXPORTS
+			sed -i '/^$/d' $NFSEXPORTS
+			restart_nfs
+			;;
+		remove)
+			# tabs and spaces
+			sed -i -e "s#^$OPENQRM_NFS_STORAGE_SERVER_IMAGE_DIRECTORY/$NFS_IMAGE_NAME .*##g" $NFSEXPORTS
+			sed -i -e "s#^$OPENQRM_NFS_STORAGE_SERVER_IMAGE_DIRECTORY/$NFS_IMAGE_NAME	.*##g" $NFSEXPORTS
+			sed -i '/^$/d' $NFSEXPORTS
+			restart_nfs
+			rm -rf $OPENQRM_NFS_STORAGE_SERVER_IMAGE_DIRECTORY/$NFS_IMAGE_NAME/*
+			rmdir $OPENQRM_NFS_STORAGE_SERVER_IMAGE_DIRECTORY/$NFS_IMAGE_NAME
+			;;
+
+		auth)
+			AUTH_IP=$2
+			# tabs and spaces
+			sed -i -e "s#^$NFS_IMAGE_ROOTDEVICE .*#$NFS_IMAGE_ROOTDEVICE	$AUTH_IP(rw,insecure,no_root_squash,async,no_subtree_check)#g" $NFSEXPORTS
+			sed -i -e "s#^$NFS_IMAGE_ROOTDEVICE	.*#$NFS_IMAGE_ROOTDEVICE	$AUTH_IP(rw,insecure,no_root_squash,async)#g" $NFSEXPORTS
+			sed -i '/^$/d' $NFSEXPORTS
+			restart_nfs
+			;;
+
+		adapt)
+			AUTH_IP=$2
+			if ! grep -w ^$OPENQRM_NFS_STORAGE_SERVER_IMAGE_DIRECTORY/$NFS_IMAGE_NAME $NFSEXPORTS 1>/dev/null; then
+				echo "$OPENQRM_NFS_STORAGE_SERVER_IMAGE_DIRECTORY/$NFS_IMAGE_NAME	$AUTH_IP(rw,insecure,no_root_squash,async,no_subtree_check)" >> $NFSEXPORTS
+				sed -i '/^$/d' $NFSEXPORTS
+				restart_nfs
+			fi
+			;;
+
+	esac
+}
+
+
+

@@ -1,0 +1,62 @@
+How to build and install openQRM
+
+To build please run :
+
+	make
+
+-> this automatically checks the requirements for the compilation
+-> it builds the base server and plugins
+-> it will download and compile some third-party components
+-> it will cache downloads and compile results
+-> build-location can be configured in ../src/etc/openqrm-server.conf
+
+To install run :
+
+	make && make install
+
+-> this installs openQRM-ng
+-> install-location can be configured in ../src/etc/openqrm-server.conf
+	
+To start run :
+
+	make start
+
+-> this basically just runs "/etc/init.d/openqrm start"
+-> installation phase is not needed any more and got eliminated
+-> initialization happens automatically on first-start
+-> initialization automatically checks for runtime-requirements
+
+To check the install requirements run :
+
+	make check
+
+-> this checks the requirements for the compilation
+-> if this checks fails it will display the exact missing package requirement
+   Then just install the listed package via apt-get/yum/.. and try again.
+
+To package (rpm/deb) run :
+
+	make package
+
+-> this automatically build .deb or .rpm packages
+-> package location can be configured in ../src/etc/openqrm-server.conf
+
+To reinstall e.g. after making changes to the sources run :
+
+	make reinstall
+
+-> this runs stop, uninstall, clean, all, install, start
+
+Please notice that all make-targets (especially "install") should be executed as root.
+
+After compiling and installing openQRM-ng it automatically
+initialises itself during first-start according the configuration
+parameters set in the main (and single) configuration file BASEDIR/openqrm/etc/openqrm-server.conf
+
+The openQRM-server is now ready for login at : http://[ip-of-the-openQRM-server]/openqrm
+
+Default username and password after installation are :
+User : openqrm
+Password : openqrm
+
+-> please change the default password immediately to prevent unauthorized access.

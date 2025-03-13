@@ -1,0 +1,146 @@
+#!/bin/bash
+# this script automatically manages ansible
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/include/openqrm-plugin-ansible-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/openqrm-plugin-ansible.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+openqrm_server_get_config
+export resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+export LANG=C
+ANSIBLE_PLAYBOOK_LOG="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/log/playbook-apply.log"
+export PATH=$PATH:/usr/local/bin
+
+# retries for applying playbooks
+if [ "$OPENQRM_PLUGIN_ANSIBLE_RETRY" == "" ]; then
+	OPENQRM_PLUGIN_ANSIBLE_RETRY="60"
+fi
+# delay/timeout in seconds for retruying failed playbooks
+if [ "$OPENQRM_PLUGIN_ANSIBLE_DELAY" == "" ]; then
+	OPENQRM_PLUGIN_ANSIBLE_DELAY="10"
+fi
+
+
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+if ! which ansible 1>/dev/null; then
+	openqrm_unblock_starting_queue $@
+	openqrm_post_event 0 "check" 3 "openqrm-ansible-manager" "The ansible utility is not installed! Please install and try again."
+	echo "ERROR: The 'ansible' utility is not installed! Please install and try again."
+	exit 6
+fi
+if ! which ansible-playbook 1>/dev/null; then
+	openqrm_unblock_starting_queue $@
+	openqrm_post_event 0 "check" 3 "openqrm-ansible-manager" "The ansible-playbook utility is not installed! Please install and try again."
+	echo "ERROR: The 'ansible-playbook' utility is not installed! Please install and try again."
+	exit 6
+fi
+
+
+function ansible_manager_usage() {
+	echo "Usage : $0 apply server-id server-name server-ip"
+	exit 1
+}
+
+
+FULL_COMMANDLINE="$0 $@"
+ANSIBLE_MANAGER_COMMAND=$1
+
+# main
+case "$ANSIBLE_MANAGER_COMMAND" in 
+	apply)
+		SERVER_ID=$2
+		SERVER_NAME=$3
+		SERVER_IP=$4
+		SERVER_PLAYBOOK_CONFIG="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/web/ansible/server/$SERVER_NAME"
+		if [ ! -f "$SERVER_PLAYBOOK_CONFIG" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			openqrm_post_event 0 "apply" 5 "openqrm-ansible-manager" "No Ansible Playbooks configured for Server $SERVER_NAME"
+			exit 0
+		fi
+		openqrm_post_event 0 "apply" 5 "openqrm-ansible-manager" "Starting Ansible configuration management for Server $SERVER_NAME"
+
+		LOCK_TIME=`openqrm_lock_queue aquire ansible`
+		trap "openqrm_lock_queue release ansible $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# make sure the host/ip is not in the knownhosts file
+		ssh-keygen -R $SERVER_IP
+		ssh-keygen -R $SERVER_NAME
+		# add it to the knownhosts file by running a simple command
+		ANSIBLE_PLAYBOOK_RETRY_LOOP=0
+		while ! $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/bin/openqrm-ansible-ssh $SERVER_IP ls; do
+			ANSIBLE_PLAYBOOK_RETRY_LOOP=$(( ANSIBLE_PLAYBOOK_RETRY_LOOP + 1 ))
+			if [ "$OPENQRM_PLUGIN_ANSIBLE_RETRY" == "$ANSIBLE_PLAYBOOK_RETRY_LOOP" ]; then
+				openqrm_post_event 0 "apply" 3 "openqrm-ansible-manager" "Applying Ansible Playbook $PLAYBOOK.yml to Server $SERVER_NAME timed out!"
+				break
+			fi
+			sleep $OPENQRM_PLUGIN_ANSIBLE_DELAY
+		done
+
+		# run the configured playbooks
+		mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/log
+		ANSIBLE_HOST_FILE=`mktemp /tmp/ansible.$SERVER_NAME.XXXXXX` || exit 1
+		ANSIBLE_PLAYBOOK_FILE=`mktemp /tmp/ansible.$SERVER_NAME.XXXXXX` || exit 1
+		echo $SERVER_IP > $ANSIBLE_HOST_FILE
+		for PLAYBOOK in `cat $SERVER_PLAYBOOK_CONFIG`; do
+			openqrm_post_event 0 "apply" 9 "openqrm-ansible-manager" "Applying Ansible Playbook $PLAYBOOK.yml to Server $SERVER_NAME"
+			cp $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/web/ansible/playbooks/$PLAYBOOK.yml -f $ANSIBLE_PLAYBOOK_FILE
+			sed -i -e "s/@@IP@@/$SERVER_IP/g" $ANSIBLE_PLAYBOOK_FILE
+			if ! ansible-playbook $ANSIBLE_PLAYBOOK_FILE -i $ANSIBLE_HOST_FILE 2>$ANSIBLE_PLAYBOOK_LOG 1>$ANSIBLE_PLAYBOOK_LOG; then
+				openqrm_post_event 0 "apply" 3 "openqrm-ansible-manager" "Applying Ansible Playbook $PLAYBOOK.yml to Server $SERVER_NAME failed!"
+			fi
+			openqrm_post_event 0 "apply" 10 "openqrm-ansible-manager" "Applying Ansible Playbook $PLAYBOOK.yml to Server $SERVER_NAME"
+			rm -f $ANSIBLE_PLAYBOOK_FILE
+		done
+		rm -f $ANSIBLE_HOST_FILE
+
+		openqrm_lock_queue release ansible $LOCK_TIME
+		trap '' EXIT
+
+		openqrm_post_event 0 "apply" 5 "openqrm-ansible-manager" "Ansible configuration management for Server $SERVER_NAME finished"
+		;;
+
+	start)
+		SERVER_ID=$2
+		SERVER_NAME=$3
+		SERVER_IP=$4
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		openqrm_post_event 0 "start" 5 "openqrm-ansible-manager" "Server $SERVER_NAME id $SERVER_ID starting with ip-address $SERVER_IP."
+		;;
+	stop)
+		SERVER_ID=$2
+		SERVER_NAME=$3
+		SERVER_IP=$4
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		openqrm_post_event 0 "stop" 5 "openqrm-ansible-manager" "Server $SERVER_NAME id $SERVER_ID stopping with ip-address $SERVER_IP."
+		;;
+	*)
+		echo "ERROR: Free commandline arguments are not allowed!"
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+		ansible_manager_usage
+		exit 6
+		;;
+esac
+

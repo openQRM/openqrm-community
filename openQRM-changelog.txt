@@ -1,0 +1,155 @@
+openQRM 5.3.40 - 5.3.41 Changelog
+-----------------------------------
+* updates and refactoring
+* deprecated nagios3, added nagios4
+
+openQRM 5.3.8 - 5.3.40 Changelog
+-----------------------------------
+* package dependency updates
+* major updates for Debian Buster compatability
+
+openQRM 5.3.3 - 5.3.8 Changelog
+-----------------------------------
+* New Community release 5.3.8
+* Added bandwidth monitoring plugin in Enterprise version
+
+openQRM 5.3.2 Changelog
+-----------------------------------
+* New Community release 5.3.2
+* Enhanced package dependencies for latest Ubuntu, Debian and CentOS
+* removed rpmforge repository dependencies
+
+openQRM 5.3.1 Changelog
+-----------------------------------
+* New Community release 5.3
+* Important security update
+* Many bugfixes and lots of enhancements especially for KVM and Cloud plugin
+
+openQRM 5.2.15 Changelog
+-----------------------------------
+* Amazon EC2 plugin one-VPC-per User
+* Amazon EC2 plugin Windows automated Application deployment
+
+openQRM 5.2.11 - 5.2.14 Changelog
+-----------------------------------
+* New Amazon EC2 plugin
+* Improved VMware vSphere integration
+* Improved CentOS Support
+* Improved KVM + VMware-vSphere VNC handling
+
+
+openQRM 5.2.1 - 5.2.11 Changelog
+-----------------------------------
+* New VMware ESX bulk-install plugin
+* New (beta) VMware vSphere integration
+* New Azure hybrid-cloud support
+* Added Cloud Image-to-Host and Image-Billing to reduce Windows VM license costs
+* Improved usability
+
+
+openQRM 5.2.1 Changelog
+-----------------------------------
+* Increased robustness and efficiency for the complete Cloud work-flow
+* Enhanced deprovision management intelligence
+* Improved usability of the VMware and KVM VM Wizard
+* Refined error management for the OpenStack and Hybrid Cloud integration
+
+
+openQRM 5.1.0 - 5.1.4 Changelog
+-----------------------------------
+Featured changes/highlights:
+* new user interface design: Enhanced usability, better user guidance/texts, easier workflows, new wizards
+* new openQRM dashboard: important operational information (datacenter load, events, statistics) and plugin-provided QuickLink buttons at a glance
+* greatly enhanced KVM support (GlusterFS storage for KVM volumes, virtio disk settings can be configured in the UI)
+* greatly enhanced VMWare support (manage existing VMWare ESX systems, install and manage local and network-booted ESX VMs)
+* Ansible Support as additional Configuration Management System next to Puppet
+   The Ansible integration eases up Playbook administration.
+   Ansible is now also integrated in the openQRM Enterprise Cloud in the same way as Puppet
+*  windows, cloud integration, puppet, admin pass, hostname, ip-addresses
+* new libvirt plugin to manage VMs using libvirt
+* new hybrid cloud plugin with enhanced funtionality
+- Amazon Web Services and Eucalyptus API compatibility
+- manage EC2/Eucalyptus instances in the same way as local resources
+- import/export	AMIs/VMs from/to AWS or Eucalyptus
+- WebSSHTerm for web-based instance logins
+- automated application deployment via puppet in EC2/Eucalyptus VMs
+- automated monitoring of EC2/Eucalyptus VMs via nagios
+- Self-Service via the openQRM cloud - easy option to "re-sell" EC2 as private cloud resource
+* all virtualization plugins were merged, old *-storage plugins were removed
+* the term "Appliance" was renamed to "Server" (easier to understand)
+* new spanish translation - big thanks to Larry Rider/Pablo Gonzalez (Activa IT) and Julio Mino
+* cloud: cloudstability plus db consistency check
+* user-friendly single sign-on for the nagios/icinga integration
+* cloud: application deployment abstrations cloud (ansible and puppet, integration option for other Configuration Management Tools like e.g. check, fog ?
+* Cloud: optional direct and secured VNC access to the Cloud VMs Console
+* base: tab-in-tab breadcrumps
+* plugins: configure UI action
+*  windows, cloud integration, puppet, admin pass, hostname, ip-addresses
+
+
+Changes in openQRM Base:
+* enhanced server wizard, possibility to skip unneeded steps
+* improved boot-service configuration, the boot-services now can also be configured through the openqrm commandline utility
+* initrds for network-deployment and configuration files in plugin boot-services are automatically updated during regular openQRM updates
+* enhanced packaging (deb/rpm), implemented robust package update
+* enhanced virtual-resource-command hook allowing to shutdown hosts via API calls
+* easily make existing physical/logical storage volumes available for use with any virtualization type
+
+
+Plugin changes:
+* lcmc: updated the cluster management console lcmc to version 1.5.4
+* local-storage: plugin renamed from local-storage to clonezilla
+* cloud: 
+- added option to specify the load balancing algorithm for finding the next available cloud virtualization host (by host load, memory utilization, random, resource limits per host)
+- added option to specify a VM provisioning delay in the cloud to reduce load spikes
+- added option in the openQRM cloud portal to change resource parameters (cpu/memory) in own cloud requests
+* dhcpd: enhanced dhcpd plugin
+- support for all classes of networks (A/B/C) for use as openQRM management network
+- support for multi-homed setups with several managed networks
+* sshterm: patched bug in webshell (sshterm plugin) to work with python 2.7
+* kvm: 
+- implemented option to set the VNC keyboard mapping for KVM VMs
+- enhanced monitoring for local-deployment VMs
+- configuration changes now possible for running VMs (changes applied at next VM reboot)
+- using qemu-img now to create kvm volumes providing different qemu disk formats (raw, cow, qcow, qcow2)
+- now supports native qemu-img snapshots for blockfiles (kvm-bf-deployment and kvm-gluster-deployment)
+- now supports native Gluster integration (new deployment type kvm-gluster-deployment)
+- added option to automatically shutdown the openQRM management network link after deployment and startup of VMs (for enhanced security)
+* hybrid-cloud: now talking transparently to AWS EC2 and Eucalyptus APIs to manage instances, EBS volumes/snapshots, etc.
+* all plugins: added and enhanced included online documentation
+
+
+New plugins (Enterprise Edition only):
+* new event-mailer plugin to send event notifications to openQRM administrators by email
+* new role-administration plugin:
+- allows to setup fine-grained administrator permissions on every aspect of the openQRM system
+- allows to map the business topology to openQRM roles (e.g. only allow storage departments to allocate/manage storage)
+
+
+New plugins (in Enterprise and Community Edition):
+* Ansible Support as additional Configuration Management System next to Puppet
+   The Ansible integration eases up Playbook administration.
+   Ansible is now also integrated in the openQRM Enterprise Cloud in the same way as Puppet
+* new device-manager plugin provides easy LVM pre-configuration for storage setup (create/manage LVM physical volumes and volume groups)
+* new network-manager plugin provides easy network and bridging pre-configuration for virtualization hosts
+* new development plugin to automatically generate documentation of the REST API, templates, translation status, css and js in openQRM
+* new template plugin implementing all available plugin-hooks in openQRM (as a base to easily create your own custom plugins)
+* new libvirt plugin integrates libvirt as additional resource provider
+
+
+Bugfixes:
+* security: only allow openQRM's update-stats to trigger the plugin hooks
+* security: fixed bug in iframe to not allow any remote URLs to be loaded
+* security: fixed bug in [plugin]-action.php to not allow remote access to the stat directories
+* minor fixes in nfs-storage for manually configured/unmanaged NAS/NFS systems
+* fixed many typos and wording issues
+* base: avoid remove initial base objects (resource 0, default kernel, openqrm and idle image)
+* cloud-zones: fixed register user url
+
+
+Deprecated functionality:
+- deprecated coraid-storage, equallogic-storage, netapp-storage, vbox and zfs-storage plugins
+
+
+
+

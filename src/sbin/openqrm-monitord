@@ -1,0 +1,307 @@
+#!/bin/bash
+# openqrm-monitord, a openQRM daemon for gathering system statistics
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SBIN_DIR=`dirname $0`
+OPENQRM_BASE_DIR=`pushd $OPENQRM_SBIN_DIR/.. 1>/dev/null && pwd && popd 1>/dev/null`
+OPENQRM_EVENT="statistics"
+OPENQRM_ACTIVE_STATE="active"
+OPENQRM_STARTING_STATE="starting"
+
+
+# check if running on the server or on a managed resource
+if [ -f "$OPENQRM_BASE_DIR/include/openqrm-server-functions" ]; then
+	# we are running on the server
+	. $OPENQRM_BASE_DIR/include/openqrm-functions
+	. $OPENQRM_BASE_DIR/include/openqrm-server-functions
+	export resource_id=0
+	export resource_senddelay=10
+
+	if [ "$2" != "" ]; then
+		export resource_openqrmserver=$2
+	else
+		export resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+	fi
+
+	export SERVER_PROTOCOL=$OPENQRM_WEB_PROTOCOL
+	#export resource_mac=`ip a s $OPENQRM_SERVER_INTERFACE | grep -w $OPENQRM_SERVER_INTERFACE$ | grep "link/ether" | awk '{ print $2 }'`
+	export resource_mac=`ip a s $OPENQRM_SERVER_INTERFACE | grep -w $OPENQRM_SERVER_INTERFACE -A 2 | grep "ether" | awk '{ print $2 }'`
+else
+	# we are running on a managed resource
+	export OPENQRM_SERVER_BASE_DIR=$OPENQRM_BASE_DIR
+	. $OPENQRM_BASE_DIR/include/openqrm-functions
+	. $OPENQRM_RESOURCE_PARAMETER_FILE
+	export SERVER_PROTOCOL=$openqrm_web_protocol
+fi
+# define wget to use with https
+if [ "$SERVER_PROTOCOL" == "https" ]; then
+	export WGET="wget --no-check-certificate -q -O /dev/null"
+	if [ "$resource_id" == "0" ]; then
+		export WGET="wget --bind-address=$OPENQRM_SERVER_IP_ADDRESS --no-check-certificate -q -O /dev/null"
+	fi
+else
+	export WGET="wget -q -O /dev/null"
+	if [ "$resource_id" == "0" ]; then
+		export WGET="wget --bind-address=$OPENQRM_SERVER_IP_ADDRESS -q -O /dev/null"
+	fi
+fi
+# set timeout
+export WGET="$WGET -T 300 -t 1"
+
+
+# local used functions
+function send_info() {
+	if [ -f /etc/initrd-devices.conf ] && [ "$image_type" != "ram" ]; then
+		current_state=`urlencodestring $OPENQRM_STARTING_STATE`
+	else
+		current_state=`urlencodestring $OPENQRM_ACTIVE_STATE`
+	fi
+
+	current_event=`urlencodestring $OPENQRM_EVENT`
+	MESSAGEDATA="resource_id=$resource_id&resource_uptime=$current_uptime&resource_cpunumber=$current_cpu_number&resource_cpuspeed=$current_cpu_speed&resource_cpumodel=$current_cpu_model&resource_memtotal=$current_mem_total&resource_memused=$current_mem_used&resource_swaptotal=$current_swap_total&resource_swapused=$current_swap_used&resource_hostname=$current_hostname&resource_load=$current_cpu_load&resource_nics=$current_nic_count&resource_state=$current_state&resource_event=$current_event";
+	# add mac of openQRM to messagedata
+	if [ "$resource_id" == "0" ]; then
+		MESSAGEDATA=$MESSAGEDATA"&resource_mac=$resource_mac"
+	fi
+
+	OPENQRM_RESOURCE_INFO_URL="$SERVER_PROTOCOL://$resource_openqrmserver/openqrm/action/resource-monitor.php?resource_command=update_info&$MESSAGEDATA"
+	#echo "ORIU: " "$OPENQRM_RESOURCE_INFO_URL"
+	$WGET "$OPENQRM_RESOURCE_INFO_URL"
+}
+
+
+# converts bytes to mega-bytes
+function bytes_to_mega() {
+	echo $1 | awk '{printf("%.0f",  $1 /  1024/ 1024)}'
+}
+
+
+# statistic gathering functions
+
+# uptime
+function find_uptime() {
+	if [ -f /proc/uptime ]; then
+		current_uptime=`cat /proc/uptime | cut -d'.' -f 1`
+	fi
+	if [ -z "$current_uptime" ]; then
+		current_uptime=0
+	fi
+}
+
+
+
+# cpu_number
+function find_cpu_number() {
+	if [ -f /proc/stat ]; then
+		current_cpu_number=`grep '^cpu[0-9]' /proc/stat | wc -l`
+		current_cpu_number=${current_cpu_number// /}
+	fi
+	if [ -z "$current_cpu_number" ]; then
+		current_cpu_number=0
+	fi
+}
+
+# cpu_speed
+function find_cpu_speed() {
+	if [ -f /proc/cpuinfo ]; then
+		current_cpu_speed=(`cat /proc/cpuinfo | grep "cpu.*MHz"`)
+		current_cpu_speed=${current_cpu_speed[3]/\.*/}
+	fi
+	if [ -z "$current_cpu_speed" ]; then
+		current_cpu_speed=0
+	fi
+}
+
+
+# cpu_model
+function find_cpu_model() {
+	if [ -f /proc/cpuinfo ]; then
+		current_cpu_model=`cat /proc/cpuinfo | grep "model.*name" | head -n 1 | tr -s ' ' | cut -d' ' -f 3-`
+		current_cpu_model=`urlencodestring $current_cpu_model`
+	fi
+	if [ -z "$current_cpu_model" ]; then
+		current_cpu_model=0
+	fi
+}
+
+# how many nics we have
+function find_nics() {
+	local BR=""
+	for b in `brctl show | grep -v STP | awk {' print $1 '}`; do BR="$BR $b"; done
+	for i in `ip a s | grep ^[0-9] | cut -d':' -f2 | awk '{ print $1 }' | grep -v lo | grep -v tap`; do
+		if ! echo $BR | grep $i 1>/dev/null; then
+				current_nic_count=$(( current_nic_count + 1 ))
+		fi
+	done
+	if [ -z "$current_nic_count" ]; then
+			current_nic_count=0
+	fi
+}
+
+# mem_total
+function find_mem_total() {
+	if [ -f /proc/meminfo ]; then
+		current_mem_total=`cat /proc/meminfo | awk '/MemTotal:/ { print int($2/1024) };'`
+	fi
+}
+
+# mem_used
+function find_mem_used() {
+	if [ -f /proc/meminfo ]; then
+		if [ -z "$current_mem_total" ]; then
+			current_mem_total=`cat /proc/meminfo | awk '/MemTotal:/ { print int($2/1024) };'`
+		fi
+		current_mem_free=`cat /proc/meminfo | awk '/MemFree:/ { print int($2/1024) };'`
+		current_mem_used=$((current_mem_total - current_mem_free))
+	fi
+	if [ -z "$current_mem_used" ]; then
+		current_mem_used=0
+	fi
+}
+
+
+# swap_total
+function find_swap_total() {
+	if [ -f /proc/meminfo ]; then
+		current_swap_total=`cat /proc/meminfo | awk '/SwapTotal:/ { print int($2/1024) };'`
+	fi
+}
+
+# swap_used
+function find_swap_used() {
+	if [ -f /proc/meminfo ]; then
+		if [ -z "$current_swap_total" ]; then
+			current_swap_total=`cat /proc/meminfo | awk '/SwapTotal:/ { print int($2/1024) };'`
+		fi
+		current_swap_free=`cat /proc/meminfo | awk '/SwapFree:/ { print int($2/1024) };'`
+		current_swap_used=$((current_swap_total - current_swap_free))
+	fi
+	if [ -z "$current_swap_used" ]; then
+		current_swap_used=0
+	fi
+}
+
+# hostname
+function find_hostname() {
+	current_hostname=`hostname`
+	current_hostname=`urlencodestring $current_hostname`
+	if [ -z "$current_hostname" ]; then
+		current_hostname=0
+	fi
+}
+
+
+
+# cpu_load
+function find_cpu_load() {
+	if [ -f /proc/loadavg ]; then
+		current_cpu_load=`cat /proc/loadavg | cut -d' ' -f 1`
+	fi
+	if [ -z "$current_cpu_load" ]; then
+		current_cpu_load=0
+	fi
+}
+
+
+# start after /proc is mounted
+while [ ! -f /proc/cpuinfo ]; do
+	sleep 5
+done
+
+
+####
+
+case "$1" in
+
+send_info)
+	start=$(date +%s)
+
+	# gathering the static values
+	echo "$0: Gathering resources-information" | logger
+	# cpu_number
+	find_cpu_number
+	# cpu_speed
+	find_cpu_speed
+	# cpu_model
+	find_cpu_model
+	# mem_total
+	find_mem_total
+	# nics
+	find_nics
+	# uptime
+	find_uptime
+	# mem_used
+	find_mem_used
+	# swap_total
+	find_swap_total
+	# swap_used
+	find_swap_used
+	# hostname
+	find_hostname
+	# cpu_load
+	find_cpu_load
+	# sending statistics
+	send_info
+
+	end=$(date +%s)
+	echo Execution time was $(expr $end - $start) seconds.
+
+	exit 0
+	;;
+
+esac
+
+####
+
+
+
+
+# gathering the static values
+echo "$0: Gathering resources-information" | logger
+# cpu_number
+find_cpu_number
+# cpu_speed
+find_cpu_speed
+# cpu_model
+find_cpu_model
+# mem_total
+find_mem_total
+# nics
+find_nics
+
+# main loop
+while (true); do
+	# uptime
+	find_uptime
+	# mem_used
+	find_mem_used
+	# swap_total
+	find_swap_total
+	# swap_used
+	find_swap_used
+	# hostname
+	find_hostname
+	# cpu_load
+	find_cpu_load
+	# sending statistics
+	send_info
+	# delay
+	sleep $resource_senddelay
+done
+# never reached
+exit 0
+
+

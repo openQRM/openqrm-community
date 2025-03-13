@@ -1,0 +1,9 @@
+
+# Examples (for supported versions of Ubuntu):
+# other sites listed at
+# https://wiki.ubuntu.com/Archive
+# the path (last component) must be the prefix
+# (but not include) the "dists" directory
+
+OSVEND ftp.halifax.rwth-aachen.de Ubuntu Trusty x86_64 HTTP  /ubuntu/
+

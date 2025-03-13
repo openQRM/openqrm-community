@@ -1,0 +1,60 @@
+#!/bin/sh
+# postrm script for openqrm
+#
+# This file is part of openQRM.
+#
+# openQRM is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2
+# as published by the Free Software Foundation.
+#
+# openQRM is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with openQRM.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Copyright 2011, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+NAME="openqrm"
+DESC="openQRM Cloud Computing Platform"
+LOGDIR=/var/log/$NAME
+LANG=C
+. /lib/lsb/init-functions
+
+if [ -f /etc/default/$NAME ] ; then
+    . /etc/default/$NAME
+else
+    OPENQRM_SERVER_BASE_DIR="/usr/share"
+fi
+
+set -e
+
+case "$1" in
+    remove)
+		rm -f /etc/init.d/openqrm*
+		rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm
+		;;
+
+    purge)
+		rm -f /etc/init.d/openqrm*
+		rm -f /etc/default/openqrm
+		rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm
+		;;
+
+
+	abort-upgrade|failed-upgrade|abort-install|upgrade)
+	;;
+
+    *)
+        echo "postrm called with argument \`$1'" >&2
+        exit 0
+    ;;
+esac
+
+
+#DEBHELPER#
+
+exit 0

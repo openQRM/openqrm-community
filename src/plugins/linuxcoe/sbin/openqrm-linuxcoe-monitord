@@ -1,0 +1,116 @@
+#!/bin/bash
+# this script automatically monitors kvm vms
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+# this script automatically monitors linuxcoe auto-installations
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/include/openqrm-plugin-linuxcoe-functions
+OPENQRM_POSTENCODE="$OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-postencode"
+openqrm_server_get_config
+export resource_id=0
+export resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+export SERVER_PROTOCOL=$OPENQRM_WEB_PROTOCOL
+export resource_senddelay=10
+export LANG=C
+OPENQRM_EVENT="statistics"
+OPENQRM_ACTIVE_STATE="transition"
+OPENQRM_STARTING_STATE="starting"
+
+# define wget to use with https
+if [ "$SERVER_PROTOCOL" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate --random-file=/dev/random"
+fi
+
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+# mac is the identifier
+RESOURCE_ID=$1
+RESOURCE_MAC=$2
+if [ "$RESOURCE_ID" == "" ] || [ "$RESOURCE_MAC" == "" ]; then
+	echo "Usage: $0 <resource_id> <resource_mac>"
+	exit 1
+fi
+
+
+# local used functions
+function send_info() {
+	current_state=$OPENQRM_ACTIVE_STATE
+	current_event=$OPENQRM_EVENT
+	MESSAGEDATA="resource_id=$RESOURCE_ID&resource_uptime=$current_uptime&resource_state=$current_state&resource_event=$current_event";
+	OPENQRM_RESOURCE_INFO_URL="$SERVER_PROTOCOL://$resource_openqrmserver/openqrm/action/resource-monitor.php?resource_command=update_info&$MESSAGEDATA"
+	wget $WGET_NO_CERT_CHECK -q -O /dev/null "$OPENQRM_RESOURCE_INFO_URL"
+}
+
+
+
+# uptime
+function find_uptime() {
+	if [ -f /proc/uptime ]; then
+		current_uptime=`cat /proc/uptime | cut -d'.' -f 1`
+	fi
+	if [ -z "$current_uptime" ]; then
+		current_uptime=0
+	fi
+}
+
+
+
+# main loop
+while (true); do
+	# we need to send transaction first, then check
+	# the resource may have rebooted slow and send active before reboot
+	# uptime
+	find_uptime
+	# sending statistics
+	send_info
+	# delay
+	sleep $resource_senddelay
+	# get install state
+	wget $WGET_NO_CERT_CHECK -q -O /tmp/openqrm-parameters.$RESOURCE_MAC.conf "$SERVER_PROTOCOL://$resource_openqrmserver/openqrm/action/resource-monitor.php?resource_command=get_parameter&resource_id=$RESOURCE_ID&resource_mac=$RESOURCE_MAC"
+	. /tmp/openqrm-parameters.$RESOURCE_MAC.conf
+	rm -f /tmp/openqrm-parameters.$RESOURCE_MAC.conf
+	if echo $resource_state | grep active 1>/dev/null; then
+			# ready installed, exit the montird
+			exit 0
+	fi
+done
+# never reached
+exit 0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,18 @@
+;
+; BIND data file 
+;
+$TTL	604800
+@	IN	SOA	ns.@@OPENQRM_SERVER_DOMAIN@@. root.@@OPENQRM_SERVER_DOMAIN@@. (
+			      1		; Serial
+			 604800		; Refresh
+			  86400		; Retry
+			2419200		; Expire
+			 604800 )	; Negative Cache TTL
+;
+
+@@OPENQRM_SERVER_DOMAIN@@.	IN	NS	ns.@@OPENQRM_SERVER_DOMAIN@@.
+@@OPENQRM_SERVER_DOMAIN@@. IN      MX	10      ns.@@OPENQRM_SERVER_DOMAIN@@.
+
+ns				IN	A	@@OPENQRM_SERVER_IP_ADDRESS@@
+openqrm			IN	A	@@OPENQRM_SERVER_IP_ADDRESS@@
+puppet			CNAME	openqrm

@@ -1,0 +1,35 @@
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+# this is the root of the menu
+# syntax is :
+#	Title
+#	Href
+#	Alt
+#	IMG
+#	Target
+.|Datacenter
+.|Dashboard|index.php?base=aa_server&controller=datacenter|Datacenter Dashboard
+.|Server|index.php?base=appliance|List of Server
+.|Components
+..|Images|index.php?base=image|List of server images
+..|Kernels|index.php?base=kernel|List of OS kernels
+..|Resources|index.php?base=resource|Available computing resources in the Datacenter
+..|Storage|index.php?base=storage|List of storage servers
+.|Events|index.php?base=event|Events in the openQRM Server|
+#..|All Events|index.php?base=event|Events in the openQRM Server|active.png
+#..|Active|index.php?base=event&event_filter=active|Active Events|transition.png
+#..|Warning|index.php?base=event&event_filter=warning|Warning Events|unknown.png
+#..|Error|index.php?base=event&event_filter=error|Error Events!|error.png
+#..|Acknowledged|index.php?base=event&event_filter=acknowledge|Acknowledged Events|idle.png

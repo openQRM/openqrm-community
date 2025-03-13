@@ -1,0 +1,206 @@
+#!/bin/bash
+# init script for the openQRM ansible-plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $0)/../../../../.. > /dev/null; echo $PWD; popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/include/openqrm-plugin-ansible-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/openqrm-plugin-ansible.conf
+openqrm_server_get_config
+export resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+export LANG=C
+# define wget to use with https
+if [ "$OPENQRM_WEB_PROTOCOL" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate"
+fi
+
+
+function openqrm_plugin_ansible_start() {
+	echo "Starting the openQRM ansible-plugin"
+	touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/ansible/.running
+}
+
+
+function openqrm_plugin_ansible_stop() {
+	echo "Stopping the openQRM ansible-plugin"
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/ansible/.running
+}
+
+function openqrm_plugin_ansible_uninstall() {
+	local USERNAME=$1
+	local PASSWORD=$2
+	if [ "$USERNAME" == "" ] && [ "$PASSWORD" == "" ]; then
+		echo -n "ansible: Please give a username to uninstall the plugin : "
+		read USERNAME
+		echo
+		echo -n "ansible: Please give the password for user $USERNAME : "
+		read PASSWORD
+		echo
+	fi
+	echo "Uninstalling the openQRM ansible-plugin"
+	openqrm_plugin_ansible_stop
+	rm -f /etc/cron.d/openqrm-ansible-config
+	if [ -x "/etc/init.d/cron" ]; then
+		if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+			invoke-rc.d cron reload
+		else
+			/etc/init.d/cron reload
+		fi
+	elif [ -x /etc/init.d/crond ]; then
+		if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+			invoke-rc.d crond reload
+		else
+			/etc/init.d/crond reload
+		fi
+	else
+		openqrm_post_event 0 "openqrm_plugin_ansible_start" 3 "openqrm-plugin-ansible" "Could not find cron init script in /etc/init.d/. Please reload cron manually!"
+	fi
+
+	# trigger init action to eventually remove cloud products
+	if [ -e $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/cloud ]; then
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$USERNAME --http-password=$PASSWORD "$OPENQRM_WEB_PROTOCOL://$resource_openqrmserver/openqrm/base/plugins/ansible/ansible-action.php?ansible_command=uninstall"; then
+			openqrm_post_event 0 "openqrm_plugin_ansible_start" 3 "openqrm-plugin-ansible" "Could not trigger database hook. Please manually remove any Ansible Cloud products!"
+		fi
+	fi
+
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/ansible
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/boot-service-ansible.tgz
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/openqrm-ansible-apply.php
+	rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible
+	return 0
+}
+
+function openqrm_plugin_ansible_init() {
+	local USERNAME=$1
+	local PASSWORD=$2
+	if [ "$USERNAME" == "" ] && [ "$PASSWORD" == "" ]; then
+		echo -n "ansible: Please give a username to init the plugin : "
+		read USERNAME
+		echo
+		echo -n "ansible: Please give the password for user $USERNAME : "
+		read PASSWORD
+		echo
+	fi
+	# check for the public ssh key
+	if [ ! -f "$OPENQRM_PLUGIN_ANSIBLE_PUBLIC_SSHKEY" ]; then
+		openqrm_post_event 0 "openqrm_plugin_ansible_start" 3 "openqrm-plugin-ansible" "Public SSH key file $OPENQRM_PLUGIN_ANSIBLE_PUBLIC_SSHKEY does not exists! Please create it!"
+		return 1
+	fi
+	cp -f $OPENQRM_PLUGIN_ANSIBLE_PUBLIC_SSHKEY $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/openqrm-server-public-ssh-key
+	# add to authorized_keys
+	OPENQRM_PUBLIC_SSHKEY=`cat $OPENQRM_PLUGIN_ANSIBLE_PUBLIC_SSHKEY`
+	if ! grep "$OPENQRM_PUBLIC_SSHKEY" /root/.ssh/authorized_keys 1>/dev/null 2>/dev/null; then
+		openqrm_post_event 0 "openqrm_plugin_ansible_start" 5 "openqrm-plugin-ansible" "Adding Public SSH key file $OPENQRM_PLUGIN_ANSIBLE_PUBLIC_SSHKEY to /root/.ssh/authorized_keys"
+		echo >> /root/.ssh/authorized_keys
+		cat $OPENQRM_PLUGIN_ANSIBLE_PUBLIC_SSHKEY >> /root/.ssh/authorized_keys
+		echo >> /root/.ssh/authorized_keys
+	fi
+	CURRENTD=`pwd`
+	echo "Initializing the openQRM ansible-plugin"
+	# linking the web dir
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/web $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/ansible
+	# link the boot-service
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/web/boot-service-ansible.tgz $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/boot-service-ansible.tgz
+	# link the apply
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/web/openqrm-ansible-apply.php $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/boot-service/openqrm-ansible-apply.php
+	# create the svn dir
+	rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible
+	mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible
+	svnadmin create $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible
+	svn import -q $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/default/ file://$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible/ -m "initial import"
+	# also co the files for the web-dir
+	rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/web/ansible/
+	mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/web/ansible/
+	cd $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/web/ansible/
+	svn co -q file://$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible/ .
+	chmod -R 777 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/web/ansible/
+	# setup access through ssh+svn
+	rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible/conf/svnserve.conf
+	echo "[general]" > $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible/conf/svnserve.conf
+	echo "anon-access = read" >> $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible/conf/svnserve.conf
+	echo "auth-access = write" >> $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible/conf/svnserve.conf
+	echo "realm = openQRM Ansible configuration" >> $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible/conf/svnserve.conf
+	echo "password-db = passwd" >> $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible/conf/svnserve.conf
+	chmod -R 777 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/ansible/db
+	cd $CURRENTD
+	# create cron job which will update the svn repo with files which were added by the web gui
+	cat $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/ansible/etc/cron.d/openqrm-ansible-config.cron | \
+		sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" > /etc/cron.d/openqrm-ansible-config
+	if [ -x "/etc/init.d/cron" ]; then
+		if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+			invoke-rc.d cron reload
+		else
+			/etc/init.d/cron reload
+		fi
+	elif [ -x /etc/init.d/crond ]; then
+		if [ -x "`which invoke-rc.d 2>/dev/null`" ]; then
+			invoke-rc.d crond reload
+		else
+			/etc/init.d/crond reload
+		fi
+	else
+		echo "Could not find cron init script in /etc/init.d/. Please reload cron manually!"
+		openqrm_post_event 0 "openqrm_plugin_ansible_start" 3 "openqrm-plugin-ansible" "Could not find cron init script in /etc/init.d/. Please reload cron manually!"
+	fi
+
+	# trigger init action to eventually add cloud products
+	if [ -e $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/cloud ]; then
+		if ! wget -q $WGET_NO_CERT_CHECK -O /dev/null --http-user=$USERNAME --http-password=$PASSWORD "$OPENQRM_WEB_PROTOCOL://$resource_openqrmserver/openqrm/base/plugins/ansible/ansible-action.php?ansible_command=init"; then
+			openqrm_post_event 0 "openqrm_plugin_ansible_start" 3 "openqrm-plugin-ansible" "Could not trigger database hook. Please manually add Ansible Cloud products!"
+		fi
+	fi
+	return 0
+}
+
+
+
+
+
+
+
+USER=$2
+PASS=$3
+
+case "$1" in
+	start)
+		openqrm_plugin_ansible_start
+		;;
+	stop)
+		openqrm_plugin_ansible_stop
+		;;
+	restart)
+		openqrm_plugin_ansible_stop
+		sleep 1
+		openqrm_plugin_ansible_start
+		;;
+	init)
+		openqrm_plugin_ansible_init $USER $PASS
+		;;
+	uninstall)
+		openqrm_plugin_ansible_uninstall $USER $PASS
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|init|uninstall}"
+		exit 1
+
+esac
+exit $?
+
+
+
+

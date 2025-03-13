@@ -1,0 +1,277 @@
+#!/bin/sh
+#
+# openQRM init.d script
+#
+# This file is part of openQRM.
+#
+# openQRM is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2
+# as published by the Free Software Foundation.
+#
+# openQRM is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with openQRM.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Copyright 2011, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+### BEGIN INIT INFO
+# Provides:          openqrm
+# Required-Start:    $local_fs $network $remote_fs
+# Required-Stop:     $local_fs $network $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Cloud Computing Platform
+# Description:      openQRM is a fully automated, rapid deployment system
+#                   including VM-Management, Monitoring, High-Availability
+#                   and Storage-Management. It provides a plug-able open-source
+#                   Cloud Computing platform.
+### END INIT INFO
+
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+NAME="openqrm"
+DESC="openQRM Cloud Computing Platform"
+LOGDIR=/var/log/$NAME
+
+. /lib/lsb/init-functions
+DAEMON_OPTS=""
+DIETIME=20
+LOGFILE=$LOGDIR/$NAME.log
+LOCKDIR=/var/lock/subsys/
+LOCKFILE=$LOCKDIR/$NAME
+LANG=C
+
+# unset http_proxy environment
+unset http_proxy
+unset https_proxy
+
+if [ ! -d "$LOCKDIR" ]; then
+	mkdir -p $LOCKDIR
+fi
+if [ -f /etc/default/$NAME ] ; then
+	. /etc/default/$NAME
+else
+	OPENQRM_SERVER_BASE_DIR="/usr/share"
+fi
+export OPENQRM_SERVER_BASE_DIR
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+export OPENQRM_WEBSERVER_DOCUMENT_ROOT
+
+set -e
+
+stop_exec_subsystem() {
+	if ps ax | grep dropbear | grep -v grep | grep openqrm 1>/dev/null; then
+		if ! kill `ps ax | grep dropbear | grep -v grep | grep openqrm | awk {' print $1 '}` 2>/dev/null; then
+			return 1
+		fi
+	fi
+	if ps ax | grep openqrm-cmd-queue | grep -v grep 1>/dev/null; then
+		if ! kill `ps ax | grep openqrm-cmd-queue | grep -v grep | awk {' print $1 '}` 2>/dev/null; then
+			return 1
+		fi
+	fi
+	if ps ax | grep openqrm-monitord | grep -v grep 1>/dev/null; then
+		if ! kill `ps ax | grep openqrm-monitord | grep -v grep | awk {' print $1 '}` 2>/dev/null; then
+			return 1
+		fi
+	fi
+	return 0
+}
+
+stop_exec_subsystem_force() {
+	kill `ps ax | grep dropbear | grep -v grep | grep openqrm | awk {' print $1 '}` 2>/dev/null || true
+	kill `ps ax | grep openqrm-cmd-queue | grep -v grep | awk {' print $1 '}` 2>/dev/null || true
+	kill `ps ax | grep openqrm-monitord | grep -v grep | awk {' print $1 '}` 2>/dev/null || true
+	return 0
+}
+
+running() {
+	[ ! -f "$LOCKFILE" ] && return 1
+	return 0
+}
+
+start_server() {
+	if [ -x /usr/bin/screen.real ]; then
+		RUNSCREEN="/usr/bin/screen.real"
+	else
+		RUNSCREEN=`which screen`
+	fi
+	stop_exec_subsystem_force
+	if ! dropbear -p $OPENQRM_EXEC_PORT -r $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/dropbear_rsa_host_key; then
+		log_failure_msg "Could not start openQRM exec-subsystem!"
+		stop_exec_subsystem_force
+		return 1
+	fi
+    $RUNSCREEN -dmS cmdqueue $OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-cmd-queue
+	touch ${LOCKFILE}
+
+	if [ -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/unconfigured ]; then
+		log_success_msg "Please configure your openQRM Server at : $OPENQRM_WEB_PROTOCOL://[server-ip-address]/openqrm/"
+		log_success_msg "-> User : openqrm"
+		log_success_msg "-> Password : openqrm"
+		sleep 2
+		return 0
+	else
+		if ! ifconfig "$OPENQRM_SERVER_INTERFACE" | grep inet 1>/dev/null 2>&1; then
+			log_failure_msg "Interface $OPENQRM_SERVER_INTERFACE is down. Please configure and activate it. Then try again."
+			stop_exec_subsystem_force
+			rm -f ${LOCKFILE}
+			return 1
+		fi
+		CONFIGURED_IP=`cat $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/default | grep "openqrm=" | sed -e "s/.*openqrm=//" | awk {' print $1 '}`
+		OPENQRM_SERVER_IP_ADDRESS=`ip a s $OPENQRM_SERVER_INTERFACE | grep -w $OPENQRM_SERVER_INTERFACE$ | grep -w inet | awk '{ print $2 }' | cut -d'/' -f1`
+		if [ "$OPENQRM_SERVER_IP_ADDRESS" != "$CONFIGURED_IP" ]; then
+			ip a s | grep ^[0-9] | cut -d':' -f2 | awk '{ print $1 }' | grep -v lo > $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/unconfigured
+			log_failure_msg "Interface $OPENQRM_SERVER_INTERFACE has the wrong ip-configuration"
+			stop_exec_subsystem_force
+			rm -f ${LOCKFILE}
+			return 1
+		fi
+		$RUNSCREEN -dmS monitord $OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-monitord
+		for OPENQRM_PLUGIN in `ls $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/`; do
+			if [ -e $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.running ]; then
+				if [ -x $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN ]; then
+					$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN stop 1>/dev/null 2>/dev/null
+					touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.openqrm_stopped
+				fi
+			fi
+			if [ -e $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.openqrm_stopped ]; then
+				if [ -x $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN ]; then
+					$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN start
+					rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.openqrm_stopped
+				fi
+			fi
+		done
+		return 0
+	fi
+}
+
+
+stop_server() {
+	if [ -d $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/ ]; then
+		for OPENQRM_PLUGIN in `ls $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/`; do
+			if [ -e $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.running ]; then
+				if [ -x $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN ]; then
+					$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN stop
+					touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.openqrm_stopped
+				fi
+			fi
+		done
+	fi
+	stop_exec_subsystem
+	errcode=$?
+	/bin/rm -f ${LOCKFILE}
+	return $errcode
+}
+
+
+
+force_stop() {
+	if [ -d $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/ ]; then
+		for OPENQRM_PLUGIN in `ls $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/`; do
+			if [ -e $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.running ]; then
+				if [ -x $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN ]; then
+					$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN stop
+					touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.openqrm_stopped
+				fi
+			fi
+		done
+	fi
+	stop_exec_subsystem_force
+	errcode=$?
+	/bin/rm -f ${LOCKFILE}
+	return $errcode
+}
+
+
+case "$1" in
+  start)
+		log_daemon_msg "Starting $DESC " "$NAME"
+		# Check if it's running first
+		if running ;  then
+			log_progress_msg "apparently already running"
+			log_end_msg 0
+			exit 0
+		fi
+		if start_server ; then
+			# NOTE: Some servers might die some time after they start,
+			# this code will detect this issue if STARTTIME is set
+			# to a reasonable value
+			[ -n "$STARTTIME" ] && sleep $STARTTIME # Wait some time
+			if  running ;  then
+				# It's ok, the server started and is running
+				log_end_msg 0
+			else
+				# It is not running after we did start
+				log_end_msg 1
+			fi
+		else
+			# Either we could not start it
+			log_end_msg 1
+		fi
+		;;
+  stop)
+		log_daemon_msg "Stopping $DESC" "$NAME"
+		if running ; then
+			# Only stop the server if we see it running
+			errcode=0
+			stop_server || errcode=$?
+			log_end_msg $errcode
+		else
+			# If it's not running don't do anything
+			log_progress_msg "apparently not running"
+			log_end_msg 0
+			exit 0
+		fi
+		;;
+  force-stop)
+		# First try to stop gracefully the program
+		$0 stop
+		if running; then
+			# If it's still running try to kill it more forcefully
+			log_daemon_msg "Stopping (force) $DESC" "$NAME"
+			errcode=0
+			force_stop || errcode=$?
+			log_end_msg $errcode
+		fi
+		;;
+  restart|force-reload)
+		log_daemon_msg "Restarting $DESC" "$NAME"
+		errcode=0
+		stop_server || errcode=$?
+		# Wait some sensible amount, some server need this
+		[ -n "$DIETIME" ] && sleep $DIETIME
+		start_server || errcode=$?
+		[ -n "$STARTTIME" ] && sleep $STARTTIME
+		running || errcode=$?
+		log_end_msg $errcode
+		;;
+  status)
+
+		log_daemon_msg "Checking status of $DESC" "$NAME"
+		if running ;  then
+			log_progress_msg "running"
+			log_end_msg 0
+		else
+			log_progress_msg "apparently not running"
+			log_end_msg 1
+			exit 1
+		fi
+		;;
+  reload)
+		log_warning_msg "Reloading $NAME daemon: not implemented, as openQRM"
+		log_warning_msg "immediately re-reads changes in its configuration files."
+		;;
+
+  *)
+		N=/etc/init.d/$NAME
+		echo "Usage: $N {start|stop|force-stop|restart|force-reload|status}" >&2
+		exit 1
+		;;
+esac
+
+exit 0

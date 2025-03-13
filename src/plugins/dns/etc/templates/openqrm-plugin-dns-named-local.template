@@ -1,0 +1,10 @@
+
+zone "@@OPENQRM_SERVER_DOMAIN@@" IN {
+        type master;
+        file "/etc/bind/zones/@@OPENQRM_SERVER_DOMAIN@@.in.db";
+};
+
+zone "@@OPENQRM_SERVER_IP_FIRSTS_BYTES_REV@@.in-addr.arpa" {
+        type master;
+        file "/etc/bind/zones/@@OPENQRM_SERVER_DOMAIN@@.rev.db";
+};

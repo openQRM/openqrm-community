@@ -1,0 +1,36 @@
+#!/bin/bash
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+ifconfig $1 0.0.0.0 promisc up
+brctl addif @@OPENQRM_PLUGIN_KVM_BRIDGE@@ $1
+sleep 2
+
+# bandwidth monitor hook enabled ?
+if [ -x "@@OPENQRM_SERVER_BASE_DIR@@/openqrm/plugins/bandwidth/sbin/kvm-bandwidth-monitor" ]; then
+
+    RUNSCREEN=`which screen`
+    if [ -x /usr/bin/screen.real ]; then
+	RUNSCREEN="/usr/bin/screen.real"
+    fi
+
+    # find vm name
+    VM_BASE_DIR=$(pushd $(dirname $0) > /dev/null; echo $PWD; popd > /dev/null)
+    KVM_VM_NAME=`basename $VM_BASE_DIR`
+
+    kill `ps ax | grep kvm-bandwidth-monitor | grep -v grep | grep -w $1 | awk {' print $1 '}` 2>/dev/null
+    $RUNSCREEN -dmS $1 @@OPENQRM_SERVER_BASE_DIR@@/openqrm/plugins/bandwidth/sbin/kvm-bandwidth-monitor $KVM_VM_NAME $1
+fi
+

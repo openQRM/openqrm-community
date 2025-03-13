@@ -1,0 +1,357 @@
+#!/bin/bash
+# this is the root-mount initrd-service
+# which proivdes function to mount/remount the remote
+# lvm-iscsi-rootfs according to the image_deployment_parameters at /mnt
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+# lvm-iscsi-storage
+# Required defines in the image_deploy_paramters
+#
+#
+# Optional parameters 
+#
+# IMAGE_INSTALL_FROM_NFS			- can be set to an (nfs) location from
+#									  which the image will be installed at
+#									  deployment time
+#									  syntax is : storage_id:ip_of_nfs-server:path_to_target_image
+#
+# IMAGE_TRANSFER_TO_NFS				- can be set to an (nfs) location from
+#									  which the image will be transfered to at
+#									  deployment time
+#									  syntax is : storage_id:ip_of_nfs-server:path_to_target_image
+#
+# IMAGE_INSTALL_FROM_LOCAL			- set to a local harddisk device (e.g. /dev/hda1) this
+#									  option will install the lvm-iscsi-storage image on 
+#									  boot-time from the local-device
+#
+# IMAGE_TRANSFER_TO_LOCAL			- set to a local harddisk device (e.g. /dev/hda1) this option will transfrom
+#									  the lvm-iscsi-storage image on boot-time to the local-device
+#
+#
+#
+# IMAGE_INSTALL_FROM_LOCAL_FS_TYPE	- set to a local harddisk device fs-type (e.g. ext3)
+#
+# IMAGE_TRANSFER_TO_LOCAL_FS_TYPE	- set to a local harddisk device fs-type (e.g. ext3)
+#
+# IMAGE_NFS_MOUNT_OPTIONS			- can be e.g. set to proto=tcp for the install/transform phase
+#
+#
+# get the deployment parameters from openqrm.conf
+OPENQRM_RESOURCE_PARAMETER_FILE="/var/openqrm/openqrm-resource.conf"
+. $OPENQRM_RESOURCE_PARAMETER_FILE
+eval $image_deployment_parameter
+export OPENQRM_SERVER_BASE_DIR=$resource_basedir
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+
+# nfs-options for the install+transform phase
+if [ "$IMAGE_NFS_MOUNT_OPTIONS" != "" ]; then
+	IMAGE_NFS_MOUNT_OPTIONS=",$IMAGE_NFS_MOUNT_OPTIONS"
+fi
+# default to ext3
+if [ "$IMAGE_INSTALL_FROM_LOCAL_FS_TYPE" == "" ]; then
+	IMAGE_INSTALL_FROM_LOCAL_FS_TYPE="ext3"
+fi
+if [ "$IMAGE_TRANSFER_TO_LOCAL_FS_TYPE" == "" ]; then
+	IMAGE_TRANSFER_TO_LOCAL_FS_TYPE="ext3"
+fi
+
+# here we gather the target name + lun from the image_rootdevice
+VOLUME_GROUP=`echo $image_rootdevice | cut -d':' -f1`
+IMAGE_ROOTDEVICE=`echo $image_rootdevice | cut -d':' -f2`
+IMAGE_TARGET=`echo $IMAGE_ROOTDEVICE | cut -d'/' -f3`
+IMAGE_LUN=`echo $IMAGE_ROOTDEVICE | cut -d'/' -f4`
+
+# define wget to use with https
+if [ "$openqrm_web_protocol" == "https" ]; then
+	export WGET="wget --no-check-certificate -q"
+else
+	export WGET="wget -q"
+fi
+
+#######################################################################
+# required functions ##################################################
+#######################################################################
+
+function mount_rootfs() {
+
+	# check to find the right binaries fitting to kernel + rootfs
+	if [ "$kernel_name" == "default" ]; then
+		# we get the default binaries
+		# get iscsid via wget from the openQRM-servers boot-service dir
+		$WGET -O /sbin/iscsid $openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/iscsid
+		$WGET -O /sbin/iscsiadm $openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/iscsiadm
+	else
+		# we try to get the binaries fitting to the kernel name
+		# -> if a special version is not available we go with the default
+		if ! $WGET -O /sbin/iscsid $openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/iscsid.$kernel_name; then
+			$WGET -O /sbin/iscsid $openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/iscsid
+		fi
+		if ! $WGET -O /sbin/iscsiadm $openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/iscsiadm.$kernel_name; then
+			$WGET -O /sbin/iscsiadm $openqrm_web_protocol://$resource_openqrmserver/openqrm/boot-service/iscsiadm
+		fi
+
+	fi
+	chmod +x /sbin/iscsi*
+	mkdir -p /tmp
+
+	# load iscsi related modules
+	modprobe iscsi_tcp
+	modprobe libiscsi
+	modprobe scsi_transport_iscsi
+	modprobe scsi_mod
+	modprobe sg
+	modprobe sd_mod
+	modprobe ib_iser
+
+	# create config /etc/iscsi/iscsid.conf
+	mkdir -p /etc/iscsi/
+	cat >> /etc/iscsi/iscsid.conf << EOF
+node.startup = manual
+node.session.timeo.replacement_timeout = 120
+node.conn[0].timeo.login_timeout = 15
+node.conn[0].timeo.logout_timeout = 15
+node.conn[0].timeo.noop_out_interval = 10
+node.conn[0].timeo.noop_out_timeout = 15
+node.session.iscsi.InitialR2T = No
+node.session.iscsi.ImmediateData = Yes
+node.session.iscsi.FirstBurstLength = 262144
+node.session.iscsi.MaxBurstLength = 16776192
+node.conn[0].iscsi.MaxRecvDataSegmentLength = 65536
+
+node.session.auth.authmethod = CHAP
+node.session.auth.username = $IMAGE_TARGET
+node.session.auth.password = $IMAGE_ISCSI_AUTH
+
+EOF
+
+	# create /etc/iscsi/initiatorname.iscsi
+	cat >> /etc/iscsi/initiatorname.iscsi << EOF
+InitiatorName=iqn.1993-08.org.debian:01:31721e7e6b8f
+EOF
+	# also create /etc/initiatorname.iscsi, some open-iscsi version looking for that
+	cp /etc/iscsi/initiatorname.iscsi /etc/initiatorname.iscsi
+
+	# start syslog + klogd
+	syslogd &
+	klogd&
+
+	# start iscsid
+	/sbin/iscsid &
+	sleep 2
+
+	# discover
+	echo "lvm-iscsi-storage: Discoverying Iscsi-target $image_storage_server_ip:3260"
+	iscsiadm -m discovery -t sendtargets -p $image_storage_server_ip:3260
+
+	# login
+	iscsiadm -m node -T $IMAGE_TARGET -p $image_storage_server_ip:3260 --login
+
+	# let udev settle
+	sleep 4
+
+	# check that udev found the new device
+	FIND_ISCSI_BLOCK_DEVICE=`find /sys/class/iscsi_session/session*/device/target*/*/ -name block | head -n1`
+	if [ "$FIND_ISCSI_BLOCK_DEVICE" == "" ]; then
+		FIND_ISCSI_BLOCK_DEVICE=`find /sys/class/iscsi_session/session*/device/target*/*/ -name block:s* | head -n1`
+		if [ "$FIND_ISCSI_BLOCK_DEVICE" == "" ]; then
+			echo "ERROR: Udev did not detect the new device"
+			echo "ERROR: Could not look-up the Iscsi device in the sys-fs dir"
+			# give a shell for the admin
+			/bin/bash
+		fi
+	fi
+	# check for different sysfs styles
+	if [ -h $FIND_ISCSI_BLOCK_DEVICE ]; then
+		ISCSI_BLOCK_DEVICE_NAME=`readlink $FIND_ISCSI_BLOCK_DEVICE`
+		ISCSI_BLOCK_DEVICE_NAME=`basename $ISCSI_BLOCK_DEVICE_NAME`
+		echo "SUCCESS: Found $ISCSI_BLOCK_DEVICE_NAME in sys-fs (as symlink)"
+	elif [ -d $FIND_ISCSI_BLOCK_DEVICE ]; then
+		ISCSI_BLOCK_DEVICE_NAME=`ls $FIND_ISCSI_BLOCK_DEVICE`
+		echo "SUCCESS: Found $ISCSI_BLOCK_DEVICE_NAME in sys-fs (as dir)"
+	else
+		echo "ERROR: Udev did not detect the new device"
+		echo "ERROR: Could not look-up the Iscsi device in the sys-fs dir"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	# export the blockdevice name for the further functions
+	export ISCSI_BLOCK_DEVICE="/dev/$ISCSI_BLOCK_DEVICE_NAME"
+
+	# finallly mount
+	if ! mount -t $image_rootfstype $ISCSI_BLOCK_DEVICE /mnt; then
+		# in case we install from nfs we create a fs since this should be a new lun
+		if  [ "$IMAGE_INSTALL_FROM_NFS" != "" ]; then
+			echo "NOTICE: Found install-from-nfs enabled but failed mounting the rootdevice"
+			echo "NOTICE: Assuming a new (unformatted) Lun -> creating $image_rootfstype filesystem on $ISCSI_BLOCK_DEVICE"
+			mke2fs -F -j $ISCSI_BLOCK_DEVICE
+			if ! mount -t $image_rootfstype $ISCSI_BLOCK_DEVICE /mnt; then
+				echo "ERROR: Could not mount $ISCSI_BLOCK_DEVICE via iscsi"
+				# give a shell for the admin
+				/bin/bash
+			else
+				echo "lvm-iscsi-storage: Mounted $ISCSI_BLOCK_DEVICE rw"
+			fi
+		else
+			echo "ERROR: Could not mount $ISCSI_BLOCK_DEVICE via iscsi"
+			# give a shell for the admin
+			/bin/bash
+		fi
+	else
+		echo "lvm-iscsi-storage: Mounted $ISCSI_BLOCK_DEVICE rw"
+	fi
+
+	if  [ "$IMAGE_INSTALL_FROM_NFS" != "" ]; then
+		install_rootfs_from_nfs
+	else
+		echo "lvm-iscsi-storage: Skipping install phase"
+	fi
+	if  [ "$IMAGE_TRANSFER_TO_NFS" != "" ]; then
+		transfer_rootfs_to_nfs
+	else
+		echo "lvm-iscsi-storage: Skipping transfer-to-nfs phase"
+	fi
+	if  [ "$IMAGE_INSTALL_FROM_LOCAL" != "" ]; then
+		install_rootfs_from_local
+	else
+		echo "lvm-iscsi-storage: Skipping install-from-local phase"
+	fi
+	if  [ "$IMAGE_TRANSFER_TO_LOCAL" != "" ]; then
+		transfer_rootfs_to_local
+	else
+		echo "lvm-iscsi-storage: Skipping transfer-to-local phase"
+	fi
+
+}
+
+
+function remount_rootfs() {
+	# Debian/Ubuntu Systems want their nfs-rootfs in rw mode
+	if [ -f /mnt/etc/apt/sources.list ]; then
+		if grep ubuntu /mnt/etc/apt/sources.list >/remountlog; then
+			echo "lvm-iscsi-storage: Skipping Re-mount $ISCSI_BLOCK_DEVICE ro"
+			rm -f /remountlog
+			return
+		fi
+	fi
+	REMOUNT_LOOP=0
+	# remont /mnt ro
+	while ! mount -t $image_rootfstype -o ro,remount $ISCSI_BLOCK_DEVICE /mnt; do
+		echo -n "."
+		sleep 1
+		REMOUNT_LOOP=$[ REMOUNT_LOOP + 1 ]
+		if [ "$REMOUNT_LOOP" == "10" ]; then
+			echo "ERROR: lvm-iscsi-storage could not remount /mnt "
+			/bin/bash
+		fi
+	done
+	echo "lvm-iscsi-storage: Re-mounted $ISCSI_BLOCK_DEVICE ro"
+
+}
+
+
+function create_fstab() {
+	rm -f $IMAGE_FSTAB
+	echo "$ISCSI_BLOCK_DEVICE   /     $image_rootfstype  defaults   0 0" >> $IMAGE_FSTAB
+}
+
+
+#######################################################################
+# optional functions ##################################################
+#######################################################################
+
+function install_rootfs_from_nfs() {
+	modprobe sunrpc 1>/dev/null 2>&1
+	modprobe lockd 1>/dev/null 2>&1
+	modprobe nfs 1>/dev/null 2>&1
+	rm -rf /dev/null
+	mknod -m 666 /dev/null c 1 3
+	openqrm_portmap_start
+	STORAGE_ID=`echo $IMAGE_INSTALL_FROM_NFS | cut -d':' -f1`
+	IMAGE_INSTALL_FROM_NFS=`echo $IMAGE_INSTALL_FROM_NFS | cut -d':' -f2-`
+	echo "lvm-iscsi-storage: Installing $resource_image from $IMAGE_INSTALL_FROM_NFS ($STORAGE_ID)"
+	mkdir -p /mnt2
+	if ! mount -t nfs -o ro$IMAGE_NFS_MOUNT_OPTIONS $IMAGE_INSTALL_FROM_NFS /mnt2; then
+		echo "ERROR: Could not mount $IMAGE_INSTALL_FROM_NFS by nfs"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	echo "lvm-iscsi-storage: Starting install-from-nfs phase. This can take a while ...."
+	rsync -aq /mnt2/* /mnt/
+	echo "lvm-iscsi-storage: Install-from-nfs phase finished. Continuing boot-up"
+	umount /mnt2
+	rmdir /mnt2
+	openqrm_portmap_stop
+}
+
+
+function transfer_rootfs_to_nfs() {
+	modprobe sunrpc 1>/dev/null 2>&1
+	modprobe lockd 1>/dev/null 2>&1
+	modprobe nfs 1>/dev/null 2>&1
+	rm -rf /dev/null
+	mknod -m 666 /dev/null c 1 3
+	openqrm_portmap_start
+	STORAGE_ID=`echo $IMAGE_TRANSFER_TO_NFS | cut -d':' -f1`
+	IMAGE_TRANSFER_TO_NFS=`echo $IMAGE_TRANSFER_TO_NFS | cut -d':' -f2-`
+	echo "lvm-iscsi-storage: Transfering $resource_image to $IMAGE_TRANSFER_TO_NFS ($STORAGE_ID)"
+	mkdir -p /mnt2
+	if ! mount -t nfs -o rw$IMAGE_NFS_MOUNT_OPTIONS $IMAGE_TRANSFER_TO_NFS /mnt2; then
+		echo "ERROR: Could not mount $IMAGE_TRANSFER_TO_NFS by nfs"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	echo "lvm-iscsi-storage: Starting transfer-to-nfs phase. This can take a while ...."
+	rsync -aq /mnt/* /mnt2/
+	echo "lvm-iscsi-storage: Transfer-to-nfs phase finished. Continuing boot-up"
+	umount /mnt2
+	rmdir /mnt2
+	openqrm_portmap_stop
+}
+
+
+function install_rootfs_from_local() {
+	modprobe ext3 1>/dev/null 2>&1
+	mkdir -p /mnt2
+	if ! mount -t $IMAGE_INSTALL_FROM_LOCAL_FS_TYPE -o ro $IMAGE_INSTALL_FROM_LOCAL /mnt2; then
+		echo "ERROR: Could not mount $IMAGE_INSTALL_FROM_LOCAL / $IMAGE_INSTALL_FROM_LOCAL_FS_TYPE"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	echo "lvm-iscsi-storage: Starting install-to-local phase. This can take a while ...."
+	rsync -aq /mnt2/* /mnt/
+	echo "lvm-iscsi-storage: Install-to-local phase finished. Continuing boot-up"
+	umount /mnt2
+	rmdir /mnt2
+}
+
+
+function transfer_rootfs_to_local() {
+	modprobe ext3 1>/dev/null 2>&1
+	mkdir -p /mnt2
+	if ! mount -t $IMAGE_TRANSFER_TO_LOCAL_FS_TYPE -o rw $IMAGE_TRANSFER_TO_LOCAL /mnt2; then
+		echo "ERROR: Could not mount $IMAGE_TRANSFER_TO_LOCAL / $IMAGE_TRANSFER_TO_LOCAL_FS_TYPE"
+		# give a shell for the admin
+		/bin/bash
+	fi
+	echo "lvm-iscsi-storage: Starting transfer-to-local phase. This can take a while ...."
+	rsync -aq /mnt/* /mnt2/
+	echo "lvm-iscsi-storage: Transfer-to-local phase finished. Continuing boot-up"
+	umount /mnt2
+	rmdir /mnt2
+}
+
+
+

@@ -1,0 +1,777 @@
+#!/bin/bash
+# this is the package function file for openQRM
+# only functions needed for packaging should go in here
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+if [ "$OPENQRM_SERVER_BASE_DIR" == "" ]; then
+	echo "ERROR: Please export OPENQRM_SERVER_BASE_DIR before sourcing $0"
+	exit 1
+fi
+if [ "$OPENQRM_SOURCE_DIR" == "" ]; then
+	echo "ERROR: Please export OPENQRM_SOURCE_DIR before sourcing $0"
+	exit 1
+fi
+
+# get the openqrm-server configuration + functions
+if [ -f $OPENQRM_SOURCE_DIR/etc/openqrm-server.conf ]; then
+	. $OPENQRM_SOURCE_DIR/etc/openqrm-server.conf
+	. $OPENQRM_SOURCE_DIR/include/openqrm-functions
+	for VAR in `cat $OPENQRM_SOURCE_DIR/etc/openqrm-server.conf | grep -v ^# | grep OPENQRM | cut -d'=' -f1`; do
+		eval `export $VAR`
+	done
+	PACKAGE_MANAGER_TIME_OUT=3600
+else
+	PACKAGE_MANAGER_TIME_OUT=30
+fi
+# get distribution
+export OPENQRM_PACKAGE_DISTRIBUTION=`openqrm_get_distro`
+
+
+# runs a command with a timeout
+function openqrm_cmd_timeout() {
+	sleep_time=$PACKAGE_MANAGER_TIME_OUT
+	command=$@
+	$command &
+	cmd_pid=$!
+	( sleep $sleep_time && kill $cmd_pid &>/dev/null && echo "Stopped $command due to timeout $sleep_time exceeded" ) &
+	killer_pid=$!
+	wait $cmd_pid &> /dev/null
+	wait_status=$?
+	if [ $wait_status == 0 ]; then
+		disown $killer_pid
+		kill $killer_pid &>/dev/null
+	fi
+	return $wait_status
+}
+
+
+
+
+
+#
+# updates the system's package manager
+#
+# returns the return code of the package manager; the only reliable check is
+# to check for a non-zero returncode (which means an error has occurred).
+#
+function openqrm_update_package_manager() {
+	local PACKAGE=$1
+	# check which dependencies to use
+	if [ -f /etc/debian_version ]; then
+		WHOAMI=`whoami`
+		if [ "$WHOAMI" != "root" ]; then
+			export SUDO="sudo"
+		fi
+		openqrm_cmd_timeout $SUDO apt-get update
+	fi
+}
+
+
+#
+# Install a system dependency using the system's package manager
+#
+# $1: package name
+# returns the return code of the package manager; the only reliable check is
+# to check for a non-zero returncode (which means an error has occurred).
+#
+function openqrm_install_os_dependency() {
+	local PACKAGE=$1
+	# check which dependencies to use
+	if [ -f /etc/debian_version ]; then
+		WHOAMI=`whoami`
+		if [ "$WHOAMI" != "root" ]; then
+			export SUDO="sudo"
+		fi
+
+		# support different php versions on debian/ubuntu
+		ADAPT_PACKAGE=false
+		if echo $PACKAGE | grep ^php 1>/dev/null; then
+		    ADAPT_PACKAGE=true
+		fi
+		if [ "$PACKAGE" == "libapache2-mod-php" ]; then
+		    ADAPT_PACKAGE=true
+		fi
+		if [ "$ADAPT_PACKAGE" == "true" ]; then
+		    PHP_VERSION=`apt-cache search php | grep ^'php[0-9].* ' | awk {' print $1 '} | grep -v '-' | grep -v cc | head -n1 | sed -e "s/php//g"`
+		    if [ "$PHP_VERSION" == "" ]; then
+			echo "ERROR: Could not find PHP version to install!"
+			echo "-> please install $PACKAGE manually!"
+			return 1
+		    fi
+		    # php-xml does not exists in php version 5
+		    if [ "$PACKAGE" == "php-xml" ]; then
+			if echo $PHP_VERSION | grep ^5 1>/dev/null; then
+			    return 0
+			fi
+		    fi
+		    # php modules
+		    if echo $PACKAGE | grep ^php-* 1>/dev/null; then
+			PACKAGE=`echo $PACKAGE | sed -e "s/php-/php$PHP_VERSION-/"g`
+		    fi
+		    # php main
+		    if [ "$PACKAGE" == "php" ] ; then
+			PACKAGE=$PACKAGE""$PHP_VERSION
+		    fi
+		    # libapache2-mod-php5
+		    if [ "$PACKAGE" == "libapache2-mod-php" ] ; then
+			PACKAGE=$PACKAGE""$PHP_VERSION
+		    fi
+
+		fi
+
+
+		# if we already have the package installed, don't install it
+		local PACKAGESTATE=`dpkg -s $PACKAGE | grep '^Status' | awk '{print $4}'`
+		if [ "$PACKAGESTATE" != "installed" ]; then
+			if [ "$FORCE_INSTALL" == "true" ]; then
+				$SUDO apt-get -y install $PACKAGE
+			else
+				$SUDO apt-get install $PACKAGE
+			fi
+		fi
+	elif [ -f /etc/redhat-release ]; then
+		if [ "$FORCE_INSTALL" == "true" ]; then
+			su - root -c "yum -y install $PACKAGE"
+		else
+			su - root -c "yum install $PACKAGE"
+		fi
+
+	elif [ -f /etc/SuSE-release ]; then
+		if [ "$FORCE_INSTALL" == "true" ]; then
+			su - root -c "rpm -e --nodeps $PACKAGE"
+		fi
+		# special handling for SUSE and zypper. We get a 0 return code,
+		# even if the requested package is not available. This wrapper
+		# returns 1 if the package is not found.
+		local TMPFILE=$OPENQRM_BUILD_TMP_DIR/$(basename $0).$RANDOM.txt
+		LC_ALL=C su - root -c "zypper --non-interactive install $PACKAGE" 2>&1 | tee "$TMPFILE"
+		local RETURNCODE=${PIPESTATUS[0]}
+		if cat "$TMPFILE" | grep -c "not found" >/dev/null ; then
+			rm "$TMPFILE"
+			return 1;
+		else
+			rm "$TMPFILE"
+			return $RETURNCODE
+		fi
+	fi
+}
+
+
+
+#
+# Install a system dependency using openqrm_install_os_dependency
+#
+# $1: binary name
+# $2: package name
+# returns 0 in case of success, post an error in case of failue
+function openqrm_full_fill_os_dependency() {
+	local BINARY_DEP=$1
+	local PACKAGE_DEP=$2
+	export FORCE_INSTALL=true
+	if ! which $BINARY_DEP 1>/dev/null; then
+		openqrm_install_os_dependency $PACKAGE_DEP
+	else
+		return 0
+	fi
+	if ! which $BINARY_DEP 1>/dev/null; then
+		openqrm_post_event 0 "dependency" 2 "openqrm-package-functions" "Could not auto-install $PACKAGE_DEP on resource $resource_id!"
+		openqrm_post_event 0 "dependency" 2 "openqrm-package-functions" "Please manually install $PACKAGE_DEP on resource $resource_id!"
+		return 1
+	else
+		return 0
+	fi
+
+}
+
+
+
+function openqrm_check_requirements() {
+	if [ ! -d "$OPENQRM_SERVER_BASE_DIR/openqrm/plugins" ]; then
+		print_error "$OPENQRM_SERVER_BASE_DIR/openqrm/plugins does not exist. Run make check after installing openQRM!"
+		return 1
+	fi
+	export FORCE_INSTALL=true
+	# check which dependencies to use
+	if [ -f /etc/debian_version ]; then
+		print_message "Checking the requirements for Debian/Ubuntu based systems ..."
+	elif [ -f /etc/redhat-release ]; then
+		print_message "Checking the requirements for RedHat based systems ..."
+		# check for epel-release
+		echo "Checking for epel-release repository ..."
+		if rpm -qa | grep epel-release 1>/dev/null; then
+			echo "-> found epel-release repository available"
+		else
+			echo "ERROR: Please enable the epel-release repository!"
+			return 1
+		fi
+	elif [ -f /etc/SuSE-release ]; then
+		print_message "Checking the requirements for SUSE based systems ..."
+	else
+		print_notice "NOTICE: Could not find out which dependencies to use" \
+			"Please make sure to have all needed components installed!"
+		sleep 4
+		print_message "... Continuing anyway"
+		return 0
+	fi
+
+	print_message "openqrm-server requires: $OPENQRM_SERVER_DEPENDENCIES"
+	for DEP in `echo $OPENQRM_SERVER_DEPENDENCIES | sed -e "s/,//g"`; do
+		openqrm_install_os_dependency $DEP
+		if [ $? != 0 ]; then
+			print_error "$DEP could not be installed. Please install manually to continue"
+			return 1
+		fi
+	done
+
+
+	# get a list of plugins for checking their dependencies
+	OPENQRM_PACKAGE_COMPONENT_LIST=`ls $OPENQRM_SERVER_BASE_DIR/openqrm/plugins`
+	for OPENQRM_PLUGIN in $OPENQRM_PACKAGE_COMPONENT_LIST; do
+		PLUGIN_CONF=$OPENQRM_SOURCE_DIR/plugins/$OPENQRM_PLUGIN/etc/openqrm-plugin-$OPENQRM_PLUGIN"".conf
+		if [ -f $PLUGIN_CONF ]; then
+			. $PLUGIN_CONF
+		else
+			print_notice "openqrm-plugin-$OPENQRM_PLUGIN has no config file. Unable to check dependencies!"
+			continue
+		fi
+		print_message "openqrm-plugin-$OPENQRM_PLUGIN requires: `echo $OPENQRM_PLUGIN_DEPENDENCIES | sed -e "s/openqrm-server//g"`"
+		for DEP in `echo $OPENQRM_PLUGIN_DEPENDENCIES | sed -e "s/,//g" | sed -e "s/openqrm-server//g"`; do
+			openqrm_install_os_dependency $DEP
+			if [ $? != 0 ]; then
+				print_error "$DEP could not be installed. Please install manually to continue"
+				return 1
+			fi
+		done
+	done
+	print_message "Checking for required components finished successfully"
+}
+
+
+
+function openqrm_rpm_package() {
+	CDIR=`pwd`
+	# make sure to have some additional deps installed
+	if [ -f /etc/SuSE-release ]; then
+		export FORCE_INSTALL=true
+		openqrm_install_os_dependency rpm-build
+	else
+		export FORCE_INSTALL=true
+		openqrm_install_os_dependency redhat-rpm-config
+		openqrm_install_os_dependency rpm-build
+		openqrm_install_os_dependency rpmdevtools
+		openqrm_install_os_dependency rpm-devel
+
+		# check for epel-release
+		echo "Checking for epel-release repository ..."
+		if rpm -qa | grep epel-release 1>/dev/null; then
+			echo "-> found epel-release repository available"
+		else
+			echo "ERROR: Please enable the epel-release repository!"
+			return 1
+		fi
+	fi
+
+	# this is only rpm packaging, debian package are build with the standard debian package tools
+	OPENQRM_PACKAGE_ARCHITECTURE=` uname -i`
+	if [ -f /etc/redhat-release ]; then
+		OPENQRM_PACKAGE_SUB_DIR="redhat"
+	elif [ -f /etc/SuSE-release ]; then
+		OPENQRM_PACKAGE_SUB_DIR="packages"
+	fi
+	# check where our build root is. Centos 6 puts it in /root/rpmbuild
+	if [ ! -d "/usr/src/$OPENQRM_PACKAGE_SUB_DIR" ]; then
+		if [ -d /root/rpmbuild ]; then
+			ln -sf /root/rpmbuild /usr/src/$OPENQRM_PACKAGE_SUB_DIR
+		else
+			# here we have just installed rpm-build and no ~/rpmbuild exists yet
+			# we create one by running rpmbuild on a non-existin dummy spec
+			rpmbuild dummy.spec 1>/dev/null 2>&1
+			if [ -d /root/rpmbuild ]; then
+				ln -sf /root/rpmbuild /usr/src/$OPENQRM_PACKAGE_SUB_DIR
+			else
+				echo "ERROR: Could not find nor create the ~/rpmbuild directory!"
+				return 1
+			fi
+		fi
+	fi
+
+	# openqrm package ##########################################################
+
+	# enterprise or community ?
+	if [ -d plugins/cloud-zones ]; then
+		OPENQRM_PACKAGE_NAME="openqrm-enterprise"
+		OPENQRM_PACKAGE_LICENSE="GNU General Public License version 2"
+		OPENQRM_PACKAGE_CONFLICTS="openqrm"
+	else
+		OPENQRM_PACKAGE_NAME="openqrm"
+		OPENQRM_PACKAGE_LICENSE="GPL"
+		OPENQRM_PACKAGE_CONFLICTS="openqrm-enterprise"
+	fi
+	# set postinst + prerm
+	OPENQRM_PACKAGE_PREINSTALL="sh /usr/share/openqrm/etc/init.d/openqrm-server.preinstall"
+	OPENQRM_PACKAGE_PREINSTALL_SCRIPT="/usr/share/openqrm/etc/init.d/openqrm-server.preinstall"
+	OPENQRM_PACKAGE_POSTINSTALL="sh /usr/share/openqrm/etc/init.d/openqrm-server.postinstall"
+	OPENQRM_PACKAGE_PREREMOVE="sh /usr/share/openqrm/etc/init.d/openqrm-server.preremove"
+	# get a list of plugins for checking their dependencies
+	. etc/openqrm-server.conf
+	OPENQRM_PACKAGE_DEPENDENCIES="$OPENQRM_SERVER_DEPENDENCIES"
+	OPENQRM_PACKAGE_COMPONENT_LIST=`ls plugins`
+	for OPENQRM_PLUGIN in $OPENQRM_PACKAGE_COMPONENT_LIST; do
+		PLUGIN_CONF="plugins/$OPENQRM_PLUGIN/etc/openqrm-plugin-$OPENQRM_PLUGIN"".conf"
+		if [ -f $PLUGIN_CONF ]; then
+			. $PLUGIN_CONF
+		fi
+		for DEP in `echo $OPENQRM_PLUGIN_DEPENDENCIES | sed -e "s/,//g" | sed -e "s/openqrm-server//g"`; do
+			if ! echo $OPENQRM_PACKAGE_DEPENDENCIES | grep -w $DEP 1>/dev/null; then
+				OPENQRM_PACKAGE_DEPENDENCIES="$OPENQRM_PACKAGE_DEPENDENCIES, $DEP"
+			fi
+		done
+	done
+	if [ "$OPENQRM_MINOR_RELEASE_VERSION" != "" ]; then
+		export OPENQRM_SERVER_VERSION="$OPENQRM_SERVER_VERSION"."$OPENQRM_MINOR_RELEASE_VERSION"
+	fi
+	# clean up
+	rm -rf /usr/src/$OPENQRM_PACKAGE_SUB_DIR/BUILD/buildtmp /usr/src/$OPENQRM_PACKAGE_SUB_DIR/BUILD/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION
+	# create the source package
+	rm -rf $OPENQRM_PACKAGE_TMP_DIR/openqrm-packaging/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION-$OPENQRM_PACKAGE_DISTRIBUTION.$OPENQRM_PACKAGE_ARCHITECTURE/source/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION
+	mkdir -p $OPENQRM_PACKAGE_TMP_DIR/openqrm-packaging/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION-$OPENQRM_PACKAGE_DISTRIBUTION.$OPENQRM_PACKAGE_ARCHITECTURE/source/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION
+	cp -aR * $OPENQRM_PACKAGE_TMP_DIR/openqrm-packaging/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION-$OPENQRM_PACKAGE_DISTRIBUTION.$OPENQRM_PACKAGE_ARCHITECTURE/source/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION/
+	rm -rf `find $OPENQRM_PACKAGE_TMP_DIR/openqrm-packaging/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION-$OPENQRM_PACKAGE_DISTRIBUTION.$OPENQRM_PACKAGE_ARCHITECTURE/source/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION/ -name .svn`
+	# include the thirdparty source packages
+	if [ -d $CDIR/../buildtmp/openqrm-build ]; then
+		cp -aR $CDIR/../buildtmp $OPENQRM_PACKAGE_TMP_DIR/openqrm-packaging/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION-$OPENQRM_PACKAGE_DISTRIBUTION.$OPENQRM_PACKAGE_ARCHITECTURE/source/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION/thirdparty
+	else
+		if [ ! -d ~/openqrm-thirdparty-cache ]; then
+			./fill-build-cache
+			cp -aR ../buildtmp $OPENQRM_PACKAGE_TMP_DIR/openqrm-packaging/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION-$OPENQRM_PACKAGE_DISTRIBUTION.$OPENQRM_PACKAGE_ARCHITECTURE/source/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION/thirdparty
+		else
+			cp -aR ~/openqrm-thirdparty-cache $OPENQRM_PACKAGE_TMP_DIR/openqrm-packaging/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION-$OPENQRM_PACKAGE_DISTRIBUTION.$OPENQRM_PACKAGE_ARCHITECTURE/source/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION/thirdparty
+		fi
+	fi
+	rm -f /usr/src/$OPENQRM_PACKAGE_SUB_DIR/SOURCES/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION.tgz
+	tar -C $OPENQRM_PACKAGE_TMP_DIR/openqrm-packaging/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION-$OPENQRM_PACKAGE_DISTRIBUTION.$OPENQRM_PACKAGE_ARCHITECTURE/source/ -czf /usr/src/$OPENQRM_PACKAGE_SUB_DIR/SOURCES/$OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION.tgz $OPENQRM_PACKAGE_NAME-$OPENQRM_SERVER_VERSION/
+
+	# create spec file from template
+	cat rpm/openqrm.spec |	\
+		sed -e "s/OPENQRM_PACKAGE_NAME/$OPENQRM_PACKAGE_NAME/g" |	\
+		sed -e "s/OPENQRM_PACKAGE_VERSION/$OPENQRM_SERVER_VERSION/g" |	\
+		sed -e "s/OPENQRM_PACKAGE_LICENSE/$OPENQRM_PACKAGE_LICENSE/g" |	\
+		sed -e "s/OPENQRM_PACKAGE_ARCHITECTURE/$OPENQRM_PACKAGE_ARCHITECTURE/g" |	\
+		sed -e "s/OPENQRM_PACKAGE_DISTRIBUTION/$OPENQRM_PACKAGE_DISTRIBUTION/g" |	\
+		sed -e "s/OPENQRM_PACKAGE_DEPENDENCIES/$OPENQRM_PACKAGE_DEPENDENCIES/g" |	\
+		sed -e "s/OPENQRM_SERVER_BUILD_REQUIREMENTS/$OPENQRM_SERVER_BUILD_REQUIREMENTS/g" |	\
+		sed -e "s/OPENQRM_PACKAGE_CONFLICTS/$OPENQRM_PACKAGE_CONFLICTS/g" |	\
+		sed -e "s#OPENQRM_BUILD_POSTINSTALL#$OPENQRM_BUILD_POSTINSTALL#g" |	\
+		sed -e "s#OPENQRM_PACKAGE_PREINSTALL_SCRIPT#$OPENQRM_PACKAGE_PREINSTALL_SCRIPT#g" |	\
+		sed -e "s#OPENQRM_PACKAGE_PREINSTALL#$OPENQRM_PACKAGE_PREINSTALL#g" |	\
+		sed -e "s#OPENQRM_PACKAGE_POSTINSTALL#$OPENQRM_PACKAGE_POSTINSTALL#g" |	\
+		sed -e "s#OPENQRM_PACKAGE_PREREMOVE#$OPENQRM_PACKAGE_PREREMOVE#g"	\
+		> /usr/src/$OPENQRM_PACKAGE_SUB_DIR/SOURCES/$OPENQRM_PACKAGE_NAME.spec
+
+	rm -rf $OPENQRM_PACKAGE_TMP_DIR/openqrm-packaging
+	mkdir -p $OPENQRM_PACKAGE_TMP_DIR/openqrm-packaging/$OPENQRM_PACKAGE_NAME
+	# build the rpm package
+	rpmbuild -ba /usr/src/$OPENQRM_PACKAGE_SUB_DIR/SOURCES/$OPENQRM_PACKAGE_NAME.spec
+	rm -rf $OPENQRM_PACKAGE_TMP_DIR/openqrm-packaging
+}
+
+
+
+
+
+
+# function to create a debian/ubuntu source package
+function openqrm_create_deb_source() {
+	# find out the short distri name
+	if [ -f /etc/debian_version ]; then
+		# debian or ubuntu, try to find out without lsb-release which may not be installed
+		if grep -i ubuntu /etc/apt/sources.list 1>/dev/null; then
+			OPENQRM_SHORT_DISTRI_NAME="ubuntu"
+		else
+			OPENQRM_SHORT_DISTRI_NAME="debian"
+		fi
+	fi
+	# make sure to have some additional deps installed
+	export FORCE_INSTALL=true
+	openqrm_install_os_dependency build-essential
+	openqrm_install_os_dependency pbuilder
+	openqrm_install_os_dependency fakeroot
+	openqrm_install_os_dependency debhelper
+	openqrm_install_os_dependency rpcbind
+	openqrm_install_os_dependency zlib1g-dev
+	openqrm_install_os_dependency lvm2
+	openqrm_install_os_dependency rsync
+	openqrm_install_os_dependency ethtool
+
+	CDIR=`pwd`
+	TMPBUILD_DIR=`mktemp -d /tmp/deb_source.XXXXXXXXXX` || exit 1
+	if [ "$OPENQRM_MINOR_RELEASE_VERSION" != "" ]; then
+		export OPENQRM_SERVER_VERSION="$OPENQRM_SERVER_VERSION"."$OPENQRM_MINOR_RELEASE_VERSION"
+	fi
+	OPENQRM_UBUNTU_VERSION="$OPENQRM_SERVER_VERSION"
+	export OPENQRM_PACKAGE_NAME="openqrm-enterprise"
+	export OPENQRM_PACKAGE_CONFLICTS="openqrm"
+	mkdir -p $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION
+#	tar cf - . --exclude=".svn" | ( cd $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION/; tar xfp -)
+	tar cf - . | ( cd $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION/; tar xfp -)
+	cd $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION/
+
+	#create deps
+	OPENQRM_PACKAGE_DEPENDENCIES="$OPENQRM_SERVER_DEPENDENCIES"
+	OPENQRM_PACKAGE_COMPONENT_LIST=`ls plugins | grep -v Makefile`
+	for OPENQRM_PLUGIN in $OPENQRM_PACKAGE_COMPONENT_LIST; do
+		rm -rf plugins/$OPENQRM_PLUGIN
+	done
+
+	# copy changelog for package naming
+	cp -f debian/changelog.$OPENQRM_SHORT_DISTRI_NAME debian/changelog
+	sed -i -e "s/^openqrm/openqrm-enterprise/g" debian/changelog
+	for F in `ls debian/openqrm.*`; do
+		FNEW=`echo $F | sed -e "s/openqrm/openqrm-enterprise/g"`
+		mv -f $F $FNEW
+	done
+	# use the enterprise copyright
+	if [ -f debian/copyright.enterprise ]; then
+		mv -f debian/copyright.enterprise debian/copyright
+	fi
+	# create spec file from template
+	cat debian/control |	\
+		sed -e "s/OPENQRM_PACKAGE_NAME/$OPENQRM_PACKAGE_NAME/g" |	\
+		sed -e "s/OPENQRM_PACKAGE_DEPENDENCIES/$OPENQRM_PACKAGE_DEPENDENCIES/g" |	\
+		sed -e "s/OPENQRM_PACKAGE_CONFLICTS/$OPENQRM_PACKAGE_CONFLICTS/g" \
+		> debian/control.configured
+	mv -f debian/control.configured debian/control
+	# remove svn dirs
+	rm -rf `find -name .svn `
+	rm -rf `find -name .git `
+	# avoid the following build confs.
+	rm -f etc/build.conf/adodb.conf
+	rm -f etc/build.conf/busybox.conf
+	rm -f etc/build.conf/dropbear.conf
+	rm -f etc/build.conf/initrd-devices.conf
+	rm -f etc/build.conf/pciutils.conf
+
+	TPDIR=""
+	if [ -d $CDIR/../buildtmp/openqrm-build ]; then
+		TPDIR="$CDIR/../buildtmp"
+	else
+		if [ ! -d ~/openqrm-thirdparty-cache ]; then
+			./fill-build-cache
+			TPDIR="../buildtmp"
+		else
+			TPDIR="~/openqrm-thirdparty-cache"
+		fi
+	fi
+	if [ "$TPDIR" != "" ]; then
+		mkdir -p thirdparty/openqrm-build
+		cp -aR $TPDIR/openqrm-build/htmlobjects thirdparty/openqrm-build/
+		cp -aR $TPDIR/openqrm-build/jqclock thirdparty/openqrm-build/
+		cp -aR $TPDIR/openqrm-build/jquery thirdparty/openqrm-build/
+		cp -aR $TPDIR/openqrm-build/js-interface thirdparty/openqrm-build/
+		cp -aR $TPDIR/openqrm-build/jsmin thirdparty/openqrm-build/
+		cp -aR $TPDIR/openqrm-build/phplib thirdparty/openqrm-build/
+		cp -aR $TPDIR/openqrm-build/treemenuicons thirdparty/openqrm-build/
+		cp -aR $TPDIR/openqrm-build/treemenujs thirdparty/openqrm-build/
+		cp -aR $TPDIR/openqrm-build/openqrm-initrd-template.* thirdparty/openqrm-build/
+	fi
+
+	# prepare openqrm_[version].orig.tar.gz
+	cd $TMPBUILD_DIR/
+	mv $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION/debian .
+	tar -czf $OPENQRM_PACKAGE_NAME"_"$OPENQRM_UBUNTU_VERSION.orig.tar.gz $OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION
+	mv $TMPBUILD_DIR/debian $OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION/
+	# build the source package
+	cd $OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION
+	if [ "$GPGKEY" != "" ]; then
+		dpkg-buildpackage -S -sa -rfakeroot -k$GPGKEY
+	else
+		dpkg-buildpackage -S -sa -rfakeroot
+	fi
+	cd $CDIR
+	mv -f $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME"_"* ../
+	rm -rf $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION
+	rm -rf $TMPBUILD_DIR/buildtmp
+	rmdir $TMPBUILD_DIR
+}
+
+
+# function to create a debian/ubuntu binary package via pbuilder
+function openqrm_pbuilder() {
+	CDIR=`pwd`
+	# find out the short distri name
+	if [ -f /etc/debian_version ]; then
+		# debian or ubuntu, try to find out without lsb-release which may not be installed
+		if grep -i ubuntu /etc/apt/sources.list 1>/dev/null; then
+			OPENQRM_SHORT_DISTRI_NAME="ubuntu"
+		else
+			OPENQRM_SHORT_DISTRI_NAME="debian"
+		fi
+	fi
+	# make sure to have some additional deps installed
+	export FORCE_INSTALL=true
+	openqrm_install_os_dependency build-essential
+	openqrm_install_os_dependency pbuilder
+	openqrm_install_os_dependency fakeroot
+	openqrm_install_os_dependency debhelper
+	openqrm_install_os_dependency rpcbind
+	openqrm_install_os_dependency zlib1g-dev
+	openqrm_install_os_dependency lvm2
+
+	OPENQRM_UBUNTU_VERSION=`cat debian/changelog.$OPENQRM_SHORT_DISTRI_NAME | head -n1 | cut -d'(' -f2 | cut -d')' -f1`
+	DISTRIBUTION_VERSION=`cat debian/changelog.$OPENQRM_SHORT_DISTRI_NAME  | head -n1 | cut -d';' -f1 | awk '{ print $3 }'`
+	OPENQRM_PACKAGE_NAME="openqrm-enterprise"
+	PACKAGE_DESCRIPTION=$OPENQRM_PACKAGE_NAME"_"$OPENQRM_UBUNTU_VERSION.dsc
+	if [ ! -f "../$PACKAGE_DESCRIPTION" ]; then
+		openqrm_create_deb_source
+	fi
+	cd ..
+	# set proxy env for pbuilder if needed
+	PBUILDER_PROXY=""
+	if grep http_proxy /root/.bashrc 1>/dev/null 2>/dev/null; then
+		PBUILDER_PROXY=`grep http_proxy /root/.bashrc | head -n1 | sed -e "s/.*=//g" | sed -e 's/"//g'`
+		export PBUILDER_PROXY_PARAMETER=" --http-proxy $PBUILDER_PROXY"
+	fi
+	# check if to init pbuilder
+	if [ ! -f /var/cache/pbuilder/base.tgz ]; then
+		pbuilder create --distribution $DISTRIBUTION_VERSION $PBUILDER_PROXY_PARAMETER
+	fi
+	# run pbuilder
+	pbuilder build $PACKAGE_DESCRIPTION $PBUILDER_PROXY_PARAMETER
+	echo
+	echo "Packaging finished. Please find the created packages in /var/cache/pbuilder/result"
+	ls -lh /var/cache/pbuilder/result/openqrm*
+	cd $CDIR
+}
+
+
+
+
+
+
+
+# function to create a debian/ubuntu plugin source package
+function openqrm_plugin_create_deb_source() {
+
+	PLUGIN_NAME=$1
+	echo "- building plugin package $PLUGIN_NAME"
+	# find out the short distri name
+	if [ -f /etc/debian_version ]; then
+		# debian or ubuntu, try to find out without lsb-release which may not be installed
+		if grep -i ubuntu /etc/apt/sources.list 1>/dev/null; then
+			OPENQRM_SHORT_DISTRI_NAME="ubuntu"
+		else
+			OPENQRM_SHORT_DISTRI_NAME="debian"
+		fi
+	fi
+	# make sure to have some additional deps installed
+	export FORCE_INSTALL=true
+	openqrm_install_os_dependency build-essential
+	openqrm_install_os_dependency pbuilder
+	openqrm_install_os_dependency fakeroot
+	openqrm_install_os_dependency debhelper
+	openqrm_install_os_dependency rpcbind
+	openqrm_install_os_dependency zlib1g-dev
+	openqrm_install_os_dependency lvm2
+
+	CDIR=`pwd`
+	TMPBUILD_DIR=`mktemp -d /tmp/deb_source.XXXXXXXXXX` || exit 1
+
+	. plugins/$PLUGIN_NAME/etc/openqrm-plugin-$PLUGIN_NAME.conf
+	OPENQRM_UBUNTU_VERSION="$OPENQRM_PLUGIN_VERSION"
+	export OPENQRM_PACKAGE_NAME="openqrm-enterprise-plugin-$PLUGIN_NAME"
+	export OPENQRM_PACKAGE_CONFLICTS="openqrm"
+	mkdir -p $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION
+#	tar cf - . --exclude=".svn" | ( cd $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION/; tar xfp -)
+	tar cf - . | ( cd $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION/; tar xfp -)
+	cd $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION/
+
+	#create deps
+	OPENQRM_PACKAGE_DEPENDENCIES=`echo $OPENQRM_PLUGIN_DEPENDENCIES | sed -e "s/openqrm-server/openqrm-enterprise/g"`
+
+	# copy changelog for package naming
+	cp -f debian/changelog.$OPENQRM_SHORT_DISTRI_NAME debian/changelog
+	sed -i -e "s/^openqrm/openqrm-enterprise-plugin-$PLUGIN_NAME/g" debian/changelog
+	for F in `ls debian/openqrm.*`; do
+		FNEW=`echo $F | sed -e "s/openqrm/openqrm-enterprise-plugin-$PLUGIN_NAME/g"`
+		mv -f $F $FNEW
+	done
+
+	# adapt rules, not copying docs
+	cp -f debian/rules.plugin debian/rules
+	rm -f debian/rules.plugin
+	# remove postinst, postrm and preinst
+	rm -f debian/openqrm*.postinst
+	rm -f debian/openqrm*.postrm
+	rm -f debian/openqrm*.preinst
+	rm -f debian/openqrm*.prerm
+
+	# use the enterprise copyright
+	if [ -f debian/copyright.enterprise ]; then
+		mv -f debian/copyright.enterprise debian/copyright
+	fi
+	# create spec file from template
+	cat debian/control |	\
+		sed -e "s/OPENQRM_PACKAGE_NAME/$OPENQRM_PACKAGE_NAME/g" |	\
+		sed -e "s/OPENQRM_PACKAGE_DEPENDENCIES/$OPENQRM_PACKAGE_DEPENDENCIES/g" |	\
+		sed -e "s/OPENQRM_PACKAGE_CONFLICTS/$OPENQRM_PACKAGE_CONFLICTS/g" \
+		> debian/control.configured
+	mv -f debian/control.configured debian/control
+	# remove svn dirs
+	rm -rf `find -name .svn `
+
+	# remove base
+	rm -rf bin doc rpm sbin tftpboot web
+	# re-create empty Makefile for etc
+	rm -rf etc/build.conf etc/db etc/enterprise etc/httpd etc/init.d etc/templates
+	rm -f etc/Makefile
+	echo "all:" > etc/Makefile
+	echo "install:" >> etc/Makefile
+	echo "clean:" >> etc/Makefile
+	echo "realclean:" >> etc/Makefile
+	echo "uninstall:" >> etc/Makefile
+	echo "configure:" >> etc/Makefile
+	echo "compile:" >> etc/Makefile
+	# re-create empty Makefile for include
+	rm -f include/Makefile
+	echo "all:" > include/Makefile
+	echo "install:" >> include/Makefile
+	echo "clean:" >> include/Makefile
+	echo "realclean:" >> include/Makefile
+	echo "uninstall:" >> include/Makefile
+	echo "configure:" >> include/Makefile
+	echo "compile:" >> include/Makefile
+
+	# remove all other plugins
+	OPENQRM_PACKAGE_COMPONENT_LIST=`ls plugins | grep -v Makefile | grep -v ^$PLUGIN_NAME$`
+	for OPENQRM_PLUGIN in $OPENQRM_PACKAGE_COMPONENT_LIST; do
+		rm -rf plugins/$OPENQRM_PLUGIN
+	done
+
+	TPDIR=""
+	if [ -d $CDIR/../buildtmp/openqrm-build ]; then
+		TPDIR="$CDIR/../buildtmp"
+	else
+		if [ ! -d ~/openqrm-thirdparty-cache ]; then
+			./fill-build-cache
+			TPDIR="../buildtmp"
+		else
+			TPDIR="~/openqrm-thirdparty-cache"
+		fi
+	fi
+	if [ "$TPDIR" != "" ]; then
+		mkdir -p thirdparty/openqrm-build
+
+		if [ -d plugins/$PLUGIN_NAME/etc/build.conf ]; then
+			echo "- configuring build cache for plugin $PLUGIN_NAME"
+			for BUILD_CONF in `ls plugins/$PLUGIN_NAME/etc/build.conf/ | sed -e "s/\.conf//g"`; do
+				echo "- copying $BUILD_CONF to build cache"
+				cp -aR $TPDIR/openqrm-build/$BUILD_CONF thirdparty/openqrm-build/
+			done
+		fi
+	fi
+
+	# prepare openqrm_[version].orig.tar.gz
+	cd $TMPBUILD_DIR/
+	mv $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION/debian .
+	tar -czf $OPENQRM_PACKAGE_NAME"_"$OPENQRM_UBUNTU_VERSION.orig.tar.gz $OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION
+	mv $TMPBUILD_DIR/debian $OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION/
+	# build the source package
+	cd $OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION
+	if [ "$GPGKEY" != "" ]; then
+		dpkg-buildpackage -S -sa -rfakeroot -k$GPGKEY
+	else
+		dpkg-buildpackage -S -sa -rfakeroot
+	fi
+	cd $CDIR
+	mv -f $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME"_"* ../
+	rm -rf $TMPBUILD_DIR/$OPENQRM_PACKAGE_NAME-$OPENQRM_UBUNTU_VERSION
+	rm -rf $TMPBUILD_DIR/buildtmp
+	rmdir $TMPBUILD_DIR
+}
+
+
+
+
+# function to create a debian/ubuntu plugin binary package via pbuilder
+function openqrm_plugin_pbuilder() {
+
+	PLUGIN_NAME=$1
+	CDIR=`pwd`
+	# find out the short distri name
+	if [ -f /etc/debian_version ]; then
+		# debian or ubuntu, try to find out without lsb-release which may not be installed
+		if grep -i ubuntu /etc/apt/sources.list 1>/dev/null; then
+			OPENQRM_SHORT_DISTRI_NAME="ubuntu"
+		else
+			OPENQRM_SHORT_DISTRI_NAME="debian"
+		fi
+	fi
+	# make sure to have some additional deps installed
+	export FORCE_INSTALL=true
+	openqrm_install_os_dependency build-essential
+	openqrm_install_os_dependency pbuilder
+	openqrm_install_os_dependency fakeroot
+	openqrm_install_os_dependency debhelper
+	openqrm_install_os_dependency rpcbind
+	openqrm_install_os_dependency zlib1g-dev
+	openqrm_install_os_dependency lvm2
+
+	OPENQRM_UBUNTU_VERSION=`cat debian/changelog.$OPENQRM_SHORT_DISTRI_NAME | head -n1 | cut -d'(' -f2 | cut -d')' -f1`
+	DISTRIBUTION_VERSION=`cat debian/changelog.$OPENQRM_SHORT_DISTRI_NAME  | head -n1 | cut -d';' -f1 | awk '{ print $3 }'`
+	OPENQRM_PACKAGE_NAME="openqrm-enterprise-plugin-$PLUGIN_NAME"
+	PACKAGE_DESCRIPTION=$OPENQRM_PACKAGE_NAME"_"$OPENQRM_UBUNTU_VERSION.dsc
+	if [ ! -f "../$PACKAGE_DESCRIPTION" ]; then
+		openqrm_plugin_create_deb_source $PLUGIN_NAME
+	fi
+	cd ..
+	# set proxy env for pbuilder if needed
+	PBUILDER_PROXY=""
+	if grep http_proxy /root/.bashrc 1>/dev/null 2>/dev/null; then
+		PBUILDER_PROXY=`grep http_proxy /root/.bashrc | head -n1 | sed -e "s/.*=//g" | sed -e 's/"//g'`
+		export PBUILDER_PROXY_PARAMETER=" --http-proxy $PBUILDER_PROXY"
+	fi
+	# check if to init pbuilder
+	if [ ! -f /var/cache/pbuilder/base.tgz ]; then
+		pbuilder create --distribution $DISTRIBUTION_VERSION $PBUILDER_PROXY_PARAMETER
+	fi
+	# run pbuilder
+	pbuilder build $PACKAGE_DESCRIPTION $PBUILDER_PROXY_PARAMETER
+	echo
+	echo "Packaging finished. Please find the created packages in /var/cache/pbuilder/result"
+	ls -lh /var/cache/pbuilder/result/openqrm*
+	cd $CDIR
+}
+
+
+
+
+# function to create a debian/ubuntu plugin binary package via pbuilder
+function openqrm_packages() {
+	clear
+	echo "building base"
+	sleep 5
+	openqrm_create_deb_source
+	openqrm_pbuilder
+
+	for PLUGIN in `ls plugins | grep -v Makefile`; do
+		clear
+		echo "building plugin $PLUGIN"
+		sleep 5
+		openqrm_plugin_create_deb_source $PLUGIN
+		openqrm_plugin_pbuilder $PLUGIN
+	done
+	
+}

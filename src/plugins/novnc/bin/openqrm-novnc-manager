@@ -1,0 +1,160 @@
+#!/bin/bash
+# this script automatically manages novnc
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/include/openqrm-plugin-novnc-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/etc/openqrm-plugin-novnc.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+openqrm_server_get_config
+export resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+export LANG=C
+
+# unblock starting command queue early for non-blocking + ui commands
+openqrm_unblock_starting_queue $@
+
+# novnc defines
+NOVNC_WEBSERVER_PORT_RANGE_START=6000
+NOVNC_WEBSOCKET_PORT_RANGE_START=6800
+
+if [ -x /usr/bin/screen.real ]; then
+	RUNSCREEN="/usr/bin/screen.real"
+else
+	RUNSCREEN=`which screen`
+fi
+
+
+# debug
+echo "!!!! running: $0 $@" | logger
+
+
+function novnc_manager_usage() {
+	echo "Usage : $0 remoteconsole"
+	exit 1
+}
+
+FULL_COMMANDLINE="$0 $@"
+NOVNC_MANAGER_COMMAND=$1
+shift
+
+while [ $# -ne 0 ]; do
+	case "$1" in
+		-n)
+			VM_NAME=$2
+			shift
+			;;
+		-d)
+			NOVNC_PROXY_PORT=$2
+			shift
+			;;
+		-m)
+			VM_MAC=$2
+			shift
+			;;
+		-v)
+			VM_VNC_PORT_NUMBER=$2
+			shift
+			;;
+		-i)
+			VM_HOST_IP=$2
+			shift
+			;;
+		--openqrm-ui-user)
+			OPENQRM_UI_USER=$2
+			shift
+			;;
+		--openqrm-internal-cmd)
+			OPENQRM_INTERNAL_CMD=$2
+			shift
+			;;
+		--openqrm-cmd-mode)
+			OPENQRM_CMD_MODE=$2
+			shift
+			;;
+		*)
+			echo "ERROR: Free commandline arguments are not allowed"
+			novnc_manager_usage
+			exit 6
+			;;
+	esac
+	shift
+done
+
+
+# main
+case "$NOVNC_MANAGER_COMMAND" in
+	remoteconsole)
+		# remove all not active zombies
+		kill -9 `ps ax | grep python | grep defunct | grep 'Z+' | awk '{ print $1 }'` 1>/dev/null 2>&1
+		# calculate the web + proxy port
+		NOVNC_WEBSERVER_PORT=$(( NOVNC_WEBSERVER_PORT_RANGE_START + NOVNC_PROXY_PORT ))
+		NOVNC_WEBSOCKET_PORT=$(( NOVNC_WEBSOCKET_PORT_RANGE_START + NOVNC_PROXY_PORT ))
+		VM_VNC_PORT=$(( VM_VNC_PORT_NUMBER + 5900 ))
+
+		for NOVNC_WSPROXYPID in `ps ax | grep wsproxy.py | grep -i -v screen | grep -w "$VM_HOST_IP:$VM_VNC_PORT"  | grep -v grep | awk {' print $1 '}`; do
+			kill $NOVNC_WSPROXYPID
+			kill -9 $NOVNC_WSPROXYPID 2>/dev/null
+		done
+		for NOVNC_WSPROXYPID in `ps ax | grep wsproxy.py | grep -i screen | grep -w "$VM_HOST_IP:$VM_VNC_PORT"  | grep -v grep | awk {' print $1 '}`; do
+			kill $NOVNC_WSPROXYPID
+			kill -9 $NOVNC_WSPROXYPID 2>/dev/null
+		done
+		$RUNSCREEN -wipe 1>/dev/null 2>&1
+
+		# start new screen session
+		SCREEN_NAME="NOVNC.$VM_NAME.$VM_HOST_IP.$VM_VNC_PORT_NUMBER"
+		cd $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/vncclient
+
+		NOVNC_KEY=/usr/share/openqrm/etc/ssl/private/openqrm-private.key
+		NOVNC_CERT=/usr/share/openqrm/etc/ssl/cert/openqrm.crt
+		NOVNC_DOCS=$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/novnc/httpdocs
+		if [ -f $NOVNC_KEY -a -f $NOVNC_CERT ]; then
+			$RUNSCREEN -dmS $SCREEN_NAME python utils/wsproxy.py --web $NOVNC_DOCS --idle-timeout=90 --cert=$NOVNC_CERT --key=$NOVNC_KEY $NOVNC_WEBSERVER_PORT $VM_HOST_IP:$VM_VNC_PORT
+		else
+			$RUNSCREEN -dmS $SCREEN_NAME python utils/wsproxy.py --web $NOVNC_DOCS --idle-timeout=90 $NOVNC_WEBSERVER_PORT $VM_HOST_IP:$VM_VNC_PORT
+		fi
+		cd - 1>/dev/null
+		;;
+
+	disable-remoteconsole)
+		# remove all not active zombies
+		kill -9 `ps ax | grep python | grep defunct | grep 'Z+' | awk '{ print $1 }'` 1>/dev/null 2>&1
+		# calculate the web + proxy port
+		#NOVNC_WEBSERVER_PORT=$(( NOVNC_WEBSERVER_PORT_RANGE_START + NOVNC_PROXY_PORT ))
+		#NOVNC_WEBSOCKET_PORT=$(( NOVNC_WEBSOCKET_PORT_RANGE_START + NOVNC_PROXY_PORT ))
+		VM_VNC_PORT=$(( VM_VNC_PORT_NUMBER + 5900 ))
+
+		for NOVNC_WSPROXYPID in `ps ax | grep wsproxy.py | grep -i -v screen | grep -w "$VM_HOST_IP:$VM_VNC_PORT"  | grep -v grep | awk {' print $1 '}`; do
+			kill $NOVNC_WSPROXYPID
+			kill -9 $NOVNC_WSPROXYPID 2>/dev/null
+		done
+		for NOVNC_WSPROXYPID in `ps ax | grep wsproxy.py | grep -i screen | grep -w "$VM_HOST_IP:$VM_VNC_PORT"  | grep -v grep | awk {' print $1 '}`; do
+			kill $NOVNC_WSPROXYPID
+			kill -9 $NOVNC_WSPROXYPID 2>/dev/null
+		done
+		$RUNSCREEN -wipe 1>/dev/null 2>&1
+		exit 0
+		;;
+
+	*)
+		echo "ERROR: Free commandline arguments are not allowed"
+		novnc_manager_usage
+		exit 6
+		;;
+esac
+

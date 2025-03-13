@@ -1,0 +1,226 @@
+#!/bin/bash
+# this script automatically monitors kvm vms
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/include/openqrm-plugin-kvm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/kvm/etc/openqrm-plugin-kvm.conf
+if [ -f $OPENQRM_RESOURCE_PARAMETER_FILE ]; then
+	. $OPENQRM_RESOURCE_PARAMETER_FILE
+	OPENQRM_SERVER_IP=$resource_openqrmserver
+	export SERVER_PROTOCOL=$openqrm_web_protocol
+elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf ]; then
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+	. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+	openqrm_server_get_config
+	OPENQRM_SERVER_IP=$OPENQRM_SERVER_IP_ADDRESS
+	resource_id=0
+	export resource_openqrmserver=$OPENQRM_SERVER_IP_ADDRESS
+	export SERVER_PROTOCOL=$OPENQRM_WEB_PROTOCOL
+	export resource_senddelay=10
+fi
+OPENQRM_POSTENCODE="$OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-postencode"
+OPENQRM_VM_DIR="/var/lib/kvm/openqrm/"
+export LANG=C
+OPENQRM_EVENT="statistics"
+OPENQRM_ACTIVE_STATE="active"
+OPENQRM_STARTING_STATE="starting"
+
+# define wget to use with https
+if [ "$SERVER_PROTOCOL" == "https" ]; then
+	WGET_NO_CERT_CHECK="--no-check-certificate --random-file=/dev/random"
+fi
+
+# let only root run this script
+WHOAMI=`whoami`
+if [ "$WHOAMI" != "root" ]; then
+	echo "ERROR: Please run this script as root!"
+	exit 6
+fi
+
+# mac is the identifier
+KVM_VM_MAC=$1
+if [ "$KVM_VM_MAC" == "" ]; then
+	echo "Usage: $0 <mac-address>"
+	exit 1
+fi
+
+KVM_VM_NAME=`grep -rHi $KVM_VM_MAC $OPENQRM_VM_DIR/*/net1 2>/dev/null | grep KVM_VM_MAC | cut -d':' -f1 2>/dev/null` 2>/dev/null
+KVM_VM_NAME=`dirname $KVM_VM_NAME` 2>/dev/null
+KVM_VM_NAME=`basename $KVM_VM_NAME` 2>/dev/null
+if [ "$KVM_VM_NAME" == "" ]; then
+	echo "NOTICE: Cloud not find KVM-storage vm $KVM_VM_MAC on this host" | logger
+	exit 1
+fi
+
+
+# local used functions
+function send_info() {
+	current_state=`urlencodestring $OPENQRM_ACTIVE_STATE`
+	current_event=`urlencodestring $OPENQRM_EVENT`
+	MESSAGEDATA="resource_id=$resource_id&resource_uptime=$current_uptime&resource_cpunumber=$current_cpu_number&resource_cpuspeed=$current_cpu_speed&resource_cpumodel=$current_cpu_model&resource_memtotal=$current_mem_total&resource_memused=$current_mem_used&resource_swaptotal=$current_swap_total&resource_swapused=$current_swap_used&resource_hostname=$current_hostname&resource_load=$current_cpu_load&resource_nics=$current_nic_count&resource_state=$current_state&resource_event=$current_event";
+	OPENQRM_RESOURCE_INFO_URL="$SERVER_PROTOCOL://$resource_openqrmserver/openqrm/action/resource-monitor.php?resource_command=update_info&$MESSAGEDATA"
+	wget $WGET_NO_CERT_CHECK -q -O /dev/null "$OPENQRM_RESOURCE_INFO_URL"
+}
+
+# uptime
+function find_uptime() {
+	if [ -f /proc/uptime ]; then
+		current_uptime=`cat /proc/uptime | cut -d'.' -f 1`
+	fi
+	if [ -z "$current_uptime" ]; then
+		current_uptime=0
+	fi
+}
+# cpu_speed
+function find_cpu_speed() {
+	if [ -f /proc/cpuinfo ]; then
+		current_cpu_speed=(`cat /proc/cpuinfo | grep "cpu.*MHz"`)
+		current_cpu_speed=${current_cpu_speed[3]/\.*/}
+	fi
+	if [ -z "$current_cpu_speed" ]; then
+		current_cpu_speed=0
+	fi
+}
+# used mem
+function find_mem_used() {
+	local VP=$1
+	if [ -f /proc/$VP/status ]; then
+		VM_RSS=`cat /proc/$VP/status | grep ^VmRSS: | awk '{ print $2 }'`
+		current_mem_used=$(( VM_RSS / 1024 ))
+	else
+		current_mem_used=0
+	fi
+	if [ "$current_mem_used" -gt "$current_mem_total" ]; then
+		current_mem_used=$current_mem_total
+	fi
+	export current_mem_used
+}
+# used cpu load
+function find_cpu_load() {
+	local VP=$1
+	VM_CPU_SLICE=`ps -p $VP -o %cpu | tail -n+2`
+	current_cpu_load=`perl -E "say $VM_CPU_SLICE/10"`
+	export current_cpu_load
+}
+
+
+# get parameters for the vm resource
+KVM_VM_RESOURCE_PARAMETER="$OPENQRM_VM_DIR/$KVM_VM_NAME/resource-parameter.conf"
+# sending resource-id will add the resource if not existing (-1 = new resource)
+# loop get-parameters in case the network card is still not ready initialized
+NETWORKCARD_LOOP=0
+# send id -1 if resource parameters are not existing
+if [ ! -f $KVM_VM_RESOURCE_PARAMETER ]; then
+	NEW_RES_ID="&resource_id=-1"
+fi
+
+while (true); do
+	if wget $WGET_NO_CERT_CHECK -q -O $KVM_VM_RESOURCE_PARAMETER "$SERVER_PROTOCOL://$resource_openqrmserver/openqrm/action/resource-monitor.php?resource_command=get_parameter&resource_mac=$KVM_VM_MAC$NEW_RES_ID"; then
+		if grep resource_id $KVM_VM_RESOURCE_PARAMETER 1>/dev/null 2>&1; then
+			break
+		fi
+	fi
+	# no chance ?
+	if [ "$NETWORKCARD_LOOP" == "10" ]; then
+		echo "ERROR: Could not reach the openQRM-Server at $OPENQRM_SERVER_IP_ADDRESS!"
+		exit 1
+	fi
+	NETWORKCARD_LOOP=$(( NETWORKCARD_LOOP + 1 ))
+	sleep 5
+done
+# source parameters
+. $KVM_VM_RESOURCE_PARAMETER
+echo "$0: Gathering resources-information" | logger
+# gather cpu speed only once
+find_cpu_speed
+# main loop
+while (true); do
+	# if we have a disk, check that the vm is still running
+	. $OPENQRM_VM_DIR/$KVM_VM_NAME/disk1
+	if [ "$KVM_VM_DISK_1" != "" ]; then
+		if ! ps ax | grep kvm | grep -v grep | grep -i "macaddr=$KVM_VM_MAC" 1>/dev/null; then
+			exit 1
+		fi
+		# get the used mem from the VM
+		VM_PID=`ps ax | grep kvm | grep -v grep | grep -i "macaddr=$KVM_VM_MAC" | grep -v -i screen | head -n1 | awk '{ print $1 }'`
+		if [ "$VM_PID" != "" ]; then
+			find_mem_used $VM_PID
+			find_cpu_load $VM_PID
+		fi
+	fi
+	# exit if vm got removed
+	if [ ! -d "$OPENQRM_VM_DIR/$KVM_VM_NAME" ]; then
+		exit 1
+	fi
+	# gathering the values, those may be dynamic e.g. if the VM is updated
+	# source kvm vm config
+	. $OPENQRM_VM_DIR/$KVM_VM_NAME/cpus
+	. $OPENQRM_VM_DIR/$KVM_VM_NAME/ram
+	. $OPENQRM_VM_DIR/$KVM_VM_NAME/net1
+	. $OPENQRM_VM_DIR/$KVM_VM_NAME/net2
+	. $OPENQRM_VM_DIR/$KVM_VM_NAME/net3
+	. $OPENQRM_VM_DIR/$KVM_VM_NAME/net4
+	. $OPENQRM_VM_DIR/$KVM_VM_NAME/net5
+	export current_hostname=$KVM_VM_NAME
+	export resource_cpumodel="Qemu Virtual CPU"
+	export current_cpu_number=$KVM_VM_CPUS
+	export current_mem_total=$KVM_VM_RAM
+	# nic count
+	TOTAL_NIC_COUNT=0
+	if [ "$KVM_VM_MAC_1" != "" ]; then
+		TOTAL_NIC_COUNT=$(( TOTAL_NIC_COUNT + 1 ))
+	fi
+	if [ "$KVM_VM_MAC_2" != "" ]; then
+		TOTAL_NIC_COUNT=$(( TOTAL_NIC_COUNT + 1 ))
+	fi
+	if [ "$KVM_VM_MAC_3" != "" ]; then
+		TOTAL_NIC_COUNT=$(( TOTAL_NIC_COUNT + 1 ))
+	fi
+	if [ "$KVM_VM_MAC_4" != "" ]; then
+		TOTAL_NIC_COUNT=$(( TOTAL_NIC_COUNT + 1 ))
+	fi
+	if [ "$KVM_VM_MAC_5" != "" ]; then
+		TOTAL_NIC_COUNT=$(( TOTAL_NIC_COUNT + 1 ))
+	fi
+	export current_nic_count=$TOTAL_NIC_COUNT
+	# uptime
+	find_uptime
+	# sending statistics
+	send_info
+	# delay
+	sleep $resource_senddelay
+done
+# never reached
+exit 0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

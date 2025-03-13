@@ -1,0 +1,466 @@
+#!/bin/bash
+# this script manages the linuxcoe profiles
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+# get the openQRM functions
+OPENQRM_SERVER_BASE_DIR=$(dirname $0)/../../../..
+OPENQRM_SERVER_BASE_DIR=$(pushd $OPENQRM_SERVER_BASE_DIR > /dev/null && echo $PWD && popd > /dev/null)
+OPENQRM_SOURCE_DIR=$OPENQRM_SERVER_BASE_DIR
+export OPENQRM_SOURCE_DIR
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+# unblock starting command queue early for non-blocking + ui commands
+# only blocking commands
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-package-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/include/openqrm-plugin-linuxcoe-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/etc/openqrm-plugin-linuxcoe.conf
+CURRENT_DIR=`pwd`
+
+AUTO_INSTALL_PXE_TEMPLATE_PRESEED="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/etc/templates/linuxcoe-pxe.preseed"
+AUTO_INSTALL_PXE_TEMPLATE_KICKSTART="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/etc/templates/linuxcoe-pxe.kickstart"
+AUTO_INSTALL_PXE_TEMPLATE_AUTOYAST="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/etc/templates/linuxcoe-pxe.autoyast"
+LINUXCOE_INSTALL_LANGUAGE="en"
+
+
+# get the full openQRM-server config
+openqrm_server_get_config
+
+# functions running on the linuxcoe-server
+function linuxcoe_usage() {
+	echo "Usage : $0 transfer_to_linuxcoe -i <resource-ip> -m <resource-mac> -x <resource-id> -n <profile-name>"
+	echo "        $0 take_over_from_linuxcoe -i <resource-ip> -m <resource-mac> -x <resource-id> -n <profile-name>"
+	echo "        $0 set_linuxcoe_client_to_local_boot -m <resource-mac>"
+	echo "        $0 remove -n <profile-name>"
+	echo "        $0 check"
+	echo ""
+	echo "Optional parameters:"
+	echo "             [--openqrm-ui-user <username>]"
+	echo "             [--openqrm-internal-cmd <true/false>]"
+	echo "             [--openqrm-cmd-mode <regular/background/fork>]"
+	exit 1
+}
+
+
+
+FULL_COMMANDLINE="$0 $@"
+LINUXCOE_COMMAND=$1
+shift
+
+while [ $# -ne 0 ]; do
+	case "$1" in
+		-i)
+			PARAM_RESOURCE_IP=$2
+			shift
+			;;
+		-x)
+			PARAM_RESOURCE_ID=$2
+			shift
+			;;
+		-m)
+			PARAM_RESOURCE_MAC=$2
+			shift
+			;;
+		-n)
+			PARAM_PROFILE_NAME=$2
+			shift
+			;;
+		--openqrm-ui-user)
+			OPENQRM_UI_USER=$2
+			shift
+			;;
+		--openqrm-internal-cmd)
+			OPENQRM_INTERNAL_CMD=$2
+			shift
+			;;
+		--openqrm-cmd-mode)
+			OPENQRM_CMD_MODE=$2
+			shift
+			;;
+		*)
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			echo "ERROR: Free commandline arguments are not allowed"
+			linuxcoe_usage
+			;;
+	esac
+	shift
+done
+
+# checks
+if [ "$LINUXCOE_COMMAND" == "" ]; then
+	openqrm_unblock_starting_queue $FULL_COMMANDLINE
+	linuxcoe_usage
+fi
+if [ "$OPENQRM_UI_USER" != "" ]; then
+	OPENQRM_UI_USER_PARAMETER=" --openqrm-ui-user $OPENQRM_UI_USER"
+fi
+
+# main
+case "$LINUXCOE_COMMAND" in
+	check)
+		LOCK_TIME=`openqrm_lock_queue aquire linuxcoe`
+		trap "openqrm_lock_queue release linuxcoe $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		# first check that the nfs export is ready
+		if ! grep ^$LINUXCOE_ISO_DIRECTORY $NFSEXPORTS 1>/dev/null 2>&1; then
+			if [ ! -d "$LINUXCOE_ISO_DIRECTORY" ]; then
+				mkdir -p $LINUXCOE_ISO_DIRECTORY
+			fi
+			echo "$LINUXCOE_ISO_DIRECTORY *(rw,insecure,no_root_squash,async)" >> $NFSEXPORTS
+			if [ -x /etc/init.d/nfs ]; then
+				/etc/init.d/nfs reload
+			elif [ -x /etc/init.d/nfs-kernel-server ]; then
+				/etc/init.d/nfs-kernel-server reload
+			elif [ -x /etc/init.d/nfsserver ]; then
+				/etc/init.d/nfsserver reload
+			else
+				openqrm_post_event 0 "reload-nfs" 3 "linuxcoe" "Could not find nfs-server init script!"
+			fi
+		fi
+		linuxcoe_log "Checking for unpacked profiles ..."
+
+		for FILE in `file $LINUXCOE_SYSTEMDESIGNER_DIR/* | grep ISO | cut -d':' -f1`; do
+			FILENAME=`basename $FILE`
+			if [ ! -d $LINUXCOE_PROFILE_DIR/$FILENAME ]; then
+				linuxcoe_log "Unpacking $FILE..."
+				MOUNTPOINT=`mktemp -d /tmp/$FILENAME.XXXXXXXXXX` || exit 1
+				if ! mount -o loop $FILE $MOUNTPOINT; then
+					openqrm_post_event 0 "check" 3 "linuxcoe" "ERROR: Could not loop mount $FILE at $MOUNTPOINT!"
+					continue
+				fi
+				mkdir -p $LINUXCOE_PROFILE_DIR/$FILENAME
+				/bin/cp -aRv $MOUNTPOINT/* $LINUXCOE_PROFILE_DIR/$FILENAME/
+				# create the info file for the comments
+				touch $LINUXCOE_PROFILE_DIR/$FILENAME/openqrm.info
+				chmod 777 $LINUXCOE_PROFILE_DIR/$FILENAME/openqrm.info
+				# create the custom post file
+				touch $LINUXCOE_PROFILE_DIR/$FILENAME/custom-post.info
+				chmod 777 $LINUXCOE_PROFILE_DIR/$FILENAME/custom-post.info
+				umount $MOUNTPOINT
+				# add to nfs-export
+				cp -f $LINUXCOE_SYSTEMDESIGNER_DIR/$FILENAME $LINUXCOE_ISO_DIRECTORY/
+			else
+				if [ ! -f $LINUXCOE_PROFILE_DIR/$FILENAME/custom-post.info ]; then
+					touch $LINUXCOE_PROFILE_DIR/$FILENAME/custom-post.info
+					chmod 777 $LINUXCOE_PROFILE_DIR/$FILENAME/custom-post.info
+				fi
+			fi
+		done
+		mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/stat/
+		touch $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/stat/check
+		chmod -R 777 $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/stat/
+
+		openqrm_lock_queue release linuxcoe $LOCK_TIME
+		trap '' EXIT
+		;;
+
+	remove)
+		if [ "$PARAM_PROFILE_NAME" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			linuxcoe_usage
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire linuxcoe`
+		trap "openqrm_lock_queue release linuxcoe $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		linuxcoe_log "Removing profile $PARAM_PROFILE_NAME"
+		if [ -d "$LINUXCOE_PROFILE_DIR/$PARAM_PROFILE_NAME" ]; then
+			rm -rf "$LINUXCOE_PROFILE_DIR/$PARAM_PROFILE_NAME"
+		fi
+		if [ -f "$LINUXCOE_SYSTEMDESIGNER_DIR/$PARAM_PROFILE_NAME" ]; then
+			rm -f "$LINUXCOE_SYSTEMDESIGNER_DIR/$PARAM_PROFILE_NAME"
+		fi
+		if [ -f "$LINUXCOE_ISO_DIRECTORY/$PARAM_PROFILE_NAME" ]; then
+			rm -f "$LINUXCOE_ISO_DIRECTORY/$PARAM_PROFILE_NAME"
+		fi
+
+		openqrm_lock_queue release linuxcoe $LOCK_TIME
+		trap '' EXIT
+		;;
+
+	transfer_to_linuxcoe)
+		if [ "$PARAM_PROFILE_NAME" == "" ] || [ "$PARAM_RESOURCE_ID" == "" ] || [ "$PARAM_RESOURCE_IP" == "" ] || [ "$PARAM_RESOURCE_MAC" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			linuxcoe_usage
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire linuxcoe`
+		trap "openqrm_lock_queue release linuxcoe $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		linuxcoe_log "Applying profile $PARAM_PROFILE_NAME to resource $PARAM_RESOURCE_ID ($PARAM_RESOURCE_IP/$PARAM_RESOURCE_MAC)"
+		RESOURCE_PXELINUXCFG_FILE=`echo 01-$PARAM_RESOURCE_MAC | sed -e "s/:/-/g" | tr '[:upper:]' '[:lower:]'`
+		/bin/cp -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE.lcoe-$PARAM_PROFILE_NAME
+
+		# check which auto-install method to use
+		if [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/profiles/$PARAM_PROFILE_NAME/preseed ]; then
+			AUTO_INSTALL_METHOD="preseed"
+		elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/profiles/$PARAM_PROFILE_NAME/ks.cfg ]; then
+			AUTO_INSTALL_METHOD="kickstart"
+		elif grep autoyast $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/profiles/$PARAM_PROFILE_NAME/isolinux.cfg 1>/dev/null; then
+			AUTO_INSTALL_METHOD="autoyast"
+		else
+			linuxcoe_log "ERROR: Could not find out which Auto-install method to use. Exiting."
+
+			openqrm_lock_queue release linuxcoe $LOCK_TIME
+			trap '' EXIT
+
+			exit 1
+		fi
+
+		case "$AUTO_INSTALL_METHOD" in
+			preseed)
+					linuxcoe_log "Using Automatic installation method $AUTO_INSTALL_METHOD."
+					DEBIAN_NETINSTALL_KERNEL="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/profiles/$PARAM_PROFILE_NAME/linux"
+					DEBIAN_NETINSTALL_INITRD="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/profiles/$PARAM_PROFILE_NAME/initrd.gz"
+					# prepare kernel + initrd for the aut-install
+					if [ ! -f $DEBIAN_NETINSTALL_KERNEL ]; then
+						linuxcoe_log "ERROR: Could not find Debian auto-install kernel $DEBIAN_NETINSTALL_KERNEL"
+
+						openqrm_lock_queue release linuxcoe $LOCK_TIME
+						trap '' EXIT
+
+						exit 1
+					fi
+					if [ ! -f $DEBIAN_NETINSTALL_INITRD ]; then
+						linuxcoe_log "ERROR: Could not find Debian auto-install initrd $DEBIAN_NETINSTALL_INITRD"
+
+						openqrm_lock_queue release linuxcoe $LOCK_TIME
+						trap '' EXIT
+
+						exit 1
+					fi
+					/bin/cp -f $DEBIAN_NETINSTALL_KERNEL $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/vmlinuz-$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME
+					/bin/cp -f $DEBIAN_NETINSTALL_INITRD $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/initrd-$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.img
+
+					# prepare the auto-install pxe boot
+					cat $AUTO_INSTALL_PXE_TEMPLATE_PRESEED | \
+						sed -e "s#@@OPENQRM_BOOTIMAGE_KERNEL@@#vmlinuz-$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME#g"	| \
+						sed -e "s#@@OPENQRM_BOOTIMAGE_INITRD@@#initrd-$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.img#g"	| \
+						sed -e "s#@@LINUXCOE_INSTALL_LANGUAGE@@#$LINUXCOE_INSTALL_LANGUAGE#g"	| \
+						sed -e "s#@@OPENQRM_SERVER_IP_ADDRESS@@#$OPENQRM_SERVER_IP_ADDRESS#g"	| \
+						sed -e "s#@@LINUXCOE_PROFILE_NAME@@#$PARAM_PROFILE_NAME#g"	| \
+						sed -e "s#@@OPENQRM_RESOURCE_ID@@#$PARAM_RESOURCE_ID#g" > $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+
+					linuxcoe_log "Prepared resources pxe-configuration for the automatic installation ($OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE)"
+					# copy the preseed config to the boot-service dir
+					mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe
+					/bin/cp -f $LINUXCOE_PROFILE_DIR/$PARAM_PROFILE_NAME/preseed $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe/preseed.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.cfg
+
+					# add the custom post section
+					if [ -f $LINUXCOE_PROFILE_DIR/$PARAM_PROFILE_NAME/custom-post.info ]; then
+						/bin/cp -f $LINUXCOE_PROFILE_DIR/$PARAM_PROFILE_NAME/custom-post.info $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe/custom-post.info.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME
+					fi
+
+					# add custom late_command for preseed to auto-install openQRM client
+					sed -i -e "s#.*late_command.*##g" $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe/preseed.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.cfg
+					echo "d-i preseed/late_command string wget http://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/lcoe/openqrm-linuxcoe-autoinstall-client && chmod +x ./openqrm-linuxcoe-autoinstall-client && mv -f openqrm-linuxcoe-autoinstall-client /target && if [ ! -e /target/proc/uptime ]; then mount -t proc proc /target/proc; touch /umount_proc; fi && chroot /target ./openqrm-linuxcoe-autoinstall-client $OPENQRM_SERVER_IP_ADDRESS $PARAM_RESOURCE_ID $PARAM_RESOURCE_MAC $OPENQRM_SERVER_BASE_DIR $OPENQRM_WEB_PROTOCOL && wget http://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/lcoe/custom-post.info.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME && chmod +x custom-post.info.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME && mv -f custom-post.info.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME /target && chroot /target ./custom-post.info.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME && if [ -e /umount_proc ]; then umount /target/proc; rm -f /umount_proc; fi" >> $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe/preseed.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.cfg
+					# allow to use weak passwords, linuxcoe does only allow 8 chars
+					echo "d-i user-setup/allow-password-weak boolean true" >> $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe/preseed.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.cfg
+					echo "d-i user-setup/encrypt-home boolean false" >> $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe/preseed.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.cfg
+					;;
+
+
+			kickstart)
+					linuxcoe_log "Using Automatic installation method $AUTO_INSTALL_METHOD."
+					# copy the kickstart config to the boot-service dir early
+					mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe
+					PKS="$OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe/ks.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.cfg"
+					/bin/cp -f $LINUXCOE_PROFILE_DIR/$PARAM_PROFILE_NAME/ks.cfg $PKS
+
+					# adapt ks, remove motd msg + add post
+					cat $PKS | grep useradd > $PKS.useradd
+					sed -i -e "s#.*/etc/motd.*##g" $PKS
+					sed -i -e "s#.*useradd.*##g" $PKS
+					sed -i -e "s#^%post.*##g" $PKS
+					echo "%post" >> $PKS
+					echo "#!/bin/bash" >> $PKS
+					echo "wget http://$OPENQRM_SERVER_IP_ADDRESS/openqrm/boot-service/lcoe/openqrm-linuxcoe-autoinstall-client" >> $PKS
+					echo "chmod +x ./openqrm-linuxcoe-autoinstall-client" >> $PKS
+					echo "mount -t proc proc /proc" >> $PKS
+					echo "./openqrm-linuxcoe-autoinstall-client $OPENQRM_SERVER_IP_ADDRESS $PARAM_RESOURCE_ID $PARAM_RESOURCE_MAC $OPENQRM_SERVER_BASE_DIR $OPENQRM_WEB_PROTOCOL" >> $PKS
+					echo "umount /proc" >> $PKS
+					# add the custom post section
+					if [ -f $LINUXCOE_PROFILE_DIR/$PARAM_PROFILE_NAME/custom-post.info ]; then
+						cat $LINUXCOE_PROFILE_DIR/$PARAM_PROFILE_NAME/custom-post.info >> $PKS
+					fi
+					cat $PKS.useradd >> $PKS
+					rm -f $PKS.useradd
+					# add to install section
+					grep ^%packages -B 1000 $PKS | grep -v ^%packages > $PKS.firstpart
+					grep ^%packages -A 1000 $PKS > $PKS.secondpart
+					echo "text" > $PKS.addtoinstall
+					echo "selinux --disabled" >> $PKS.addtoinstall
+					echo "firewall --disabled" >> $PKS.addtoinstall
+					echo "reboot" >> $PKS.addtoinstall
+					echo "" >> $PKS.addtoinstall
+					echo "" >> $PKS.addtoinstall
+					cat $PKS.firstpart $PKS.addtoinstall $PKS.secondpart > $PKS
+					rm -f $PKS.firstpart $PKS.addtoinstall $PKS.secondpart
+
+					# prepare kernel + initrd for the auto-install
+					KICKSTART_KERNEL="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/profiles/$PARAM_PROFILE_NAME/isolinux/vmlinuz"
+					KICKSTART_INITRD="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/profiles/$PARAM_PROFILE_NAME/isolinux/initrd.img"
+					if [ ! -f $KICKSTART_KERNEL ]; then
+						linuxcoe_log "ERROR: Could not find kickstart auto-install kernel $KICKSTART_KERNEL"
+
+						openqrm_lock_queue release linuxcoe $LOCK_TIME
+						trap '' EXIT
+
+						exit 1
+					fi
+					if [ ! -f $KICKSTART_INITRD ]; then
+						linuxcoe_log "ERROR: Could not find kickstart auto-install initrd $KICKSTART_INITRD"
+
+						openqrm_lock_queue release linuxcoe $LOCK_TIME
+						trap '' EXIT
+
+						exit 1
+					fi
+					/bin/cp -f $KICKSTART_KERNEL $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/vmlinuz-$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME
+					/bin/cp -f $KICKSTART_INITRD $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/initrd-$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.img
+
+					# prepare the auto-install pxe boot
+					cat $AUTO_INSTALL_PXE_TEMPLATE_KICKSTART | \
+						sed -e "s#@@OPENQRM_BOOTIMAGE_KERNEL@@#vmlinuz-$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME#g"	| \
+						sed -e "s#@@OPENQRM_BOOTIMAGE_INITRD@@#initrd-$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.img#g"	| \
+						sed -e "s#@@LINUXCOE_INSTALL_LANGUAGE@@#$LINUXCOE_INSTALL_LANGUAGE#g"	| \
+						sed -e "s#@@OPENQRM_SERVER_IP_ADDRESS@@#$OPENQRM_SERVER_IP_ADDRESS#g"	| \
+						sed -e "s#@@LINUXCOE_PROFILE_NAME@@#$PARAM_PROFILE_NAME#g"	| \
+						sed -e "s#@@PARAM_RESOURCE_MAC@@#$PARAM_RESOURCE_MAC#g"	| \
+						sed -e "s#@@OPENQRM_RESOURCE_ID@@#$PARAM_RESOURCE_ID#g" > $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+
+					linuxcoe_log "Prepared resources pxe-configuration for the automatic installation ($OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE)"
+
+
+					;;
+
+			autoyast)
+
+					linuxcoe_log "Automatic installation method $AUTO_INSTALL_METHOD not supported yet."
+
+					;;
+
+			*)
+					linuxcoe_log "Automatic installation method $AUTO_INSTALL_METHOD not supported yet."
+
+					openqrm_lock_queue release linuxcoe $LOCK_TIME
+					trap '' EXIT
+
+					exit 1
+					;;
+		esac
+
+		openqrm_lock_queue release linuxcoe $LOCK_TIME
+		trap '' EXIT
+
+		# wait for reboot of the resource
+		sleep $OPENQRM_PLUGIN_LINUXCOE_INSTALL_START_DELAY
+		# revert pxe config
+		$0 take_over_from_linuxcoe -n $PARAM_PROFILE_NAME -x $PARAM_RESOURCE_ID -i $PARAM_RESOURCE_IP -m $PARAM_RESOURCE_MAC --openqrm-internal-cmd true
+		# set the clients pxe config to local-boot
+		RESOURCE_PXELINUXCFG_FILE=`echo 01-$PARAM_RESOURCE_MAC | sed -e "s/:/-/g" | tr '[:upper:]' '[:lower:]'`
+		sed -i -e "s/^default.*/default local/g" $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+		chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+
+		# start the openqrm-linuxcoe-monitord to send transaction state to openQRM
+		$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/sbin/openqrm-linuxcoe-monitord $PARAM_RESOURCE_ID $PARAM_RESOURCE_MAC
+		;;
+
+	take_over_from_linuxcoe)
+		if [ "$PARAM_PROFILE_NAME" == "" ] || [ "$PARAM_RESOURCE_ID" == "" ] || [ "$PARAM_RESOURCE_IP" == "" ] || [ "$PARAM_RESOURCE_MAC" == "" ]; then
+			openqrm_unblock_starting_queue $FULL_COMMANDLINE
+			linuxcoe_usage
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire linuxcoe`
+		trap "openqrm_lock_queue release linuxcoe $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		linuxcoe_log "Reverting profile $PARAM_PROFILE_NAME to resource $PARAM_RESOURCE_ID ($PARAM_RESOURCE_IP/$PARAM_RESOURCE_MAC)"
+		RESOURCE_PXELINUXCFG_FILE=`echo 01-$PARAM_RESOURCE_MAC | sed -e "s/:/-/g" | tr '[:upper:]' '[:lower:]'`
+		/bin/mv -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE.lcoe-$PARAM_PROFILE_NAME $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+		# set the clients pxe config to net-boot, this is for appliance stop
+		sed -i -e "s/^default.*/default linux/g" $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+		chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+
+		# clean-up kernel + initrd
+		rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/vmlinuz-$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME
+		rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/initrd-$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.img
+
+		# check which auto-install method was used
+		if [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/profiles/$PARAM_PROFILE_NAME/preseed ]; then
+			AUTO_INSTALL_METHOD="preseed"
+		elif [ -f $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/profiles/$PARAM_PROFILE_NAME/ks.cfg ]; then
+			AUTO_INSTALL_METHOD="kickstart"
+		elif grep autoyast $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/linuxcoe/web/profiles/$PARAM_PROFILE_NAME/isolinux.cfg 1>/dev/null; then
+			AUTO_INSTALL_METHOD="autoyast"
+		else
+			linuxcoe_log "ERROR: Could not find out which Auto-install method to use. Exiting."
+
+			openqrm_lock_queue release linuxcoe $LOCK_TIME
+			trap '' EXIT
+
+			exit 1
+		fi
+		case "$AUTO_INSTALL_METHOD" in
+			preseed)
+				rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe/preseed.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.cfg
+				;;
+			kickstart)
+				rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/lcoe/ks.$PARAM_RESOURCE_ID-$PARAM_PROFILE_NAME.cfg
+				;;
+			autoyast)
+				linuxcoe_log "Automatic installation method $AUTO_INSTALL_METHOD not supported yet."
+				;;
+
+			*)
+				linuxcoe_log "Automatic installation method $AUTO_INSTALL_METHOD not supported yet."
+
+				openqrm_lock_queue release linuxcoe $LOCK_TIME
+				trap '' EXIT
+
+				exit 1
+				;;
+		esac
+
+		openqrm_lock_queue release linuxcoe $LOCK_TIME
+		trap '' EXIT
+		;;
+
+
+	set_linuxcoe_client_to_local_boot)
+		if [ "$PARAM_RESOURCE_MAC" == "" ]; then
+			linuxcoe_usage
+		fi
+
+		LOCK_TIME=`openqrm_lock_queue aquire linuxcoe`
+		trap "openqrm_lock_queue release linuxcoe $LOCK_TIME" EXIT
+		openqrm_unblock_starting_queue $FULL_COMMANDLINE
+
+		echo "NOTICE: Setting resource $PARAM_RESOURCE_MAC to local-boot."
+		# set the clients pxe config to local-boot, this is for appliance start
+		RESOURCE_PXELINUXCFG_FILE=`echo 01-$PARAM_RESOURCE_MAC | sed -e "s/:/-/g" | tr '[:upper:]' '[:lower:]'`
+		sed -i -e "s/^default.*/default local/g" $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+		chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/$RESOURCE_PXELINUXCFG_FILE
+
+		openqrm_lock_queue release linuxcoe $LOCK_TIME
+		trap '' EXIT
+		;;
+
+esac
+

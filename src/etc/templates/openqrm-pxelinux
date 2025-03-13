@@ -1,0 +1,9 @@
+default linux
+
+label linux
+kernel boot/OPENQRM_BOOTIMAGE_KERNEL
+append ramdisk_size=131072 apm=off initrd=boot/OPENQRM_BOOTIMAGE_INITRD id=OPENQRM_RESOURCE_ID openqrm=OPENQRM_SERVER_IP_ADDRESS selinux=0 net.ifnames=0
+ipappend 3
+
+label local
+LOCALBOOT 0

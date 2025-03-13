@@ -1,0 +1,11 @@
+--- cgi-bin/nph-coe_image.org	2012-06-19 19:03:38.130887467 +0200
++++ cgi-bin/nph-coe_image	2012-06-19 19:30:05.530887457 +0200
+@@ -223,7 +223,7 @@
+   print KS "# ks.cfg : Created by $BRAND at ".`date`;
+   print KS "# COE-Profile used: $profile\n";
+   print KS "lang ".$qin->param('lang')."\n" unless ($version =~ /^ESX-4/);
+-  unless (( $os =~ /Fedora/ ) || ( $version =~ /^ESX-4/)) {
++  unless (( $os =~ /Fedora/ ) || ( $os =~ /CentOS/ ) || ( $version =~ /^ESX-4/)) {
+     print KS "langsupport --default ".$qin->param('lang')."\n";  
+     print KS "mouse ".$qin->param('mouse')."\n";
+   }

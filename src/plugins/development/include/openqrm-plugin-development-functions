@@ -1,0 +1,68 @@
+#!/bin/bash
+# this is the functions file for the development-plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+DEVELOPMENT_MANAGER_LOCK_FILE=/var/run/openqrm/development-plugin.lock
+DEVELOPMENT_MANAGER_LOCK_DELAY=5
+DEVELOPMENT_MANAGER_LOCK_RETRY=100
+DEVELOPMENT_MANAGER_LOCK_TIMEOUT=500
+################ common development functions
+
+# logs for development
+function development_manager_log() {
+	local COMPONENT=$1
+	shift
+	local MESSAGE=$@
+	logger -i -t "development plug-in" "$COMPONENT : $MESSAGE"
+}
+
+
+# locking function
+function development_manager_lock() {
+	local COMMAND=$1
+	local RET=1
+
+	if [ ! -d `dirname $DEVELOPMENT_MANAGER_LOCK_FILE` ]; then
+		mkdir -p `dirname $DEVELOPMENT_MANAGER_LOCK_FILE`
+	fi
+	case "$COMMAND" in
+		aquire)
+				lockfile -s $DEVELOPMENT_MANAGER_LOCK_DELAY -r $DEVELOPMENT_MANAGER_LOCK_RETRY -l $DEVELOPMENT_MANAGER_LOCK_TIMEOUT $DEVELOPMENT_MANAGER_LOCK_FILE
+				RET=$?
+				development_manager_log development_manager_lock "Aquired the lock"
+				return $RET
+				;;
+		release)
+				/bin/rm -f $DEVELOPMENT_MANAGER_LOCK_FILE
+				RET=$?
+				development_manager_log development_manager_lock "Released the lock"
+				return $RET
+				;;
+		*)
+			development_manager_log development_manager_lock "No such command. Try 'aquire' or 'release'"
+			return 1
+			;;
+	esac
+}
+
+
+
+################ development functions
+
+
+
+
+
+

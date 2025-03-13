@@ -1,0 +1,38 @@
+openQRM Community 5.3.60 Release Notes
+---------------------------------------------
+OPENQRM AUSTRALIA PTY LTD
+
+>> Welcome to the openQRM Community Edition 5.3.60
+
+>> openQRM Installation - How to get started
+Install a minimal latest 64bit Ubuntu or Debian system on a physical machine. 
+Login to the system, get root access and download a copy of openQRM-5.3.60-Community-Edition.tar.gz to the system.
+
+Extract it using these commands:
+
+  tar xvzfp openQRM-5.3.60-Community-Edition.tar.gz
+  cd openQRM-5.3.60-Community-Edition
+  ./install-openqrm.sh
+
+The installation script will guide you through the process. You will be prompted for some password or setup choices. Please answer these questions according to your requirements.
+
+
+After the installation has completed, go to the web-based openQRM setup.
+
+Open this URL in a browser: http://<IP of your machine>/openqrm
+Username: openqrm
+Password: openqrm
+
+Follow the instructions and enter the desired network settings and database credentials. 
+
+>> Hardware recommendations for evaluation
+* 1 physical system (for openQRM server and required network, virtualization and storage services)
+* Intel or AMD 64bit dual/quad core CPU
+* VT CPU extension (full virtualization support) activated
+* at least 1 GB RAM (the more the better)
+* at least 20 GB of free harddisk/partition space to store server images on
+* 1 network interface card (1 Gbit/s)
+* Internet access to download required software
+
+Please visit our website https://openqrm-enterprise.com
+Community Support is available at http://sourceforge.net/p/openqrm/discussion

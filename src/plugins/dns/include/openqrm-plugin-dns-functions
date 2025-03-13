@@ -1,0 +1,244 @@
+#!/bin/bash
+# this is the functions file for the dns-plugin
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+# where is the init script ?
+if [ -f /etc/debian_version ]; then
+	if [ -e "/etc/init.d/bind9" ]; then
+		DNS_INIT="/etc/init.d/bind9"
+	else
+		DNS_INIT="/etc/init.d/named"
+	fi
+elif [ -f /etc/redhat-release ]; then
+	DNS_INIT="/etc/init.d/named"
+elif [ -f /etc/SuSE-release ]; then
+	DNS_INIT="/etc/init.d/named"
+fi
+# source the config to get the domain name for the openQRM-network
+. $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/openqrm-plugin-dns.conf
+export OPENQRM_SERVER_DOMAIN
+# the location of the tempaltes and db files
+DNS_NAMED_LOCAL_TEMPLATE="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/templates/openqrm-plugin-dns-named-local.template"
+DNS_INDB_TEMPLATE="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/templates/openqrm-plugin-dns-indb.template"
+DNS_REVDB_TEMPLATE="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/templates/openqrm-plugin-dns-revdb.template"
+DNS_INDB="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/bind/zones/$OPENQRM_SERVER_DOMAIN.in.db"
+DNS_REVDB="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/bind/zones/$OPENQRM_SERVER_DOMAIN.rev.db"
+
+DNS_NAMED_CONF_LOCAL="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/bind/named.conf.local"
+
+DNS_CUSTOM_ZONES_DIR="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/bind/zones/custom"
+DNS_CUSTOM_INDB_TEMPLATE="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/templates/openqrm-plugin-dns-custom-indb.template"
+DNS_CUSTOM_REVDB_TEMPLATE="$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/dns/etc/templates/openqrm-plugin-dns-custom-revdb.template"
+
+if [ ! -d $DNS_CUSTOM_ZONES_DIR ]; then
+	mkdir -p $DNS_CUSTOM_ZONES_DIR
+fi
+if [ ! -d /etc/bind/zones/custom ]; then
+	mkdir -p /etc/bind/zones/custom
+fi
+
+
+# logs for dns
+function dns_log() {
+	local COMPONENT=$1
+	shift
+	local MESSAGE=$@
+	logger -i -t "dns plug-in" "$COMPONENT : $MESSAGE"
+}
+
+
+
+
+# functions for custom networks #
+
+
+function dns_create_domain() {
+	local DOMAIN_NAME=$1
+	local NS_IP=$2
+	local NS_IP_LAST_BYTE=`echo $NS_IP | cut -d'.' -f 4`
+	local NS_IP_FIRST_BYTE=`echo $NS_IP | cut -d'.' -f1`
+	local NS_IP_SECOND_BYTE=`echo $NS_IP | cut -d'.' -f2`
+	local NS_IP_THIRD_BYTE=`echo $NS_IP | cut -d'.' -f3`
+	local NS_IP_FIRSTS_BYTES_REV="$NS_IP_THIRD_BYTE.$NS_IP_SECOND_BYTE.$NS_IP_FIRST_BYTE"
+
+	# indb
+	CUSTOM_INDB_FULL_PATH="$DNS_CUSTOM_ZONES_DIR/$DOMAIN_NAME.in.db"
+	cat $DNS_CUSTOM_INDB_TEMPLATE |	\
+		sed -e "s/@@OPENQRM_SERVER_DOMAIN@@/$DOMAIN_NAME/g" |	\
+		sed -e "s/@@OPENQRM_SERVER_IP_ADDRESS@@/$NS_IP/g" |	\
+		sed -e "s/@@OPENQRM_SERVER_IP_LAST_BYTE@@/$NS_IP_LAST_BYTE/g" > $CUSTOM_INDB_FULL_PATH
+
+	CUSTOM_INDB_FILE=`basename $CUSTOM_INDB_FULL_PATH`
+	ln -sf $CUSTOM_INDB_FULL_PATH /etc/bind/zones/custom/$CUSTOM_INDB_FILE
+
+	# revdb
+	CUSTOM_REVDB_FULL_PATH="$DNS_CUSTOM_ZONES_DIR/$DOMAIN_NAME.rev.db"
+	cat $DNS_CUSTOM_REVDB_TEMPLATE |	\
+		sed -e "s/@@OPENQRM_SERVER_DOMAIN@@/$DOMAIN_NAME/g" |	\
+		sed -e "s/@@OPENQRM_SERVER_IP_ADDRESS@@/$NS_IP/g" |	\
+		sed -e "s/@@OPENQRM_SERVER_IP_LAST_BYTE@@/$NS_IP_LAST_BYTE/g" > $CUSTOM_REVDB_FULL_PATH
+
+	CUSTOM_REVDB_FILE=`basename $CUSTOM_REVDB_FULL_PATH`
+	ln -sf $CUSTOM_REVDB_FULL_PATH /etc/bind/zones/custom/$CUSTOM_REVDB_FILE
+
+	# add to named.conf.local
+	echo "zone \"$DOMAIN_NAME\" IN {" >> $DNS_NAMED_CONF_LOCAL
+	echo "	type master;" >> $DNS_NAMED_CONF_LOCAL
+	echo "	file \"/etc/bind/zones/custom/$CUSTOM_INDB_FILE\";" >> $DNS_NAMED_CONF_LOCAL
+	echo "};" >> $DNS_NAMED_CONF_LOCAL
+	echo "zone \"$NS_IP_FIRSTS_BYTES_REV.in-addr.arpa\" {" >> $DNS_NAMED_CONF_LOCAL
+	echo "	type master;" >> $DNS_NAMED_CONF_LOCAL
+	echo "	file \"/etc/bind/zones/custom/$CUSTOM_REVDB_FILE\";" >> $DNS_NAMED_CONF_LOCAL
+	echo "};" >> $DNS_NAMED_CONF_LOCAL
+
+}
+
+
+
+
+function dns_remove_domain() {
+	local DOMAIN_NAME=$1
+	local NS_IP=$2
+	local NS_IP_LAST_BYTE=`echo $NS_IP | cut -d'.' -f 4`
+	local NS_IP_FIRST_BYTE=`echo $NS_IP | cut -d'.' -f1`
+	local NS_IP_SECOND_BYTE=`echo $NS_IP | cut -d'.' -f2`
+	local NS_IP_THIRD_BYTE=`echo $NS_IP | cut -d'.' -f3`
+	local NS_IP_FIRSTS_BYTES_REV="$NS_IP_THIRD_BYTE.$NS_IP_SECOND_BYTE.$NS_IP_FIRST_BYTE"
+
+	# remove from named.conf.local
+	sed -i -e "/\"$DOMAIN_NAME\" IN/,+3d" $DNS_NAMED_CONF_LOCAL
+	sed -i -e "/\"$NS_IP_FIRSTS_BYTES_REV.in-addr.arpa\"/,+3d" $DNS_NAMED_CONF_LOCAL
+
+	# indb
+	CUSTOM_INDB_FULL_PATH="$DNS_CUSTOM_ZONES_DIR/$DOMAIN_NAME.in.db"
+	CUSTOM_INDB_FILE=`basename $CUSTOM_INDB_FULL_PATH`
+	rm -f $CUSTOM_INDB_FULL_PATH /etc/bind/zones/custom/$CUSTOM_INDB_FILE
+
+	# revdb
+	CUSTOM_REVDB_FULL_PATH="$DNS_CUSTOM_ZONES_DIR/$DOMAIN_NAME.rev.db"
+	CUSTOM_REVDB_FILE=`basename $CUSTOM_REVDB_FULL_PATH`
+	rm -f $CUSTOM_REVDB_FULL_PATH /etc/bind/zones/custom/$CUSTOM_REVDB_FILE
+
+}
+
+
+
+
+function dns_domain_manage_host() {
+	local MANAGE_CMD=$1
+	local DOMAIN_NAME=$2
+	local HOST_IP=$3
+	local HOST_NAME=$4
+	local HOST_IP_LAST_BYTE=`echo $HOST_IP | cut -d'.' -f 4`
+	local HOST_IP_FIRST_BYTE=`echo $HOST_IP | cut -d'.' -f1`
+	local HOST_IP_SECOND_BYTE=`echo $HOST_IP | cut -d'.' -f2`
+	local HOST_IP_THIRD_BYTE=`echo $HOST_IP | cut -d'.' -f3`
+	local HOST_IP_FIRSTS_BYTES_REV="$HOST_IP_THIRD_BYTE.$HOST_IP_SECOND_BYTE.$HOST_IP_FIRST_BYTE"
+
+	# indb
+	CUSTOM_INDB_FULL_PATH="$DNS_CUSTOM_ZONES_DIR/$DOMAIN_NAME.in.db"
+	cat $CUSTOM_INDB_FULL_PATH | grep -v -w $HOST_IP > $CUSTOM_INDB_FULL_PATH.tmp
+	mv -f $CUSTOM_INDB_FULL_PATH.tmp $CUSTOM_INDB_FULL_PATH
+
+	# revdb
+	CUSTOM_REVDB_FULL_PATH="$DNS_CUSTOM_ZONES_DIR/$DOMAIN_NAME.rev.db"
+	cat $CUSTOM_REVDB_FULL_PATH | grep -v -w ^$HOST_IP_LAST_BYTE > $CUSTOM_REVDB_FULL_PATH.tmp
+	mv -f $CUSTOM_REVDB_FULL_PATH.tmp $CUSTOM_REVDB_FULL_PATH
+
+	if [ "$MANAGE_CMD" == "add" ]; then
+		echo "$HOST_NAME	IN	A	$HOST_IP" >> $CUSTOM_INDB_FULL_PATH
+		echo "$HOST_IP_LAST_BYTE	IN	PTR	$HOST_NAME.$DOMAIN_NAME." >> $CUSTOM_REVDB_FULL_PATH
+	fi
+
+	if ! dns_update_serial $CUSTOM_INDB_FULL_PATH; then
+		return 1
+	fi
+	if ! dns_update_serial $CUSTOM_REVDB_FULL_PATH; then
+		return 1
+	fi
+
+}
+
+
+
+
+
+
+
+
+function dns_reload() {
+	local LAST_BACKUP_TIMESTAMP=$1
+	if ! $DNS_INIT reload; then
+		# restore
+		dns_zone_restore $LAST_BACKUP_TIMESTAMP
+		# retry restart again
+		$DNS_INIT stop
+		if ! $DNS_INIT start; then
+		    return 1
+		fi
+	fi
+	# restart name service cache daemon if installed
+	if [ -x /etc/init.d/nscd ]; then
+		/etc/init.d/nscd restart
+	fi
+	return 0
+}
+
+
+function dns_zone_backup() {
+	TIMESTAMP=`date +%s`
+	mkdir -p $BIND_BACKUP_DIR/$TIMESTAMP
+	cp -a $DNS_CUSTOM_ZONES_DIR/* $BIND_BACKUP_DIR/$TIMESTAMP/ 2>/dev/null
+	echo $TIMESTAMP
+}
+
+
+function dns_remove_zone_backup() {
+	local LAST_BACKUP_TIMESTAMP=$1
+	if [ "$LAST_BACKUP_TIMESTAMP" == ""  ]; then
+	    return
+	fi
+	if [ -d $BIND_BACKUP_DIR/$LAST_BACKUP_TIMESTAMP ]; then
+		rm -f $BIND_BACKUP_DIR/$LAST_BACKUP_TIMESTAMP/*
+		rmdir $BIND_BACKUP_DIR/$LAST_BACKUP_TIMESTAMP
+	fi
+}
+
+
+function dns_zone_restore() {
+	local LAST_BACKUP_TIMESTAMP=$1
+	if [ "$LAST_BACKUP_TIMESTAMP" == ""  ]; then
+	    return
+	fi
+	cp -a $BIND_BACKUP_DIR/$LAST_BACKUP_TIMESTAMP/* $DNS_CUSTOM_ZONES_DIR/
+}
+
+
+
+function dns_update_serial() {
+	local ZONE_FILE=$1
+	if [ ! -e $ZONE_FILE ]; then
+		return 1
+	fi
+	SERIAL_NO="`cat $ZONE_FILE | grep -i ';.*erial' | awk '{print $1}'`"
+	if [ "$SERIAL_NO" == "" ]; then
+		return 1
+	elif [ "$SERIAL_NO" -ge 0 ]; then
+		SERIAL_NO_NEW=$((SERIAL_NO+1))
+		sed -i -e "s/$SERIAL_NO.*;.*erial/$SERIAL_NO_NEW ; Serial/g" $ZONE_FILE
+		return 0
+	fi
+}

@@ -1,0 +1,8 @@
+clear
+echo '#################### Please notice !! #################'
+echo '# The distributed system management openQRM feature   #'
+echo '# local-server is available in the Enterprise Edtion! #'
+echo '#                                                     #'
+echo '# Please check http://www.openqrm-enterprise.com/     #'
+echo '#######################################################'
+echo ''

@@ -1,0 +1,33 @@
+.TH OPENQRM 1
+
+.SH NAME openqrm \- The openQRM commandline utility
+
+.SH SYNOPSIS openqrm [\-option ...]
+
+	openqrm kernel add -n <name> -v <version> -u <username> -p <password> [-l <location> -i <initramfs/ext2> -t <path-to-initrd-template-file>]
+
+	openqrm kernel remove -n <name> -u <username> -p <password>
+
+	openqrm state backup -n <name>
+
+	openqrm state restore -n <name>
+
+	openqrm state remove -n <name>
+
+	openqrm state list
+
+.SH DESCRIPTION \fIopenqrm\fP is the openQRM commandline util.
+It manages kernels and the openQRM state.
+
+.PP It was written for http://www.openqrm.org
+
+.SH COPYRIGHT Copyright 2021, OPENQRM AUSTRALIA PTY LTD
+
+openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+The latest version of this license can be found here: src/doc/LICENSE.txt
+By using this software, you acknowledge having read this license and agree to be bound thereby.
+
+.SH AUTHORS OPENQRM AUSTRALIA PTY LTD
+E-mail :  <info@openqrm-enterprise.com>

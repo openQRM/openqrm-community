@@ -1,0 +1,46 @@
+#!/bin/bash
+# This function gets called after writing the resource pxe-config file
+# It re-writes the config localboot
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+
+
+function local_server_assign_hook() {
+
+	local OPENQRM_RESOURCE_ID=$1
+	local OPENQRM_KERNEL_NAME=$2
+	local OPENQRM_RESOURCE_PXELINUXCFG_FILE=$3
+	local OPENQRM_RESOURCE_MAC=`echo $OPENQRM_RESOURCE_PXELINUXCFG_FILE | sed -e "s/01-//g" | sed -e "s/-/:/g"`
+
+	if ! echo $OPENQRM_KERNEL_NAME | grep default 1>/dev/null; then
+		if [ "$OPENQRM_KERNEL_NAME" == "resource$OPENQRM_RESOURCE_ID" ]; then
+			echo "local-server-plugin: Running assign hook with $OPENQRM_RESOURCE_ID $OPENQRM_KERNEL_NAME $OPENQRM_RESOURCE_PXELINUXCFG_FILE"
+			echo "local-server-plugin: Running assign hook with $OPENQRM_RESOURCE_ID $OPENQRM_KERNEL_NAME $OPENQRM_RESOURCE_PXELINUXCFG_FILE" | logger
+
+			# get more infos about the resource
+			openqrm_get_resource_parameter $OPENQRM_RESOURCE_MAC
+			if echo $resource_capabilities | grep TYPE | grep local-server 1>/dev/null; then
+				openqrm_server_set_boot local $resource_id $resource_mac $resource_ip
+			fi
+		else
+			echo "local-server-plugin: Resource $OPENQRM_RESOURCE_ID netbooting. Skipping local-assign" | logger
+		fi
+	fi
+
+}
+

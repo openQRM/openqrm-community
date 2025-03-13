@@ -1,0 +1,21 @@
+In this directory stores configuration items for third-party components
+
+Third-party components used by openQRM :
+
+busybox
+-> we will compile our own, busybox binary since 
+   we need special features of busybox which are not
+   enabled/available on (most) standard linux-distributions
+
+hwsetup
+-> for hardware detection during the initrd stage
+
+kudzu-knoppix
+-> requried by hwsetup
+
+hwdata-knoppix
+-> required by hwsetup
+
+defaultkernel
+-> this is the kernel for creating the default boot-image from
+

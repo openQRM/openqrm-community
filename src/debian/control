@@ -1,0 +1,16 @@
+Source: OPENQRM_PACKAGE_NAME
+Section: admin
+Priority: extra
+Maintainer: OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+Build-Depends: debhelper, bzip2, sudo, rpcbind, rsync, zlib1g-dev, wget, tar, bzip2, unzip, wget, netbase, patch, udev, lvm2, ethtool
+Standards-Version: 3.8.2
+Homepage: http://www.openqrm.org
+
+Package: OPENQRM_PACKAGE_NAME
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, OPENQRM_PACKAGE_DEPENDENCIES
+Conflicts: OPENQRM_PACKAGE_CONFLICTS
+Description: Cloud Computing Platform
+ openQRM is a fully automated, rapid deployment system including
+ VM-Management, Monitoring, High-Availability and Storage-Management.
+ It provides a plug-able open-source Cloud Computing platform.

@@ -1,0 +1,679 @@
+#!/bin/bash
+# openqrm-server	openQRM-server init script
+#
+# chkconfig: 2345 98 24
+# description: openQRM is the next generation Linux Data Center management
+
+# support for LSB init script
+### BEGIN INIT INFO
+# Provides: openqrm
+# Required-Start: $local_fs $network $remote_fs
+# Required-Stop: $local_fs $network $remote_fs
+# Default-Start:  2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: openQRM-Server init script
+# Description: openQRM-Server init script
+### END INIT INFO
+
+#
+# openQRM Enterprise developed by OPENQRM AUSTRALIA PTY LTD.
+#
+# All source code and content (c) Copyright 2021, OPENQRM AUSTRALIA PTY LTD unless specifically noted otherwise.
+#
+# This source code is released under the GNU General Public License version 2, unless otherwise agreed with OPENQRM AUSTRALIA PTY LTD.
+# The latest version of this license can be found here: src/doc/LICENSE.txt
+#
+# By using this software, you acknowledge having read this license and agree to be bound thereby.
+#
+#           http://openqrm-enterprise.com
+#
+# Copyright 2021, OPENQRM AUSTRALIA PTY LTD <info@openqrm-enterprise.com>
+#
+
+export LANG=C
+PATH=/usr/bin:/sbin:/bin:/usr/sbin:$PATH
+export PATH
+LOCKFILE=/var/lock/subsys/openqrm
+mkdir -p $(dirname $LOCKFILE)
+# a new line for sed
+NEWLINE='
+'
+
+# unset http_proxy environment
+unset http_proxy
+unset https_proxy
+
+# find the openqrm-server-base-dir
+readlink() {
+	local path=$1 ll
+	if [ -L "$path" ]; then
+		ll="$(LC_ALL=C ls -l "$path" 2>/dev/null)" &&
+			echo "${ll/* -> /}"
+	else
+		return 1
+	fi
+}
+
+SCRIPT=$0
+while [ -L "$SCRIPT" ]; do
+	SRC=$(readlink $SCRIPT)
+	if [ "${SRC:0:1}" != "/" ]; then
+		SRC=$(dirname $SCRIPT)/$SRC
+	fi
+	SCRIPT=$SRC
+done
+export OPENQRM_SERVER_BASE_DIR=$(pushd $(dirname $SCRIPT)/../../../ 1>/dev/null && pwd && popd 1>/dev/null)
+
+# get the openqrm-server configuration + functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/include/openqrm-server-functions
+. $OPENQRM_SERVER_BASE_DIR/openqrm/etc/db/$OPENQRM_DATABASE_TYPE/openqrm-$OPENQRM_DATABASE_TYPE-functions
+
+# 64bit ?
+if ((1 == 1 << 32)); then
+	echo "ERROR: openQRM requires a 64bit operating system!!"
+	exit 1
+fi
+
+# functions
+
+function stop_exec_subsystem_force() {
+	kill $(ps ax | grep dropbear | grep -v grep | grep openqrm | awk {' print $1 '}) 2>/dev/null || true
+	kill $(ps ax | grep openqrm-cmd-queue | grep -v grep | awk {' print $1 '}) 2>/dev/null || true
+	kill $(ps ax | grep openqrm-rabbitmq-cmd-queue | grep -v grep | awk {' print $1 '}) 2>/dev/null || true
+	kill $(ps ax | grep openqrm-monitord | grep -v grep | awk {' print $1 '}) 2>/dev/null || true
+	return 0
+}
+
+function php_config_optimise() {
+
+	#PHP_INI_PATH=$(php --ini | grep Loaded | cut -d' ' -f12)
+	PHP_MAJOR_VERSION=$(php --ini | grep Loaded | cut -d'/' -f4)
+
+	PHP_VARIANTS="cli apache2 fpm cgi"
+
+	for VARIANTS in $PHP_VARIANTS
+	do
+		# care about php disable_functions,  in php.ini
+		if [ -f /etc/php/$PHP_MAJOR_VERSION/$VARIANTS/php.ini ]; then
+			sed -i -e "s/^disable_functions/;disable_functions/g" /etc/php/$PHP_MAJOR_VERSION/$VARIANTS/php.ini
+
+			#max execution time, building new kernels takes over 5mins
+			sed -i -e "s/^max_execution_time.*/max_execution_time=900/g" /etc/php/$PHP_MAJOR_VERSION/$VARIANTS/php.ini
+
+			#2G max file size uploads
+			sed -i -e "s/^upload_max_filesize.*/upload_max_filesize=2G/g" /etc/php/$PHP_MAJOR_VERSION/$VARIANTS/php.ini
+			sed -i -e "s/^post_max_size.*/post_max_size=2G/g" /etc/php/$PHP_MAJOR_VERSION/$VARIANTS/php.ini
+			sed -i -e "s/^memory_limit.*/memory_limit=2G/g" /etc/php/$PHP_MAJOR_VERSION/$VARIANTS/php.ini
+			sed -i -e "s/^;error_log = syslog/error_log=syslog/g" /etc/php/$PHP_MAJOR_VERSION/$VARIANTS/php.ini
+			sed -i -e "s/^error_reporting.*/error_reporting = E_ALL \& \~E_DEPRECATED \& \~E_STRICT \& \~E_WARNING/g" /etc/php/$PHP_MAJOR_VERSION/$VARIANTS/php.ini
+
+		fi
+	done
+
+}
+
+function openqrm_server_init() {
+
+	echo "First startup detected. Running initialization."
+	# make sure to have all enabled plugins stopped and uninstalled
+	if [ -d $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/ ]; then
+		for OPENQRM_PLUGIN in $(ls $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/); do
+			if [ -x $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN ]; then
+				$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN stop
+				rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN
+			fi
+		done
+	fi
+
+	# do some extra checks for redhat/centos regarding selinux + firewall
+	if [ -f /etc/redhat-release ]; then
+		# selinux disabled ?
+		if selinuxenabled; then
+			echo "ERROR: Found SELinux enabled!"
+			echo "ERROR: Please set SELINUX=disabled in /etc/selinux/config and reboot!"
+			exit 1
+		fi
+		# iptables ?
+		if which iptables 1>/dev/null; then
+			if iptables -L | grep REJECT 1>/dev/null; then
+				echo "NOTICE: Found iptables firewall enabled!"
+				echo "NOTICE: An active firewall may cause troubles during the initialization!"
+				echo "NOTICE: openQRM at least needs access to the following ports : 80, 443, $OPENQRM_EXEC_PORT"
+				echo
+				echo "NOTICE: Press 'c' to continue with the current iptables firewall configuration"
+				echo "NOTICE: Press 's' to stop the iptables firewall for the initialization"
+				while (:); do
+					read -n1 IPTABLES
+					if [ "$IPTABLES" == "c" ]; then
+						break
+					fi
+					if [ "$IPTABLES" == "s" ]; then
+						break
+					fi
+				done
+				if [ "$IPTABLES" == "c" ]; then
+					echo "... continuing with the current iptables firewall configuration"
+				elif [ "$IPTABLES" == "s" ]; then
+					echo "NOTICE: Stopping the iptables firewall"
+					if [ -x /etc/init.d/iptables ]; then
+						/etc/init.d/iptables stop
+					else
+						iptables --flush
+					fi
+				else
+					echo "ERROR: No such option!"
+					exit 1
+				fi
+
+			fi
+		fi
+	fi
+
+	#update php ini with openQRM preferred options
+	php_config_optimise
+
+	# link the web application directory to the documentroot
+	HTPASSWD="htpasswd"
+	echo -n " Creating custom apache config.."
+	if [ -f /etc/debian_version ]; then
+		ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/web/ $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm
+		# the default apache config normally does not allow to override the authconfig (needed for basic auth)
+		# so we allow it for the openqrm directory
+		APACHE_CUSTOM_CONFIG_DIR="/etc/apache2/conf.d"
+		# support for Ubuntu 14.04 - new apache enabled-conf dir
+		if [ -d /etc/apache2/conf-enabled ]; then
+			APACHE_CUSTOM_CONFIG_DIR="/etc/apache2/conf-enabled"
+			# preserve backwards compatibility for other projects e.g. linuxcoe
+			ln -sf /etc/apache2/conf-enabled /etc/apache2/conf.d
+			cat $OPENQRM_SERVER_BASE_DIR/openqrm/etc/httpd/openqrm-httpd-vhost.conf |
+				sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" |
+				sed -e "s#@@OPENQRM_WEBSERVER_DOCUMENT_ROOT@@#$OPENQRM_WEBSERVER_DOCUMENT_ROOT#g" \
+					>$APACHE_CUSTOM_CONFIG_DIR/openqrm-httpd.conf
+		else
+			cat $OPENQRM_SERVER_BASE_DIR/openqrm/etc/httpd/openqrm-httpd.conf | sed -e "s#OPENQRM_WEBSERVER_DOCUMENT_ROOT#$OPENQRM_WEBSERVER_DOCUMENT_ROOT#g" >>$APACHE_CUSTOM_CONFIG_DIR/openqrm-httpd.conf
+		fi
+		echo ".$APACHE_CUSTOM_CONFIG_DIR/openqrm-httpd.conf"
+
+	elif [ -f /etc/redhat-release ]; then
+		APACHE_CUSTOM_CONFIG_DIR="/etc/httpd/conf.d"
+		ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/web/ $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm
+		cat $OPENQRM_SERVER_BASE_DIR/openqrm/etc/httpd/openqrm-httpd.conf | sed -e "s#OPENQRM_WEBSERVER_DOCUMENT_ROOT#$OPENQRM_WEBSERVER_DOCUMENT_ROOT#g" >>$APACHE_CUSTOM_CONFIG_DIR/openqrm-httpd.conf
+		echo ".$APACHE_CUSTOM_CONFIG_DIR/openqrm-httpd.conf"
+	elif [ -f /etc/SuSE-release ]; then
+		APACHE_CUSTOM_CONFIG_DIR="/etc/apache2/conf.d"
+		HTPASSWD="htpasswd2"
+		ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/web/ $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm
+		cat $OPENQRM_SERVER_BASE_DIR/openqrm/etc/httpd/openqrm-httpd.conf | sed -e "s#OPENQRM_WEBSERVER_DOCUMENT_ROOT#$OPENQRM_WEBSERVER_DOCUMENT_ROOT#g" >>$APACHE_CUSTOM_CONFIG_DIR/openqrm-httpd.conf
+		echo ".$APACHE_CUSTOM_CONFIG_DIR/openqrm-httpd.conf"
+		# we need a special treatment for suse to allow followsymlinks in the default-setup
+		DEFAULT_CONF=/etc/apache2/default-server.conf
+		NEW_CONF=/etc/apache2/default-server.conf.new
+		if [ -f $DEFAULT_CONF ]; then
+			if grep Options $DEFAULT_CONF | grep -v "#" | head -n1 | grep None 1>/dev/null; then
+				echo "Need to allow FollowSymLinks in default-server.conf"
+				OLD_IFS=$IFS
+				IFS=$NEWLINE
+				for LINE in $(cat $DEFAULT_CONF); do
+					if echo $LINE | grep -v '#' | grep Options | grep None 1>/dev/null; then
+						echo "  Options FollowSymLinks" >>$NEW_CONF
+					else
+						echo $LINE >>$NEW_CONF
+					fi
+				done
+				IFS=$OLD_IFS
+				cp -f $DEFAULT_CONF $DEFAULT_CONF.org
+				mv -f $NEW_CONF $DEFAULT_CONF
+			fi
+		fi
+	fi
+
+	# ssl ?
+	echo -n " Checking $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf for OPENQRM_WEB_PROTOCOL=https.."
+	if [ "$OPENQRM_WEB_PROTOCOL" == "https" ]; then
+		echo ".yes."
+		echo "  Setting up SSL secured openQRM website."
+		# apache ssl setup, on centos it is enabled by default
+		if [ -f /etc/debian_version ]; then
+			if ! a2enmod ssl; then
+				echo "ERROR: Could not enable SSL in the Apache webserver ! Exiting."
+				return 1
+			fi
+		fi
+
+		# check for hostname settings
+		ETCHOSTS=/etc/hosts
+		MYHOSTNAME=$(hostname)
+
+		if grep $MYHOSTNAME $ETCHOSTS | grep 127.0. 1>/dev/null || ! grep $MYHOSTNAME $ETCHOSTS 1>/dev/null; then
+			echo "   Found system hostname $MYHOSTNAME connected to loopback (127.0) interface"
+			echo "   [WARNING] This could cause problems when enabling SSL on the apache webserver."
+
+			##			AVAIL_IPS=`ifconfig -a | grep -v inet6  | grep -B1 inet | grep -i -A1 link | grep -v lo | grep inet | grep -v 127.0.0.1 | cut -d':' -f2 | awk {' print $1 '}`
+			#			AVAIL_IPS=`ifconfig -a | grep -v inet6  | grep -B1 inet | grep -i -A1 UP | grep -v lo | grep inet | grep -v 127.0.0.1 | cut -d':' -f2 | awk {' print $2 '}`
+			AVAIL_IPS=$(ip -4 addr | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v 127.0.0.1)
+
+			while (true); do
+				echo
+				echo "   Please type one of the following ip addresses to be connected to this"
+				echo "   hostname: $MYHOSTNAME in $ETCHOSTS (Your current hosts file will be backed up):"
+				echo "$AVAIL_IPS"
+				echo -n "> "
+				read HOSTIP
+				if openqrm_validate_ip "$HOSTIP"; then
+					if echo $AVAIL_IPS | grep "$HOSTIP" 1>/dev/null; then
+						break
+					else
+						echo "$HOSTIP is not available on this system!"
+					fi
+				else
+					echo "$HOSTIP is invalid!"
+				fi
+			done
+			echo "   Connecting $HOSTIP to $MYHOSTNAME in $ETCHOSTS (we made a backup $ETCHOSTS.openqrm.bak).."
+			# remove first
+			sed -i -e "s/.*$MYHOSTNAME.*//g" $ETCHOSTS
+			sed -i -e "s/.*openQRM.*//g" $ETCHOSTS
+			# make sure we did not remove the loopback entry copmletely
+			if ! grep "127.0.*.localhost" $ETCHOSTS 1>/dev/null; then
+				echo "127.0.0.1 localhost" >>$ETCHOSTS.new
+				cat $ETCHOSTS >>$ETCHOSTS.new
+				cp -f $ETCHOSTS $ETCHOSTS.openqrm.bak
+				mv -f $ETCHOSTS.new $ETCHOSTS
+			fi
+			echo "# added by openQRM" >>$ETCHOSTS
+			echo "$HOSTIP	$MYHOSTNAME" >>$ETCHOSTS
+		fi
+
+		# creating the cert + key
+		PRIVATE_KEY=$OPENQRM_SERVER_BASE_DIR/openqrm/etc/ssl/private/openqrm-private.key
+		CERTIFICATE_FILE=$OPENQRM_SERVER_BASE_DIR/openqrm/etc/ssl/cert/openqrm.crt
+		CHAIN_FILE=$OPENQRM_SERVER_BASE_DIR/openqrm/etc/ssl/chain/openqrm.csr
+		VALID_DAYS=3650
+		mkdir -p $(dirname $PRIVATE_KEY)
+		mkdir -p $(dirname $CERTIFICATE_FILE)
+		mkdir -p $(dirname $CHAIN_FILE)
+		rm -f $PRIVATE_KEY $CERTIFICATE_FILE $CHAIN_FILE
+
+		sleep 2
+		clear
+		echo
+		echo "########## Creating new private/public-keys for server $MYHOSTNAME ##########"
+		echo
+		echo "   -> please go on with the defaults!"
+		echo "   -> for 'Common Name' please use $MYHOSTNAME"
+		echo "   -> please provide an empty password!"
+		echo
+		echo "#############################################################################"
+		sleep 4
+		echo
+		openssl genrsa -des3 -passout pass:xXxXxX -out /tmp/server.pass.key 2048
+		openssl rsa -passin pass:xXxXxX -in /tmp/server.pass.key -out $PRIVATE_KEY
+		rm -f /tmp/server.pass.key
+		openssl req -new -key $PRIVATE_KEY -out $CHAIN_FILE
+		openssl x509 -req -days 365 -in $CHAIN_FILE -signkey $PRIVATE_KEY -out $CERTIFICATE_FILE
+
+		echo
+		echo -n "   Creating custom apache ssl config.."
+		cat $OPENQRM_SERVER_BASE_DIR/openqrm/etc/httpd/openqrm-https.conf |
+			sed -e "s#@@OPENQRM_SERVER_BASE_DIR@@#$OPENQRM_SERVER_BASE_DIR#g" |
+			sed -e "s#@@OPENQRM_WEBSERVER_DOCUMENT_ROOT@@#$OPENQRM_WEBSERVER_DOCUMENT_ROOT#g" \
+				>$APACHE_CUSTOM_CONFIG_DIR/openqrm-https.conf
+		echo ".$APACHE_CUSTOM_CONFIG_DIR/openqrm-https.conf"
+		# check if to adjust the error log location
+		if [ -f /etc/redhat-release ]; then
+			sed -i -e "s/apache2/httpd/g" $APACHE_CUSTOM_CONFIG_DIR/openqrm-https.conf
+		fi
+	fi
+
+	openqrm_webserver reload
+
+	# create the .htaccess file
+	cat $OPENQRM_SERVER_BASE_DIR/openqrm/etc/httpd/openqrm-htaccess.conf | sed -e "s#OPENQRM_WEBSERVER_DOCUMENT_ROOT#$OPENQRM_WEBSERVER_DOCUMENT_ROOT#g" >$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/.htaccess
+	# create the default admin user
+	$HTPASSWD -bc $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/.htpasswd openqrm openqrm
+	chmod 666 $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/.htpasswd
+
+	# create the image-auth and upload dir
+	mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/web/action/image-auth
+	chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/web/action/image-auth
+	mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/tmp
+	chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/web/base/tmp
+
+	# link the tftpboot/boot dir to the boot-services
+	rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/boot
+	ln -sf $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/boot/ $OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/boot
+
+	# init the remote execution layer
+	case "$OPENQRM_EXECUTION_LAYER" in
+	dropbear)
+		# init the openQRM exec-mechanism via dropbear
+		echo " Initializing dropbear..."
+		# on debian and ubuntu, lets make sure it is not started as a service due to our install
+		if test -e /etc/default/dropbear; then
+			if grep '^NO_START=0' /etc/default/dropbear 1>/dev/null || ! grep 'NO_START' /etc/default/dropbear 1>/dev/null; then
+				# looks like it has been set to start by default; let's revert that
+				/etc/init.d/dropbear stop
+				sed -i -e "s/^NO_START=0/NO_START=1/g" /etc/default/dropbear
+				# just in case it was never there in the first place
+				echo "NO_START=1" >>/etc/default/dropbear
+			fi
+		fi
+		# prepare dropbear config
+		/bin/rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear
+		mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/
+		if ! dropbearkey -t rsa -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/dropbear_rsa_host_key; then
+			echo "ERROR: Could not create host key with dropbearkey. Please check to have dropbear installed correctly!"
+			return 1
+		fi
+		# allow the webserver user to read it
+		chmod 600 $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/dropbear_rsa_host_key
+
+		# create authorized_keys
+		PUBLIC_KEY=$(dropbearkey -y -f $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/dropbear_rsa_host_key | grep ssh)
+		if [ ! -d /root/.ssh ]; then
+			mkdir /root/.ssh
+			chmod 700 /root/.ssh
+		fi
+		echo "  Adding public key to /root/.ssh/authorized_keys..."
+		echo
+		if [ ! -f /root/.ssh/authorized_keys ]; then
+			echo "$PUBLIC_KEY" >/root/.ssh/authorized_keys
+			chmod 600 /root/.ssh/authorized_keys
+		else
+			OPENQRM_HOST=$(echo $PUBLIC_KEY | awk {' print $3 '})
+			if grep $OPENQRM_HOST /root/.ssh/authorized_keys 1>/dev/null; then
+				sed -i -e "s#.*$OPENQRM_HOST.*##g" /root/.ssh/authorized_keys
+			fi
+			echo "$PUBLIC_KEY" >>/root/.ssh/authorized_keys
+			chmod 600 /root/.ssh/authorized_keys
+		fi
+		# and put it in the boot-service dir for the resources to download
+		echo "$PUBLIC_KEY" >$OPENQRM_SERVER_BASE_DIR/openqrm/web/boot-service/openqrm-server-public-rsa-key
+		# create the command-queue dir
+		mkdir -p $OPENQRM_SERVER_BASE_DIR/openqrm/var/spool/ $OPENQRM_SERVER_BASE_DIR/openqrm/var/lock/
+		chmod 777 $OPENQRM_SERVER_BASE_DIR/openqrm/var/spool $OPENQRM_SERVER_BASE_DIR/openqrm/var/lock/
+		;;
+
+	rabbitmq)
+		echo "- Initializing RabbitMQ as command execution mechanism"
+		;;
+	*)
+		echo "ERROR: Un-supported command execution layer $openqrm_execution_layer ! Exiting."
+		return 1
+		;;
+	esac
+
+	# here we start the init
+	# add automatic startup
+	openqrm_chkconfig add openqrm
+
+	# create unconfigured file containing a list of available network cards to setup openQRM on
+	ip a s | grep ^[0-9] | cut -d':' -f2 | awk '{ print $1 }' | grep -v lo >$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/unconfigured
+
+	# use the first nic to preconfigure the openqrm-server.conf
+	FIRST_NIC=$(ip a s | grep ^[0-9] | cut -d':' -f2 | awk '{ print $1 }' | grep -v lo | head -n 1)
+	if [ "$FIRST_NIC" != "" ]; then
+		sed -i -e "s/OPENQRM_SERVER_INTERFACE=.*/OPENQRM_SERVER_INTERFACE=$FIRST_NIC/g" $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf
+	fi
+
+}
+
+function openqrm_server_uninstall() {
+
+	echo "Uninstalling openQRM-server ver. $OPENQRM_SERVER_VERSION."
+	# backup state
+	chmod +x $OPENQRM_SERVER_BASE_DIR/openqrm/etc/db/$OPENQRM_DATABASE_TYPE/openqrm-$OPENQRM_DATABASE_TYPE-functions
+	openqrm_server_state backup uninstall
+
+	# stop first
+	openqrm_server_stop
+
+	# drop db
+	$OPENQRM_SERVER_BASE_DIR/openqrm/etc/db/$OPENQRM_DATABASE_TYPE/openqrm-$OPENQRM_DATABASE_TYPE-functions drop
+
+	# remove automatic startup
+	openqrm_chkconfig del openqrm
+	rm -f /etc/init.d/openqrm
+
+	# removing the apache web + config
+	rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm
+	if [ -f /etc/debian_version ]; then
+		rm -f /etc/apache2/conf.d/openqrm-httpd.conf
+		rm -f /etc/apache2/conf.d/openqrm-https.conf
+	elif [ -f /etc/redhat-release ]; then
+		rm -f /etc/httpd/conf.d/openqrm-httpd.conf
+		rm -f /etc/httpd/conf.d/openqrm-https.conf
+	elif [ -f /etc/SuSE-release ]; then
+		rm -f /etc/apache2/conf.d/openqrm-httpd.conf
+		rm -f /etc/apache2/conf.d/openqrm-https.conf
+	fi
+	openqrm_webserver reload
+
+	# remove default file to re-init at next startup
+	rm -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/default
+
+	case "$OPENQRM_EXECUTION_LAYER" in
+	dropbear)
+		# remove dropbear key
+		rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear
+		rm -rf $OPENQRM_SERVER_BASE_DIR/openqrm/var
+		;;
+	esac
+	echo "Uninstallation of openQRM-server finished."
+}
+
+function openqrm_server_start() {
+
+	if [ -f ${LOCKFILE} ]; then
+		echo "openQRM-server ver. $OPENQRM_SERVER_VERSION is already running."
+		return 1
+	fi
+	if [ -x /usr/bin/screen.real ]; then
+		RUNSCREEN="/usr/bin/screen.real"
+	else
+		RUNSCREEN=$(which screen)
+	fi
+	# make sure apache is up
+	if [ -f /etc/debian_version ]; then
+		if ! ps ax | grep apache2 | grep -v grep 1>/dev/null; then
+			openqrm_webserver start
+		fi
+	elif [ -f /etc/redhat-release ]; then
+		if ! ps ax | grep httpd | grep -v grep 1>/dev/null; then
+			openqrm_webserver start
+			openqrm_chkconfig add httpd
+		fi
+		if ! ps ax | grep mysqld | grep -v grep 1>/dev/null; then
+			if [ -f /etc/centos-release ]; then
+				service mysql start
+				service mariadb start
+				systemctl enable mysql
+				systemctl enable httpd
+			else
+				# make sure the db is up
+				/etc/init.d/mysqld start
+				openqrm_chkconfig add mysqld
+			fi
+		fi
+	elif [ -f /etc/SuSE-release ]; then
+		if ! ps ax | grep apache | grep -v grep 1>/dev/null; then
+			openqrm_webserver start
+		fi
+	fi
+
+	# check if we are at first-startup, if yes do initialization
+	if [ ! -f $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/default ]; then
+		openqrm_server_init
+	fi
+	echo "Starting the openQRM-server ver. $OPENQRM_SERVER_VERSION."
+
+	# start the execution layer
+	stop_exec_subsystem_force
+	case "$OPENQRM_EXECUTION_LAYER" in
+	dropbear)
+		# start the openqrm-execd daemon
+		if ! dropbear -p $OPENQRM_EXEC_PORT -r $OPENQRM_SERVER_BASE_DIR/openqrm/etc/dropbear/dropbear_rsa_host_key; then
+			echo "ERROR: Could not start the dropbear server. Please check to have dropbear installed correctly!"
+			return 1
+		fi
+		# start the openqrm-cmd-queue
+		$RUNSCREEN -dmS cmdqueue $OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-cmd-queue
+		;;
+	rabbitmq)
+		echo "- Using RabbitMQ as command execution mechanism"
+		if [ "$OPENQRM_RABBITMQ_PASSWORD" == "" ]; then
+			echo "ERROR: OPENQRM_RABBITMQ_PASSWORD not set in $OPENQRM_SERVER_BASE_DIR/openqrm/etc/openqrm-server.conf!"
+			return 1
+		fi
+		openqrm_server_get_config
+		export RABBITMQ_SERVER="$OPENQRM_SERVER_IP_ADDRESS"
+		export RABBITMQ_PASSWORD="$OPENQRM_RABBITMQ_PASSWORD"
+		export RABBITMQ_QUEUE_NAME="$OPENQRM_SERVER_IP_ADDRESS"
+		$RUNSCREEN -dmS cmdqueue $OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-rabbitmq-cmd-queue
+		;;
+	*)
+		echo "ERROR: Un-supported command execution layer $openqrm_execution_layer ! Exiting."
+		return 1
+		;;
+	esac
+	touch ${LOCKFILE}
+
+	if [ -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/unconfigured ]; then
+		echo
+		if [ "$OPENQRM_SERVER_IP_ADDRESS" != "" ]; then
+			echo "Initialization complete. Please configure your openQRM Server at: $OPENQRM_WEB_PROTOCOL://$OPENQRM_SERVER_IP_ADDRESS/openqrm/"
+		else
+			echo "Initialization complete.  Please configure your openQRM Server at: $OPENQRM_WEB_PROTOCOL://[server-ip-address]/openqrm/"
+		fi
+		echo "-> User: openqrm  -> Password: openqrm"
+		echo
+		sleep 2
+	else
+		# check openqrm-interface
+		if ! ifconfig | grep ^"$OPENQRM_SERVER_INTERFACE" 1>/dev/null; then
+			ifup "$OPENQRM_SERVER_INTERFACE"
+			sleep 2
+		fi
+		ifconfig "$OPENQRM_SERVER_INTERFACE" | grep inet 1>/dev/null 2>&1 ||
+			{
+				echo "Interface $OPENQRM_SERVER_INTERFACE is down. Please configure and activate it and try again"
+				return 1
+			}
+
+		CONFIGURED_IP=$(cat $OPENQRM_SERVER_BASE_DIR/openqrm/tftpboot/pxelinux.cfg/default | grep "openqrm=" | sed -e "s/.*openqrm=//" | awk {' print $1 '})
+		OPENQRM_SERVER_IP_ADDRESS=$(ip a s $OPENQRM_SERVER_INTERFACE | grep -w $OPENQRM_SERVER_INTERFACE$ | grep -w inet | awk '{ print $2 }' | cut -d'/' -f1)
+
+		if [ "$OPENQRM_SERVER_IP_ADDRESS" != "$CONFIGURED_IP" ]; then
+			echo "$OPENQRM_SERVER_IP_ADDRESS  != $CONFIGURED_IP" >/tmp/lll-ip-check
+			echo -e "Interface $OPENQRM_SERVER_INTERFACE has the wrong ip-configuration.\n" \
+				"       The openQRM-server is configured to have the ip-address $CONFIGURED_IP\n" \
+				"       but the interface $OPENQRM_SERVER_INTERFACE is running with the ip-address $OPENQRM_SERVER_IP_ADDRESS"
+
+			# create lockfile again to forcre re-configuration
+			ip a s | grep ^[0-9] | cut -d':' -f2 | awk '{ print $1 }' | grep -v lo >$OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/unconfigured
+			echo
+			if [ "$OPENQRM_SERVER_IP_ADDRESS" != "" ]; then
+				echo "Please re-configure your openQRM Server at : http://$OPENQRM_SERVER_IP_ADDRESS/openqrm/"
+			else
+				echo "Please re-configure your openQRM Server at : http://[server-ip-address]/openqrm/"
+			fi
+			echo
+			sleep 2
+			return 1
+		fi
+
+		# and the monitoring infra-structure
+		$RUNSCREEN -dmS monitord $OPENQRM_SERVER_BASE_DIR/openqrm/sbin/openqrm-monitord
+		# start all enabled plugins
+		echo "Starting enabled openQRM-server plugins..."
+		for OPENQRM_PLUGIN in $(ls $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/); do
+			# make sure they are stopped before
+			if [ -e $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.running ]; then
+				if [ -x $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN ]; then
+					$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN stop 1>/dev/null 2>/dev/null
+					touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.openqrm_stopped
+				fi
+			fi
+			if [ -e $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.openqrm_stopped ]; then
+				if [ -x $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN ]; then
+					$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN start
+					rm -f $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.openqrm_stopped
+				fi
+			fi
+		done
+	fi
+
+}
+
+function openqrm_server_stop() {
+
+	if [ ! -f ${LOCKFILE} ]; then
+		echo "openQRM-server ver. $OPENQRM_SERVER_VERSION is not running."
+	else
+		# stop all enabled plugins
+		echo "Stopping enabled openQRM-server plugins..."
+		for OPENQRM_PLUGIN in $(ls $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/); do
+			if [ -e $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.running ]; then
+				if [ -x $OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN ]; then
+					$OPENQRM_SERVER_BASE_DIR/openqrm/plugins/$OPENQRM_PLUGIN/etc/init.d/openqrm-plugin-$OPENQRM_PLUGIN stop
+					touch $OPENQRM_WEBSERVER_DOCUMENT_ROOT/openqrm/base/plugins/$OPENQRM_PLUGIN/.openqrm_stopped
+				fi
+			fi
+		done
+		echo "Stopping the openQRM-server ver. $OPENQRM_SERVER_VERSION."
+		stop_exec_subsystem_force
+		/bin/rm -f ${LOCKFILE}
+	fi
+}
+
+function openqrm_server_status() {
+	if [ -f ${LOCKFILE} ]; then
+		echo "openQRM-server ver. $OPENQRM_SERVER_VERSION is running."
+		exit 0
+	else
+		echo "openQRM-server ver. $OPENQRM_SERVER_VERSION is not running."
+		exit 3
+	fi
+}
+
+# main
+ADDITIONAL_PARAM=$2
+case "$1" in
+start)
+	openqrm_server_start
+	;;
+stop)
+	openqrm_server_stop
+	;;
+status)
+	openqrm_server_status
+	;;
+restart)
+	openqrm_server_stop
+	sleep 1
+	openqrm_server_start
+	;;
+reload)
+	openqrm_server_stop
+	sleep 1
+	openqrm_server_start
+	;;
+force-reload)
+	openqrm_server_stop
+	sleep 1
+	openqrm_server_start
+	;;
+init)
+	openqrm_server_init
+	;;
+uninstall)
+	openqrm_server_uninstall
+	;;
+*)
+	echo "Usage: $0 {start|stop|status|restart|reload|force-reload|init|uninstall}"
+	exit 1
+	;;
+
+esac

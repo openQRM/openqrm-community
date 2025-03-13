@@ -1,0 +1,7 @@
+LAMP setup for openqrm-server.conf :
+
+OPENQRM_DATABASE_TYPE="mysql"                     # supported are : mysql, oracle, db2 and postgres
+OPENQRM_DATABASE_SERVER="localhost"               # ip-address of the database server
+OPENQRM_DATABASE_NAME="openqrm"                   # database name
+OPENQRM_DATABASE_USER="root"                      # database user
+OPENQRM_DATABASE_PASSWORD=""                      # database password

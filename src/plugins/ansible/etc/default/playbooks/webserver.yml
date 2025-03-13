@@ -1,0 +1,8 @@
+---
+- hosts: @@IP@@
+  vars:
+  user: root
+  tasks:
+  - name: my custom command
+    shell: "/bin/echo hallo > /tmp/playbook.cmd"
+  handlers:
